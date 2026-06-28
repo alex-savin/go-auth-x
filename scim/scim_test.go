@@ -61,4 +61,16 @@ func TestSCIMUserLifecycle(t *testing.T) {
 	if patched.Active {
 		t.Fatal("user should be deactivated after PATCH active=false")
 	}
+
+	// PUT replaces the user (reactivate + rename).
+	put := `{"schemas":["urn:ietf:params:scim:schemas:core:2.0:User"],"userName":"a@b.com","active":true,"name":{"formatted":"Renamed"}}`
+	w = do(http.MethodPut, "/scim/v2/Users/"+created.ID, put, "secret")
+	if w.Code != http.StatusOK {
+		t.Fatalf("put: %d %s", w.Code, w.Body.String())
+	}
+	var replaced scimUser
+	_ = json.Unmarshal(w.Body.Bytes(), &replaced)
+	if !replaced.Active {
+		t.Fatal("PUT active=true should reactivate the user")
+	}
 }

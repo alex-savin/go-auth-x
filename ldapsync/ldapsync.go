@@ -33,6 +33,10 @@ type Config struct {
 	GroupFilter     string // default: (objectClass=groupOfNames)
 	AttrGroupName   string // default: cn
 	AttrGroupMember string // default: member (DN values) — use memberUid for posixGroup
+
+	// DeprovisionMissing disables (does not delete) any previously-synced "ldap:" user that was
+	// NOT seen in this run — i.e. they vanished from LDAP. Off by default (additive sync).
+	DeprovisionMissing bool
 }
 
 func (c *Config) withDefaults() {
@@ -73,10 +77,11 @@ func New(cfg Config, dir authx.DirectoryStore) *Syncer {
 
 // Result reports what a sync touched.
 type Result struct {
-	Users       int
-	Groups      int
-	Memberships int
-	Errors      []string
+	Users         int
+	Groups        int
+	Memberships   int
+	Deprovisioned int // "ldap:" users disabled because they vanished from LDAP (if enabled)
+	Errors        []string
 }
 
 func (s *Syncer) dial() (*ldap.Conn, error) {
@@ -117,6 +122,7 @@ func (s *Syncer) Sync() (*Result, error) {
 	if err != nil {
 		return nil, fmt.Errorf("ldap user search: %w", err)
 	}
+	seen := map[string]bool{} // "ldap:<uid>" subjects present in this run
 	for _, e := range users.Entries {
 		uid := e.GetAttributeValue(s.cfg.AttrUID)
 		email := e.GetAttributeValue(s.cfg.AttrEmail)
@@ -130,6 +136,7 @@ func (s *Syncer) Sync() (*Result, error) {
 		}
 		userByDN[strings.ToLower(e.DN)] = au.ID
 		userByUID[uid] = au.ID
+		seen["ldap:"+uid] = true
 		res.Users++
 	}
 
@@ -158,6 +165,22 @@ func (s *Syncer) Sync() (*Result, error) {
 				}
 				if err := s.dir.AddUserToGroup(uid, g.ID); err == nil {
 					res.Memberships++
+				}
+			}
+		}
+	}
+
+	// Deprovision: disable any previously-synced LDAP user that wasn't seen this run.
+	if s.cfg.DeprovisionMissing {
+		all, lerr := s.dir.ListUsers()
+		if lerr != nil {
+			res.Errors = append(res.Errors, fmt.Sprintf("deprovision list: %v", lerr))
+		} else {
+			for _, u := range all {
+				if strings.HasPrefix(u.Sub, "ldap:") && !seen[u.Sub] && !u.Disabled {
+					if err := s.dir.SetUserDisabled(u.ID, true); err == nil {
+						res.Deprovisioned++
+					}
 				}
 			}
 		}

@@ -45,11 +45,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /Users", s.listUsers)
 	mux.HandleFunc("POST /Users", s.createUser)
 	mux.HandleFunc("GET /Users/{id}", s.getUser)
+	mux.HandleFunc("PUT /Users/{id}", s.putUser)
 	mux.HandleFunc("PATCH /Users/{id}", s.patchUser)
 	mux.HandleFunc("DELETE /Users/{id}", s.deleteUser)
 	mux.HandleFunc("GET /Groups", s.listGroups)
 	mux.HandleFunc("POST /Groups", s.createGroup)
 	mux.HandleFunc("GET /Groups/{id}", s.getGroup)
+	mux.HandleFunc("PUT /Groups/{id}", s.putGroup)
 	mux.HandleFunc("PATCH /Groups/{id}", s.patchGroup)
 	mux.HandleFunc("DELETE /Groups/{id}", s.deleteGroup)
 	return s.authMiddleware(mux)
@@ -157,12 +159,17 @@ func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
 		scimError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	// Support the one filter IdPs rely on: userName eq "x".
+	// Filters: `userName eq`, `emails[.value] eq`, `externalId eq` (all map to the email), and
+	// `active eq true|false`. Only the `eq` operator is supported.
 	if f := r.URL.Query().Get("filter"); f != "" {
-		want := extractEqValue(f)
+		field, want := parseEqFilter(f)
 		filtered := users[:0]
 		for _, u := range users {
-			if strings.EqualFold(u.Email, want) {
+			match := strings.EqualFold(u.Email, want)
+			if strings.EqualFold(field, "active") {
+				match = (!u.Disabled) == strings.EqualFold(want, "true")
+			}
+			if match {
 				filtered = append(filtered, u)
 			}
 		}
@@ -234,6 +241,35 @@ func (s *Server) patchUser(w http.ResponseWriter, r *http.Request) {
 	writeSCIM(w, http.StatusOK, toSCIMUser(u))
 }
 
+// putUser replaces a user (name + active; email/userName too). The Sub is preserved.
+func (s *Server) putUser(w http.ResponseWriter, r *http.Request) {
+	cur, err := s.dir.UserByID(pathID(r))
+	if err != nil {
+		scimError(w, http.StatusNotFound, "user not found")
+		return
+	}
+	var in scimUser
+	if json.NewDecoder(r.Body).Decode(&in) != nil || in.UserName == "" {
+		scimError(w, http.StatusBadRequest, "userName required")
+		return
+	}
+	email := in.UserName
+	if len(in.Emails) > 0 && in.Emails[0].Value != "" {
+		email = in.Emails[0].Value
+	}
+	name := in.UserName
+	if in.Name != nil && in.Name.Formatted != "" {
+		name = in.Name.Formatted
+	}
+	if _, uerr := s.dir.UpsertExternalUser(cur.Sub, email, name, true); uerr != nil { // preserve Sub
+		scimError(w, http.StatusInternalServerError, uerr.Error())
+		return
+	}
+	_ = s.dir.SetUserDisabled(cur.ID, !in.Active)
+	u, _ := s.dir.UserByID(cur.ID)
+	writeSCIM(w, http.StatusOK, toSCIMUser(u))
+}
+
 func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
 	// SCIM DELETE = deprovision; we soft-disable (safer than a hard delete of audit history).
 	if err := s.dir.SetUserDisabled(pathID(r), true); err != nil {
@@ -250,6 +286,16 @@ func (s *Server) listGroups(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		scimError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if f := r.URL.Query().Get("filter"); f != "" { // displayName eq "x"
+		_, want := parseEqFilter(f)
+		filtered := gs[:0]
+		for _, g := range gs {
+			if strings.EqualFold(g.Name, want) {
+				filtered = append(filtered, g)
+			}
+		}
+		gs = filtered
 	}
 	resources := make([]scimGroup, 0, len(gs))
 	for _, g := range gs {
@@ -296,6 +342,34 @@ func (s *Server) getGroup(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	scimError(w, http.StatusNotFound, "group not found")
+}
+
+// putGroup replaces a group's membership with the provided set (the canonical Okta/Azure group
+// PUT). Group rename isn't persisted (the directory has no rename); displayName is echoed back.
+func (s *Server) putGroup(w http.ResponseWriter, r *http.Request) {
+	id := pathID(r)
+	var in scimGroup
+	if json.NewDecoder(r.Body).Decode(&in) != nil {
+		scimError(w, http.StatusBadRequest, "invalid Group")
+		return
+	}
+	want := map[uint]bool{}
+	for _, m := range in.Members {
+		if uid, e := strconv.ParseUint(m.Value, 10, 64); e == nil {
+			want[uint(uid)] = true
+		}
+	}
+	current, _ := s.dir.GroupMembers(id)
+	for _, m := range current { // remove members no longer present
+		if !want[m.ID] {
+			_ = s.dir.RemoveUserFromGroup(m.ID, id)
+		}
+	}
+	for uid := range want { // add the desired set (idempotent)
+		_ = s.dir.AddUserToGroup(uid, id)
+	}
+	members, _ := s.dir.GroupMembers(id)
+	writeSCIM(w, http.StatusOK, toSCIMGroup(authx.Group{ID: id, Name: in.DisplayName}, members))
 }
 
 // patchGroup handles membership add/remove operations.
@@ -359,12 +433,15 @@ func (s *Server) schemasEndpoint(w http.ResponseWriter, _ *http.Request) {
 
 // --- tiny parsers ---
 
-// extractEqValue pulls the value out of a `field eq "value"` filter.
-func extractEqValue(filter string) string {
-	if i := strings.Index(strings.ToLower(filter), " eq "); i >= 0 {
-		return strings.Trim(strings.TrimSpace(filter[i+4:]), `"`)
+// parseEqFilter parses a SCIM `field eq "value"` filter into its field + value. Only `eq` is
+// supported (the operator IdPs use for user/group lookups).
+func parseEqFilter(filter string) (field, value string) {
+	lower := strings.ToLower(filter)
+	i := strings.Index(lower, " eq ")
+	if i < 0 {
+		return "", strings.Trim(strings.TrimSpace(filter), `"`)
 	}
-	return ""
+	return strings.TrimSpace(filter[:i]), strings.Trim(strings.TrimSpace(filter[i+4:]), `"`)
 }
 
 // activeFromOp returns the boolean for an `active` replace op (path "active", or value {"active":x}).
