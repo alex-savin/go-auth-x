@@ -75,14 +75,30 @@ GitHub uses REST (`/user` + `/user/emails`, primary+verified required). Identiti
 `(provider, subject)`; a new identity links to a **verified-email** user or creates one, and refuses an
 unverified email squatter (`ErrEmailConflict`).
 
+## Directory: groups, access control, API keys, LDAP & SCIM
+
+An optional capability layer (wire `SetDirectoryStore`; both reference stores implement it):
+
+- **Groups** — first-class, surfaced in the session at login.
+- **Per-group access control** — `RequireGroups("admins")` (Gin) / `RequireGroupsHTTP(...)` (net/http).
+  Works for both session users and API keys (the single-app analog of an IdP's per-client access).
+- **API keys** — `axk_`-prefixed, sha256-at-rest, optional expiry + groups. `APIKeyAuth` (Bearer)
+  middleware; CSRF is correctly skipped for Bearer auth.
+- **Admin REST API** under `/auth/admin` (owner-session or API-key gated): groups, users, API keys.
+- **LDAP sync** (`ldapsync`) — pull users + groups + membership from LDAP/AD on a schedule.
+- **SCIM 2.0** (`scim`) — a mountable provisioning server (Users + Groups, create/read/list/patch/
+  delete incl. deprovision via `active=false`) so Okta/Entra/JumpCloud can push users. Bearer-auth via
+  `authn.ValidateAPIKey`. Pragmatic v0 (no PUT-replace / complex filters / bulk).
+
 ## Status / roadmap
 
 - **Done**: OIDC, password, passkey (incl. QR), magic-link, **social (Google/GitHub)**, **net/http
-  adapter** (consume from chi/echo/stdlib), GORM + in-memory reference stores, SMTP mailer.
+  adapter**, GORM + in-memory reference stores, SMTP mailer, **groups + per-group access control**,
+  **API keys + admin REST API**, **LDAP sync**, **minimal SCIM 2.0 server**.
 - **Dropped on extraction** (app-specific): the legacy-IdP admin bridge and branded HTML pages.
-- **Follow-ups**: a true zero-Gin handler core (off `*gin.Context`); a squatter-reclaim path; more
-  WebAuthn/social ceremony tests.
+- **Follow-ups**: a true zero-Gin handler core (off `*gin.Context`); Apple/Facebook social; a
+  squatter-reclaim path; fuller SCIM (PUT, filters) + LDAP deprovision-by-absence.
 
 Tested: `go test ./...` green — session round-trip + tamper, bcrypt, the account-linking takeover
-matrix (squatter-refused / bootstrap-adopted / verified-linked), OAuth identity round-trip, and the
-net/http adapter.
+matrix, OAuth identity round-trip, net/http adapter, directory store + API-key auth + RequireGroups,
+and the SCIM user lifecycle (provision → filter → deprovision).

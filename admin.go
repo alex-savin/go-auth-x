@@ -79,6 +79,20 @@ func generateAPIKey() (raw, prefix string, hash []byte) {
 	return raw, prefix, hashToken(raw)
 }
 
+// ValidateAPIKey resolves a raw API key to its info if it exists and is not expired (and stamps
+// last-used). Useful for wiring API-key auth into other surfaces (e.g. the SCIM server).
+func (a *Authenticator) ValidateAPIKey(raw string) (*APIKeyInfo, bool) {
+	if a.dir == nil || raw == "" {
+		return nil, false
+	}
+	info, err := a.dir.APIKeyByHash(hashToken(raw))
+	if err != nil || (info.ExpiresAt != nil && time.Now().After(*info.ExpiresAt)) {
+		return nil, false
+	}
+	_ = a.dir.TouchAPIKey(info.ID)
+	return info, true
+}
+
 func bearerToken(h string) string {
 	const p = "Bearer "
 	if strings.HasPrefix(h, p) {

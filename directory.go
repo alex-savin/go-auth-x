@@ -45,7 +45,12 @@ type DirectoryStore interface {
 
 	// Admin user management
 	ListUsers() ([]AuthUser, error)
+	UserByID(id uint) (*AuthUser, error) // ErrNoUser if absent
 	SetUserDisabled(userID uint, disabled bool) error
+
+	// UpsertExternalUser provisions/updates a user from an external directory (LDAP/SCIM) keyed by
+	// an external Sub (e.g. "ldap:<uid>" / "scim:<id>"). Applies the same safe email-linking rule.
+	UpsertExternalUser(sub, email, name string, emailVerified bool) (*AuthUser, error)
 
 	// API keys (sha256-at-rest). APIKeyByHash returns ErrNoCredential if absent and does NOT
 	// itself check expiry (the caller does, so an expired key can still be listed/revoked).

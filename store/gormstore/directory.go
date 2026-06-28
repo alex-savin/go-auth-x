@@ -169,8 +169,24 @@ func (s *Store) ListUsers() ([]authx.AuthUser, error) {
 	return out, nil
 }
 
+func (s *Store) UserByID(id uint) (*authx.AuthUser, error) {
+	var u User
+	if err := s.db.First(&u, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, authx.ErrNoUser
+		}
+		return nil, err
+	}
+	return toAuthUser(&u), nil
+}
+
 func (s *Store) SetUserDisabled(userID uint, disabled bool) error {
 	return s.db.Model(&User{}).Where("id = ?", userID).Update("disabled", disabled).Error
+}
+
+// UpsertExternalUser provisions a directory-sourced user (LDAP/SCIM) via the safe linking rule.
+func (s *Store) UpsertExternalUser(sub, email, name string, emailVerified bool) (*authx.AuthUser, error) {
+	return s.UpsertUserOnLogin(sub, email, name, emailVerified)
 }
 
 // --- api keys ---

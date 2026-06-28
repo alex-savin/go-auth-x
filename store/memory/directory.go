@@ -117,6 +117,15 @@ func (s *Store) ListUsers() ([]authx.AuthUser, error) {
 	return out, nil
 }
 
+func (s *Store) UserByID(id uint) (*authx.AuthUser, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if u := s.users[id]; u != nil {
+		return view(u), nil
+	}
+	return nil, authx.ErrNoUser
+}
+
 func (s *Store) SetUserDisabled(userID uint, disabled bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -124,6 +133,11 @@ func (s *Store) SetUserDisabled(userID uint, disabled bool) error {
 		u.disabled = disabled
 	}
 	return nil
+}
+
+// UpsertExternalUser provisions a directory-sourced user (LDAP/SCIM) via the safe linking rule.
+func (s *Store) UpsertExternalUser(sub, email, name string, emailVerified bool) (*authx.AuthUser, error) {
+	return s.UpsertUserOnLogin(sub, email, name, emailVerified)
 }
 
 // --- api keys ---
