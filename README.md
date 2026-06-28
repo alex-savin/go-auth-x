@@ -54,13 +54,35 @@ authn.Register(r)                      // /auth/* endpoints (JSON + ceremonies; 
 Your app provides the login UI (the original ships a Next.js `(auth)` route set as a reference). The
 library serves only JSON + the WebAuthn/OIDC ceremony endpoints under `/auth/*`.
 
+## Framework-agnostic consumption
+
+Handlers are Gin internally, but you don't need Gin to consume the library:
+
+```go
+mux := http.NewServeMux()
+mux.Handle("/auth/", authn.Handler())                 // mountable http.Handler (net/http, chi, echo)
+gated := authn.GateHTTP(authn.CSRFHTTP(appHandler))   // net/http middleware: session gate + CSRF
+// in a handler: sub, email, ok := authx.SessionFromRequest(r)
+```
+
+The session + CSRF cookies are shared, so a login served by `Handler()` is recognized by `GateHTTP`.
+
+## Social login
+
+Set `GOOGLE_CLIENT_ID/SECRET` and/or `GITHUB_CLIENT_ID/SECRET`; callbacks are
+`AppURL + /auth/social/{google,github}/callback`. Google uses OIDC (verified-email id_token + nonce);
+GitHub uses REST (`/user` + `/user/emails`, primary+verified required). Identities key on
+`(provider, subject)`; a new identity links to a **verified-email** user or creates one, and refuses an
+unverified email squatter (`ErrEmailConflict`).
+
 ## Status / roadmap
 
-- **v0 is Gin-based** (handlers take `*gin.Context`). The logic is framework-agnostic; a `net/http`
-  adapter (so chi/echo/stdlib can consume it) is the planned next milestone.
-- **Dropped on extraction** (app-specific): the legacy-IdP admin bridge and the
-  branded HTML pages. Recovery is via the in-app magic-link.
-- **Follow-ups**: de-Gin adapter; social (Google/GitHub) handlers; a squatter-reclaim path; more handler tests.
+- **Done**: OIDC, password, passkey (incl. QR), magic-link, **social (Google/GitHub)**, **net/http
+  adapter** (consume from chi/echo/stdlib), GORM + in-memory reference stores, SMTP mailer.
+- **Dropped on extraction** (app-specific): the legacy-IdP admin bridge and branded HTML pages.
+- **Follow-ups**: a true zero-Gin handler core (off `*gin.Context`); a squatter-reclaim path; more
+  WebAuthn/social ceremony tests.
 
-Tested: `go test ./...` green — session round-trip + tamper rejection, bcrypt, and the
-account-linking takeover matrix (squatter-refused / bootstrap-adopted / verified-linked).
+Tested: `go test ./...` green — session round-trip + tamper, bcrypt, the account-linking takeover
+matrix (squatter-refused / bootstrap-adopted / verified-linked), OAuth identity round-trip, and the
+net/http adapter.
