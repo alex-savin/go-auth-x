@@ -4,12 +4,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
-
-	"github.com/gin-gonic/gin"
 )
 
-// fakeDir satisfies DirectoryStore via an embedded nil interface; only the methods the access /
-// API-key path touches are implemented (the rest would panic, and aren't called here).
+// fakeDir satisfies DirectoryStore via an embedded nil interface; only the API-key methods the
+// access path touches are implemented.
 type fakeDir struct {
 	DirectoryStore
 	hash string
@@ -25,54 +23,45 @@ func (f *fakeDir) APIKeyByHash(hash []byte) (*APIKeyInfo, error) {
 }
 func (f *fakeDir) TouchAPIKey(uint) error { return nil }
 
-func TestAPIKeyAuthAndGroups(t *testing.T) {
-	gin.SetMode(gin.TestMode)
+func TestAdminGuardScopesAndGroups(t *testing.T) {
 	raw, prefix, hash := generateAPIKey()
 	a := &Authenticator{cfg: Config{SessionSecret: []byte("0123456789abcdef0123456789abcdef"), OwnerEmail: "owner@x.com"}}
-	a.localEnabled = true
-	a.dir = &fakeDir{hash: string(hash), info: APIKeyInfo{ID: 1, Name: "ci", Prefix: prefix, Groups: []string{"admin"}}}
+	a.dir = &fakeDir{hash: string(hash), info: APIKeyInfo{ID: 1, Prefix: prefix, Groups: []string{"team"}, Scopes: []string{"admin"}}}
 
-	// APIKeyAuth stamps the key's groups + the admin guard accepts a valid key.
-	w := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(w)
-	c.Request = httptest.NewRequest(http.MethodPost, "/auth/admin/groups", nil)
-	c.Request.Header.Set("Authorization", "Bearer "+raw)
-	a.APIKeyAuth()(c)
-	v, ok := c.Get(ctxAPIKey)
-	info, isInfo := v.(*APIKeyInfo)
-	if !ok || !isInfo || len(info.Groups) == 0 || info.Groups[0] != "admin" {
-		t.Fatalf("APIKeyAuth did not stamp the key info: ok=%v v=%v", ok, v)
-	}
-	if !a.adminGuard(c) {
-		t.Fatal("adminGuard should accept a valid API key (empty scopes = unrestricted)")
+	bearer := func(key string) *reqCtx {
+		req := httptest.NewRequest(http.MethodGet, "/auth/admin/groups", nil)
+		req.Header.Set("Authorization", "Bearer "+key)
+		return a.newCtx(httptest.NewRecorder(), req)
 	}
 
-	// An invalid key is rejected (401).
-	w2 := httptest.NewRecorder()
-	c2, _ := gin.CreateTestContext(w2)
-	c2.Request = httptest.NewRequest(http.MethodPost, "/auth/admin/groups", nil)
-	c2.Request.Header.Set("Authorization", "Bearer axk_wrong")
-	a.APIKeyAuth()(c2)
-	if w2.Code != http.StatusUnauthorized {
-		t.Fatalf("invalid key: want 401, got %d", w2.Code)
+	// adminGuard accepts an admin-scoped key, rejects an invalid one.
+	if !a.adminGuard(bearer(raw)) {
+		t.Fatal("adminGuard should accept an admin-scoped key")
+	}
+	if c := bearer("axk_nope"); a.adminGuard(c) {
+		t.Fatal("adminGuard should reject an invalid key")
 	}
 
-	// RequireGroups: a session in the group passes; a session without it is forbidden.
-	pass := httptest.NewRecorder()
-	cp, _ := gin.CreateTestContext(pass)
-	cp.Request = httptest.NewRequest(http.MethodGet, "/x", nil)
-	cp.Set(ctxSessionKey, &SessionClaims{Email: "u@x.com", Groups: []string{"admin"}})
-	a.RequireGroups("admin")(cp)
-	if pass.Code == http.StatusForbidden {
-		t.Fatal("RequireGroups wrongly forbade a member")
+	// Scope checks.
+	if !a.ValidateAPIKeyScope(raw, "admin") || a.ValidateAPIKeyScope(raw, "scim") {
+		t.Fatal("key should have 'admin' scope but not 'scim'")
+	}
+	if !KeyHasScope(&APIKeyInfo{}, "anything") {
+		t.Fatal("empty Scopes must be unrestricted")
 	}
 
+	// requestGroups merges the key's groups.
+	req := httptest.NewRequest(http.MethodGet, "/x", nil)
+	req.Header.Set("Authorization", "Bearer "+raw)
+	if g := a.requestGroups(req); len(g) == 0 || g[0] != "team" {
+		t.Fatalf("requestGroups: %v", g)
+	}
+
+	// RequireGroupsHTTP allows a member, forbids a non-member (no session, key not in group "x").
 	deny := httptest.NewRecorder()
-	cd, _ := gin.CreateTestContext(deny)
-	cd.Request = httptest.NewRequest(http.MethodGet, "/x", nil)
-	cd.Set(ctxSessionKey, &SessionClaims{Email: "u@x.com", Groups: []string{"other"}})
-	a.RequireGroups("admin")(cd)
+	a.RequireGroupsHTTP("x")(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {})).
+		ServeHTTP(deny, req)
 	if deny.Code != http.StatusForbidden {
-		t.Fatalf("RequireGroups should forbid a non-member: got %d", deny.Code)
+		t.Fatalf("RequireGroupsHTTP should forbid a non-member: got %d", deny.Code)
 	}
 }

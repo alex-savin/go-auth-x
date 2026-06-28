@@ -34,7 +34,7 @@ type GroupMembership struct {
 func (GroupMembership) TableName() string { return "authx_group_members" }
 
 type APIKey struct {
-	ID         uint   `gorm:"primaryKey"`
+	ID         uint `gorm:"primaryKey"`
 	Name       string
 	Prefix     string
 	Hash       []byte `gorm:"uniqueIndex"`

@@ -26,7 +26,7 @@ func (a *Authenticator) enableLimiters() {
 	if a.ipLimiter != nil {
 		return
 	}
-	a.ipLimiter = newRateLimiter(20, 5*time.Minute)   // total auth attempts per IP
+	a.ipLimiter = newRateLimiter(20, 5*time.Minute)    // total auth attempts per IP
 	a.acctLimiter = newRateLimiter(10, 15*time.Minute) // request-mail attempts per account
 	go func() {
 		t := time.NewTicker(10 * time.Minute)

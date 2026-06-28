@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/golang-jwt/jwt/v5"
@@ -49,7 +48,7 @@ type wauthnUser struct {
 	creds       []webauthn.Credential
 }
 
-func (u *wauthnUser) WebAuthnID() []byte { return u.handle }
+func (u *wauthnUser) WebAuthnID() []byte   { return u.handle }
 func (u *wauthnUser) WebAuthnName() string { return u.email }
 func (u *wauthnUser) WebAuthnDisplayName() string {
 	if u.name != "" {
@@ -117,7 +116,7 @@ type webauthnFlowClaims struct {
 	jwt.RegisteredClaims
 }
 
-func (a *Authenticator) setWauthnFlow(c *gin.Context, sd *webauthn.SessionData) error {
+func (a *Authenticator) setWauthnFlow(c *reqCtx, sd *webauthn.SessionData) error {
 	raw, err := json.Marshal(sd)
 	if err != nil {
 		return err
@@ -133,7 +132,7 @@ func (a *Authenticator) setWauthnFlow(c *gin.Context, sd *webauthn.SessionData) 
 	return nil
 }
 
-func (a *Authenticator) getWauthnFlow(c *gin.Context) (*webauthn.SessionData, error) {
+func (a *Authenticator) getWauthnFlow(c *reqCtx) (*webauthn.SessionData, error) {
 	tok, _ := c.Cookie(wauthnFlowCookie)
 	var claims webauthnFlowClaims
 	if err := parseJWT(a.cfg.SessionSecret, tok, &claims); err != nil {
@@ -148,7 +147,7 @@ func (a *Authenticator) getWauthnFlow(c *gin.Context) (*webauthn.SessionData, er
 
 // currentAuthUser resolves the signed-in user from the session cookie (for session-gated
 // self-service endpoints registered on the public /auth group).
-func (a *Authenticator) currentAuthUser(c *gin.Context) (*AuthUser, error) {
+func (a *Authenticator) currentAuthUser(c *reqCtx) (*AuthUser, error) {
 	tok, _ := c.Cookie(sessionCookie)
 	sc, err := parseSession(a.cfg.SessionSecret, tok)
 	if err != nil {
@@ -161,19 +160,19 @@ func (a *Authenticator) currentAuthUser(c *gin.Context) (*AuthUser, error) {
 
 // WebauthnRegisterBegin (POST /auth/webauthn/register/begin) starts passkey enrolment for the
 // signed-in user.
-func (a *Authenticator) WebauthnRegisterBegin(c *gin.Context) {
+func (a *Authenticator) WebauthnRegisterBegin(c *reqCtx) {
 	if a.wauthn == nil {
-		c.JSON(http.StatusNotImplemented, gin.H{"error": "passkeys not available"})
+		c.JSON(http.StatusNotImplemented, H{"error": "passkeys not available"})
 		return
 	}
 	au, err := a.currentAuthUser(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "sign in first"})
+		c.JSON(http.StatusUnauthorized, H{"error": "sign in first"})
 		return
 	}
 	wu, err := a.wauthnUserFor(au)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not start enrolment"})
+		c.JSON(http.StatusInternalServerError, H{"error": "could not start enrolment"})
 		return
 	}
 	var excl []protocol.CredentialDescriptor
@@ -193,11 +192,11 @@ func (a *Authenticator) WebauthnRegisterBegin(c *gin.Context) {
 	}
 	creation, sd, err := a.wauthn.BeginRegistration(wu, webauthn.WithExclusions(excl), webauthn.WithAuthenticatorSelection(sel))
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not start enrolment"})
+		c.JSON(http.StatusInternalServerError, H{"error": "could not start enrolment"})
 		return
 	}
 	if err := a.setWauthnFlow(c, sd); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not start enrolment"})
+		c.JSON(http.StatusInternalServerError, H{"error": "could not start enrolment"})
 		return
 	}
 	c.JSON(http.StatusOK, creation)
@@ -205,30 +204,30 @@ func (a *Authenticator) WebauthnRegisterBegin(c *gin.Context) {
 
 // WebauthnRegisterFinish (POST /auth/webauthn/register/finish?name=) stores the new passkey.
 // The WebAuthn attestation is the request body; the optional label comes via ?name=.
-func (a *Authenticator) WebauthnRegisterFinish(c *gin.Context) {
+func (a *Authenticator) WebauthnRegisterFinish(c *reqCtx) {
 	if a.wauthn == nil {
-		c.JSON(http.StatusNotImplemented, gin.H{"error": "passkeys not available"})
+		c.JSON(http.StatusNotImplemented, H{"error": "passkeys not available"})
 		return
 	}
 	au, err := a.currentAuthUser(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "sign in first"})
+		c.JSON(http.StatusUnauthorized, H{"error": "sign in first"})
 		return
 	}
 	sd, err := a.getWauthnFlow(c)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "enrolment expired — try again"})
+		c.JSON(http.StatusBadRequest, H{"error": "enrolment expired — try again"})
 		return
 	}
 	a.clearCookie(c, wauthnFlowCookie)
 	wu, err := a.wauthnUserFor(au)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not finish enrolment"})
+		c.JSON(http.StatusInternalServerError, H{"error": "could not finish enrolment"})
 		return
 	}
 	cred, err := a.wauthn.FinishRegistration(wu, *sd, c.Request)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "passkey registration failed"})
+		c.JSON(http.StatusBadRequest, H{"error": "passkey registration failed"})
 		return
 	}
 	name := strings.TrimSpace(c.Query("name"))
@@ -236,11 +235,11 @@ func (a *Authenticator) WebauthnRegisterFinish(c *gin.Context) {
 		name = "Passkey"
 	}
 	if err := a.creds.AddPasskey(au.ID, credentialToPasskey(cred, name)); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not save passkey"})
+		c.JSON(http.StatusInternalServerError, H{"error": "could not save passkey"})
 		return
 	}
 	a.creds.RecordAudit(au.ID, au.Email, c.ClientIP(), "passkey", "passkey_added", true, "")
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	c.JSON(http.StatusOK, H{"ok": true})
 }
 
 // WebauthnLoginBegin (POST /auth/webauthn/login/begin) starts a discoverable passkey login.
@@ -248,18 +247,18 @@ func (a *Authenticator) WebauthnRegisterFinish(c *gin.Context) {
 // makes the browser offer "use a phone or tablet" — the FIDO2 hybrid transport that shows a QR
 // code so the user can sign in with a passkey on another device. No server-side QR handling is
 // needed; the platform negotiates it as long as we stay discoverable and the rpID is fixed.
-func (a *Authenticator) WebauthnLoginBegin(c *gin.Context) {
+func (a *Authenticator) WebauthnLoginBegin(c *reqCtx) {
 	if a.wauthn == nil {
-		c.JSON(http.StatusNotImplemented, gin.H{"error": "passkeys not available"})
+		c.JSON(http.StatusNotImplemented, H{"error": "passkeys not available"})
 		return
 	}
 	assertion, sd, err := a.wauthn.BeginDiscoverableLogin()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not start sign-in"})
+		c.JSON(http.StatusInternalServerError, H{"error": "could not start sign-in"})
 		return
 	}
 	if err := a.setWauthnFlow(c, sd); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not start sign-in"})
+		c.JSON(http.StatusInternalServerError, H{"error": "could not start sign-in"})
 		return
 	}
 	c.JSON(http.StatusOK, assertion)
@@ -267,14 +266,14 @@ func (a *Authenticator) WebauthnLoginBegin(c *gin.Context) {
 
 // WebauthnLoginFinish (POST /auth/webauthn/login/finish?next=) verifies the assertion and
 // signs the user in. The assertion is the body; the redirect target comes via ?next=.
-func (a *Authenticator) WebauthnLoginFinish(c *gin.Context) {
+func (a *Authenticator) WebauthnLoginFinish(c *reqCtx) {
 	if a.wauthn == nil {
-		c.JSON(http.StatusNotImplemented, gin.H{"error": "passkeys not available"})
+		c.JSON(http.StatusNotImplemented, H{"error": "passkeys not available"})
 		return
 	}
 	sd, err := a.getWauthnFlow(c)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "sign-in expired — try again"})
+		c.JSON(http.StatusBadRequest, H{"error": "sign-in expired — try again"})
 		return
 	}
 	a.clearCookie(c, wauthnFlowCookie)
@@ -294,11 +293,11 @@ func (a *Authenticator) WebauthnLoginFinish(c *gin.Context) {
 	}
 	cred, err := a.wauthn.FinishDiscoverableLogin(handler, *sd, c.Request)
 	if err != nil || matched == nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "passkey sign-in failed"})
+		c.JSON(http.StatusUnauthorized, H{"error": "passkey sign-in failed"})
 		return
 	}
 	if matched.Disabled {
-		c.JSON(http.StatusForbidden, gin.H{"error": "this account has been disabled"})
+		c.JSON(http.StatusForbidden, H{"error": "this account has been disabled"})
 		return
 	}
 	// Clone detection: the library flags CloneWarning when the authenticator's signature
@@ -306,14 +305,14 @@ func (a *Authenticator) WebauthnLoginFinish(c *gin.Context) {
 	// copied. Refuse the login and leave an audit trail rather than accept it silently.
 	if cred.Authenticator.CloneWarning {
 		a.creds.RecordAudit(matched.ID, matched.Email, c.ClientIP(), "passkey", "clone_warning", false, "")
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "passkey sign-in failed (security check)"})
+		c.JSON(http.StatusUnauthorized, H{"error": "passkey sign-in failed (security check)"})
 		return
 	}
 	_ = a.creds.TouchPasskey(cred.ID, cred.Authenticator.SignCount)
 	a.creds.RecordAudit(matched.ID, matched.Email, c.ClientIP(), "passkey", "login", true, "")
 	if err := a.completeLogin(c, Identity{Subject: matched.Sub, Email: matched.Email, Name: matched.Name}, c.Query("remember") == "true"); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "sign-in failed"})
+		c.JSON(http.StatusInternalServerError, H{"error": "sign-in failed"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"ok": true, "next": sanitizeNext(c.Query("next")), "email": matched.Email})
+	c.JSON(http.StatusOK, H{"ok": true, "next": sanitizeNext(c.Query("next")), "email": matched.Email})
 }

@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
-	"github.com/gin-gonic/gin"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/github"
 )
@@ -55,17 +54,17 @@ func (a *Authenticator) socialOAuth(provider string) *oauth2.Config {
 
 // SocialLogin (GET /auth/social/:provider/login) starts the provider's Authorization Code + PKCE
 // flow, stashing state/nonce/verifier/next in the signed flow cookie (same machinery as OIDC).
-func (a *Authenticator) SocialLogin(c *gin.Context) {
+func (a *Authenticator) SocialLogin(c *reqCtx) {
 	provider := c.Param("provider")
 	oc := a.socialOAuth(provider)
 	if oc == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "provider not enabled"})
+		c.JSON(http.StatusNotFound, H{"error": "provider not enabled"})
 		return
 	}
 	state, nonce, verifier := randToken(), randToken(), oauth2.GenerateVerifier()
 	flow, err := mintFlow(a.cfg.SessionSecret, flowClaims{State: state, Nonce: nonce, Verifier: verifier, Next: sanitizeNext(c.Query("next"))}, time.Now())
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "login init failed"})
+		c.JSON(http.StatusInternalServerError, H{"error": "login init failed"})
 		return
 	}
 	a.setCookie(c, flowCookie, flow, int(flowTTL/time.Second))
@@ -78,32 +77,32 @@ func (a *Authenticator) SocialLogin(c *gin.Context) {
 
 // SocialCallback (GET /auth/social/:provider/callback) verifies state, exchanges the code, reads
 // the provider-verified identity, links/creates the local user, and signs them in.
-func (a *Authenticator) SocialCallback(c *gin.Context) {
+func (a *Authenticator) SocialCallback(c *reqCtx) {
 	provider := c.Param("provider")
 	oc := a.socialOAuth(provider)
 	if oc == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "provider not enabled"})
+		c.JSON(http.StatusNotFound, H{"error": "provider not enabled"})
 		return
 	}
 	ctx := c.Request.Context()
 	flowTok, _ := c.Cookie(flowCookie)
 	fc, err := parseFlow(a.cfg.SessionSecret, flowTok)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "login session expired — try again"})
+		c.JSON(http.StatusBadRequest, H{"error": "login session expired — try again"})
 		return
 	}
 	a.clearCookie(c, flowCookie)
 	if errMsg := c.Query("error"); errMsg != "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "identity provider: " + errMsg})
+		c.JSON(http.StatusUnauthorized, H{"error": "identity provider: " + errMsg})
 		return
 	}
 	if !ctEqual(c.Query("state"), fc.State) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "state mismatch"})
+		c.JSON(http.StatusBadRequest, H{"error": "state mismatch"})
 		return
 	}
 	tok, err := oc.Exchange(ctx, c.Query("code"), oauth2.VerifierOption(fc.Verifier))
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "token exchange failed"})
+		c.JSON(http.StatusBadGateway, H{"error": "token exchange failed"})
 		return
 	}
 
@@ -112,16 +111,16 @@ func (a *Authenticator) SocialCallback(c *gin.Context) {
 	case "google":
 		rawID, ok := tok.Extra("id_token").(string)
 		if !ok || a.googleVerifier == nil {
-			c.JSON(http.StatusBadGateway, gin.H{"error": "no id_token in response"})
+			c.JSON(http.StatusBadGateway, H{"error": "no id_token in response"})
 			return
 		}
 		idt, err := a.googleVerifier.Verify(ctx, rawID)
 		if err != nil {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "id_token verification failed"})
+			c.JSON(http.StatusUnauthorized, H{"error": "id_token verification failed"})
 			return
 		}
 		if !ctEqual(idt.Nonce, fc.Nonce) {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "nonce mismatch"})
+			c.JSON(http.StatusUnauthorized, H{"error": "nonce mismatch"})
 			return
 		}
 		var cl struct {
@@ -131,14 +130,14 @@ func (a *Authenticator) SocialCallback(c *gin.Context) {
 		}
 		_ = idt.Claims(&cl)
 		if !cl.EmailVerified || cl.Email == "" {
-			c.JSON(http.StatusForbidden, gin.H{"error": "your Google email is not verified"})
+			c.JSON(http.StatusForbidden, H{"error": "your Google email is not verified"})
 			return
 		}
 		subject, email, name = idt.Subject, cl.Email, cl.Name
 	case "github":
 		subject, email, name, err = a.githubIdentity(ctx, oc, tok)
 		if err != nil {
-			c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+			c.JSON(http.StatusForbidden, H{"error": err.Error()})
 			return
 		}
 	}
@@ -146,19 +145,19 @@ func (a *Authenticator) SocialCallback(c *gin.Context) {
 	au, err := a.resolveSocialUser(provider, subject, email, name)
 	if err != nil {
 		if errors.Is(err, ErrEmailConflict) {
-			c.JSON(http.StatusConflict, gin.H{"error": "an account already exists for this email — sign in with your existing method first, then link " + provider})
+			c.JSON(http.StatusConflict, H{"error": "an account already exists for this email — sign in with your existing method first, then link " + provider})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "sign-in failed"})
+		c.JSON(http.StatusInternalServerError, H{"error": "sign-in failed"})
 		return
 	}
 	if au.Disabled {
-		c.JSON(http.StatusForbidden, gin.H{"error": "this account has been disabled"})
+		c.JSON(http.StatusForbidden, H{"error": "this account has been disabled"})
 		return
 	}
 	a.creds.RecordAudit(au.ID, au.Email, c.ClientIP(), provider, "login", true, "")
 	if err := a.completeLogin(c, Identity{Subject: au.Sub, Email: au.Email, Name: au.Name}, false); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "sign-in failed"})
+		c.JSON(http.StatusInternalServerError, H{"error": "sign-in failed"})
 		return
 	}
 	c.Redirect(http.StatusFound, fc.Next)

@@ -7,31 +7,26 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-
-	"github.com/gin-gonic/gin"
 )
 
 // --- net/http integration ---
 //
-// The handlers are Gin internally, but consumers don't need Gin: mount Handler() in any mux and
-// gate your own routes with GateHTTP / CSRFHTTP (net/http middleware). The session + CSRF cookies
-// are shared (same names + HMAC secret), so a login served by Handler() is recognized by GateHTTP.
+// The whole library is net/http — no framework dependency. Mount Handler() in any mux and gate your
+// own routes with GateHTTP / CSRFHTTP. The session + CSRF cookies are shared (same names + HMAC
+// secret), so a login served by Handler() is recognized by GateHTTP.
 
 type ctxKey int
 
 const sessionCtxKey ctxKey = 0
 
-// Handler returns the /auth/* endpoints as a standard http.Handler (an internal Gin engine with
-// Recovery, trusted proxies, and CSRF enforcement). Mount it in any router:
+// Handler returns the /auth/* endpoints as a standard http.Handler (a net/http ServeMux wrapped in
+// CSRF enforcement). Mount it in any router — no framework dependency:
 //
 //	mux.Handle("/auth/", authn.Handler())   // net/http, chi, echo, ...
 func (a *Authenticator) Handler() http.Handler {
-	r := gin.New()
-	_ = r.SetTrustedProxies(TrustedProxies())
-	r.Use(gin.Recovery())
-	r.Use(a.CSRFMiddleware())
-	a.Register(r)
-	return r
+	mux := http.NewServeMux()
+	a.routes(mux)
+	return a.CSRFHTTP(mux)
 }
 
 // GateHTTP is net/http middleware that enforces a valid session (mirrors Middleware): public

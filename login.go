@@ -2,8 +2,6 @@ package authx
 
 import (
 	"time"
-
-	"github.com/gin-gonic/gin"
 )
 
 // completeLogin is the single funnel every in-app auth method ends in — the same final
@@ -15,7 +13,7 @@ import (
 //
 // Because all four methods funnel here, no method can mint a session that bypasses
 // provisioning or the disabled/verified gates the callers enforce before calling in.
-func (a *Authenticator) completeLogin(c *gin.Context, id Identity, remember bool) error {
+func (a *Authenticator) completeLogin(c *reqCtx, id Identity, remember bool) error {
 	var role string
 	if a.authorizer != nil {
 		r, err := a.authorizer.Authorize(c.Request.Context(), id)

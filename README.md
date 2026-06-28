@@ -31,7 +31,7 @@ import authx "github.com/alex-savin/go-auth-x"
 - [Directory layer: groups, access control, API keys, LDAP & SCIM](#directory-layer)
 - [Storage: reference stores & writing your own](#storage)
 - [Security model](#security-model)
-- [Framework support (Gin / net/http / chi / echo)](#framework-support)
+- [Framework support](#framework-support)
 - [Testing](#testing)
 - [Project layout](#project-layout)
 - [Roadmap](#roadmap)
@@ -108,7 +108,8 @@ Requires **Go 1.26+**. Sub-packages:
 
 ## Quick start
 
-### With Gin
+The library is **pure `net/http`** — no framework dependency. Mount `Handler()` in any mux (net/http,
+chi, echo, …) and gate your own routes with the provided middleware.
 
 ```go
 package main
@@ -116,13 +117,14 @@ package main
 import (
 	"context"
 	"log"
+	"net/http"
 
-	"github.com/gin-gonic/gin"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 
 	authx "github.com/alex-savin/go-auth-x"
 	"github.com/alex-savin/go-auth-x/mailer"
+	"github.com/alex-savin/go-auth-x/scim"
 	"github.com/alex-savin/go-auth-x/store/gormstore"
 )
 
@@ -135,40 +137,28 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	authn.SetCredentialStore(store)
-	authn.SetDirectoryStore(store)     // optional: groups / API keys / admin API
-	authn.SetMailer(mailer.FromEnv())  // optional: enables magic-link / verify / reset
+	authn.SetCredentialStore(store)         // persistence
+	authn.SetDirectoryStore(store)          // optional: groups / API keys / admin API
+	authn.SetMailer(mailer.FromEnv())       // optional: enables magic-link / verify / reset
 	authn.SetAuthorizer(store.Authorizer()) // safe identity upsert (wrap to add provisioning)
-	authn.SetLocalEnabled(true)        // turn on password + passkey + email
+	authn.SetLocalEnabled(true)             // turn on password + passkey + email
 
-	r := gin.New()
-	_ = r.SetTrustedProxies(authx.TrustedProxies())
-	r.Use(authn.Middleware())     // gate every route + ensure CSRF cookie
-	r.Use(authn.CSRFMiddleware()) // enforce CSRF on mutations
-	authn.Register(r)             // mounts /auth/* (JSON + ceremony endpoints; you own the UI)
+	mux := http.NewServeMux()
+	mux.Handle("/auth/", authn.Handler()) // /auth/* (JSON + ceremony endpoints; you own the UI)
+	mux.Handle("/scim/v2/", http.StripPrefix("/scim/v2", // optional SCIM provisioning
+		scim.NewServer(store, func(t string) bool { return authn.ValidateAPIKeyScope(t, "scim") }).Handler()))
 
-	// your routes; gate sensitive ones by group:
-	r.GET("/admin", authn.RequireGroups("admins"), adminHandler)
+	// your app, gated by session + CSRF; restrict sensitive routes by group:
+	app := http.NewServeMux()
+	app.Handle("/admin", authn.RequireGroupsHTTP("admins")(http.HandlerFunc(adminHandler)))
+	mux.Handle("/", authn.GateHTTP(authn.CSRFHTTP(app)))
 
-	r.Run(":8080")
+	log.Fatal(http.ListenAndServe(":8080", mux))
 }
-```
 
-### With net/http / chi / echo
-
-```go
-mux := http.NewServeMux()
-mux.Handle("/auth/", authn.Handler())                  // /auth/* as a standard http.Handler
-mux.Handle("/scim/v2/", http.StripPrefix("/scim/v2",   // optional SCIM provisioning
-	scim.NewServer(store, func(t string) bool { _, ok := authn.ValidateAPIKey(t); return ok }).Handler()))
-
-// gate your own routes:
-app := authn.GateHTTP(authn.CSRFHTTP(yourHandler))
-http.ListenAndServe(":8080", app)
-
-// inside a handler:
-sub, email, ok := authx.SessionFromRequest(r)
-groups := authx.GroupsFromRequest(r)
+// inside any gated handler:
+//   sub, email, ok := authx.SessionFromRequest(r)
+//   groups := authx.GroupsFromRequest(r)
 ```
 
 > **You provide the login UI.** The library serves JSON + the WebAuthn/OIDC ceremony endpoints under
@@ -266,14 +256,14 @@ are compared in constant time (OAuth 2.0 Security BCP / RFC 9700).
 ### Social (Google & GitHub)
 `GET /auth/social/{google,github}/login`. Google uses OIDC (verified-email id_token + nonce); GitHub uses
 REST (`/user` + `/user/emails`, primary+verified required). Identities key on **(provider, subject)**; a
-new identity links to a **verified-email** user or creates one, and **refuses an unverified email
-squatter** (see [account-linking invariant](#account-linking-invariant)).
+new identity links to a **verified-email** user, **reclaims** an unverified squatter, or creates one
+(see [account-linking invariant](#account-linking-invariant)).
 
 ---
 
 ## HTTP endpoints
 
-Mounted by `Register` (Gin) or `Handler()` (net/http) under `/auth`:
+Mounted under `/auth` by `Handler()`:
 
 | Method | Path | Purpose | Auth |
 |---|---|---|---|
@@ -285,10 +275,10 @@ Mounted by `Register` (Gin) or `Handler()` (net/http) under `/auth`:
 | GET | `/auth/email/login` · `/auth/email/verify` | redeem magic-link / verify email | token |
 | POST | `/auth/webauthn/login/begin` · `/auth/webauthn/login/finish` | passkey sign-in (discoverable / QR) | public |
 | POST | `/auth/webauthn/register/begin` · `/auth/webauthn/register/finish` | enroll a passkey | session |
-| GET | `/auth/social/:provider/login` · `/auth/social/:provider/callback` | Google / GitHub | public |
+| GET | `/auth/social/{provider}/login` · `/auth/social/{provider}/callback` | Google / GitHub | public |
 | GET | `/auth/api/account` | account + passkeys | session |
 | POST | `/auth/api/account/password` | set/change password | session + CSRF |
-| DELETE | `/auth/api/passkeys/:id` | remove a passkey | session + CSRF |
+| DELETE | `/auth/api/passkeys/{id}` | remove a passkey | session + CSRF |
 
 ---
 
@@ -302,28 +292,29 @@ Groups are first-class and **surfaced in the session at login**. Gate routes by 
 for sessions *and* API keys:
 
 ```go
-r.GET("/reports", authn.RequireGroups("analysts", "admins"), reportsHandler) // Gin
-mux.Handle("/reports", authn.RequireGroupsHTTP("analysts")(reportsHandler))   // net/http
+// gate by group membership — works for both session users and API keys:
+mux.Handle("/reports", authn.RequireGroupsHTTP("analysts", "admins")(reportsHandler))
 ```
 
 ### API keys
-`axk_`-prefixed, **sha256-at-rest**, with optional expiry + groups. The `Authorization: Bearer <key>`
-header is authenticated by `APIKeyAuth()` (Gin) or validated via `authn.ValidateAPIKey(raw)`. CSRF is
-correctly **skipped** for Bearer requests (not cookie-based). The raw key is shown **once** at creation.
+`axk_`-prefixed, **sha256-at-rest**, with optional expiry, groups, and **scopes** (empty = unrestricted;
+e.g. `["admin"]`, `["scim"]`). The `Authorization: Bearer <key>` header is validated via
+`authn.ValidateAPIKey(raw)` / `authn.ValidateAPIKeyScope(raw, "scim")`. CSRF is correctly **skipped**
+for Bearer requests (not cookie-based). The raw key is shown **once** at creation.
 
 ### Admin REST API (`/auth/admin`)
-Gated by an **owner session** (`OWNER_EMAIL`) **or** a valid API key:
+Gated by an **owner session** (`OWNER_EMAIL`) **or** a valid API key carrying the `admin` scope:
 
 | Method | Path | Purpose |
 |---|---|---|
 | GET / POST | `/auth/admin/groups` | list / create groups |
-| DELETE | `/auth/admin/groups/:id` | delete a group |
-| GET | `/auth/admin/groups/:id/members` | list members |
-| POST / DELETE | `/auth/admin/groups/:id/members/:userId` | add / remove a member |
+| DELETE | `/auth/admin/groups/{id}` | delete a group |
+| GET | `/auth/admin/groups/{id}/members` | list members |
+| POST / DELETE | `/auth/admin/groups/{id}/members/{userId}` | add / remove a member |
 | GET | `/auth/admin/users` | list users |
-| POST | `/auth/admin/users/:id/disabled` | disable / enable a user |
+| POST | `/auth/admin/users/{id}/disabled` | disable / enable a user |
 | GET / POST | `/auth/admin/apikeys` | list / create keys (create returns the raw key once) |
-| DELETE | `/auth/admin/apikeys/:id` | revoke a key |
+| DELETE | `/auth/admin/apikeys/{id}` | revoke a key |
 
 ### LDAP sync
 One-way scheduled pull of users + groups + membership from LDAP/Active Directory:
@@ -379,26 +370,32 @@ ORM. Compile-time conformance: `var _ authx.CredentialStore = (*MyStore)(nil)`.
 - **OAuth/OIDC** — Authorization Code + **PKCE (S256)** + `state` + `nonce`, constant-time compares.
 - **Rate limiting** — sliding-window per-IP + soft per-account lockout (durable counts; recovery paths
   stay open; owner exempt).
-- **Trusted proxies** — `SetTrustedProxies(authx.TrustedProxies())` so `X-Forwarded-For` can't be spoofed
-  to defeat per-IP limits.
+- **Trusted proxies** — a built-in `X-Forwarded-For` walk trusting only `TrustedProxies()` ranges, so
+  the client IP (and per-IP limits) can't be spoofed.
 
 ### Account-linking invariant
 The single most important rule, shipped in both reference stores and **covered by tests**: a credential
 or social identity links to an existing user **only** on a **provider-verified or redemption-proven
-email**. An unverified, non-bootstrap "squatter" row is **refused** (`ErrEmailConflict`), never adopted —
-which prevents the classic cross-provider account takeover (attacker pre-registers `victim@x`, victim
-later logs in and inherits the attacker's credentials).
+email**. An unverified, non-bootstrap "squatter" row is **never adopted**. When a verified login
+(OIDC/social/redeemed) lands on a squatter, it **reclaims** the email — deleting the squatter and its
+credentials, then provisioning a clean verified user; an *unverified* collision is refused
+(`ErrEmailConflict`). This prevents the classic cross-provider account takeover (attacker pre-registers
+`victim@x`; the real victim must never inherit the attacker's credentials).
 
 ---
 
 ## Framework support
 
-- **Gin** — first-class: `Register(r)`, `Middleware()`, `CSRFMiddleware()`, `RequireGroups()`, `APIKeyAuth()`.
-- **net/http / chi / echo** — `Handler()` (mount `/auth/*`), `GateHTTP` / `CSRFHTTP` (middleware),
-  `SessionFromRequest` / `GroupsFromRequest`, `RequireGroupsHTTP`. The SCIM server is pure net/http.
+**Pure `net/http`** — zero framework dependency (no Gin, no router). Use it anywhere:
 
-> Handlers are Gin internally and Gin is a transitive dependency; a true zero-Gin handler core is on the
-> [roadmap](#roadmap). Today, non-Gin apps integrate fully via the net/http adapter above.
+- `Handler()` — mount `/auth/*` in any mux (net/http, chi, echo, …).
+- `GateHTTP` / `CSRFHTTP` — middleware to gate + CSRF-protect your own routes.
+- `RequireGroupsHTTP(...)` — per-group access control.
+- `SessionFromRequest(r)` / `GroupsFromRequest(r)` — read the authenticated principal.
+- `ValidateAPIKey` / `ValidateAPIKeyScope` — Bearer API-key auth for server-to-server + SCIM.
+
+The SCIM server is a standalone `http.Handler` too. Client IP is extracted with a built-in
+trusted-proxy walk (`TrustedProxies()` / `TRUSTED_PROXIES`), so X-Forwarded-For can't be spoofed.
 
 ---
 
@@ -408,10 +405,11 @@ later logs in and inherits the attacker's credentials).
 go test ./...
 ```
 
-Covers: session mint/parse + tamper rejection, bcrypt, the **account-linking takeover matrix**
-(squatter-refused / bootstrap-adopted / verified-linked), OAuth-identity round-trip, the net/http
-adapter, the directory store + API-key auth + `RequireGroups` allow/deny, and the **SCIM user lifecycle**
-(provision → filter → deprovision). The reference stores carry compile-time interface assertions.
+Covers: session mint/parse + tamper rejection, bcrypt, the **account-linking matrix**
+(squatter-**reclaimed** by a verified login / unverified-collision refused / bootstrap-adopted /
+verified-linked), OAuth-identity round-trip, the net/http adapter, the directory store + API-key
+scopes + `RequireGroupsHTTP` allow/deny, and the **SCIM user lifecycle** (provision → filter → PUT →
+deprovision). The reference stores carry compile-time interface assertions.
 
 ---
 
@@ -435,20 +433,21 @@ go-auth-x/
 
 ## Roadmap
 
-- **Done**: OIDC, password, passkey (+ QR), magic-link, social (Google/GitHub), net/http adapter,
-  GORM + in-memory stores, SMTP mailer, groups + per-group access control, API keys + admin REST API,
-  LDAP sync, minimal SCIM 2.0.
-- **Planned**: a true **zero-Gin** handler core; **Apple + Facebook** social; a squatter-reclaim path;
-  fuller SCIM (PUT, richer filters) + LDAP deprovision-by-absence; per-API-key fine-grained scopes.
+- **Done**: pure **net/http** (zero framework dependency); OIDC, password, passkey (+ QR), magic-link,
+  social (Google/GitHub); GORM + in-memory stores; SMTP mailer; groups + per-group access control;
+  API keys with **scopes** + admin REST API; LDAP sync (+ deprovision-by-absence); SCIM 2.0 (incl. PUT
+  + filters); the **squatter-reclaim** path.
+- **Planned**: **Apple + Facebook** social; consumer-configurable public-path matcher; richer SCIM
+  (complex filters, bulk); pluggable rate-limit backends.
 
 ---
 
 ## Contributing
 
 Issues and PRs welcome. Please run `go test ./...` and `go vet ./...` before submitting, and keep the
-storage-agnostic boundary intact (the `authx` package must not import a specific ORM or framework beyond
-the documented Gin handlers). New auth methods should funnel through `completeLogin` and respect the
-account-linking invariant.
+boundaries intact: the `authx` package must stay storage-agnostic (no specific ORM) and framework-free
+(net/http only — no web framework imports). New auth methods should funnel through `completeLogin` and
+respect the account-linking invariant.
 
 ---
 

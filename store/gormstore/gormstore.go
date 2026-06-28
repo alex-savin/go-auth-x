@@ -77,11 +77,11 @@ type OAuthIdentity struct {
 func (OAuthIdentity) TableName() string { return "authx_oauth_identities" }
 
 type AuthToken struct {
-	ID         uint   `gorm:"primaryKey"`
-	Purpose    string `gorm:"index"`
-	UserID     uint   `gorm:"index"`
-	Email      string `gorm:"index"`
-	TokenHash  []byte `gorm:"uniqueIndex"`
+	ID         uint      `gorm:"primaryKey"`
+	Purpose    string    `gorm:"index"`
+	UserID     uint      `gorm:"index"`
+	Email      string    `gorm:"index"`
+	TokenHash  []byte    `gorm:"uniqueIndex"`
 	ExpiresAt  time.Time `gorm:"index"`
 	ConsumedAt *time.Time
 	CreatedAt  time.Time

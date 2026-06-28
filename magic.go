@@ -4,19 +4,17 @@ import (
 	"net/http"
 	"net/url"
 	"time"
-
-	"github.com/gin-gonic/gin"
 )
 
 // AuthConfig (GET /auth/config) is public and tells the SPA which sign-in methods are
 // available, so the login UI renders only what's wired this phase.
-func (a *Authenticator) AuthConfig(c *gin.Context) {
+func (a *Authenticator) AuthConfig(c *reqCtx) {
 	emailOn := a.LocalEnabled() && a.email != nil && a.email.Configured()
-	c.JSON(http.StatusOK, gin.H{
+	c.JSON(http.StatusOK, H{
 		"local":      a.LocalEnabled(),
 		"oidc":       a.Enabled(),
 		"signupOpen": a.LocalEnabled(),
-		"methods": gin.H{
+		"methods": H{
 			"password": a.LocalEnabled(),
 			"email":    emailOn,
 			"passkey":  a.LocalEnabled() && a.wauthn != nil,
@@ -40,14 +38,14 @@ func (a *Authenticator) sendVerifyEmail(userID uint, email string) {
 
 // EmailRequest (POST /auth/email/request) emails a one-time sign-in (magic) link. Always 200
 // (anti-enumeration).
-func (a *Authenticator) EmailRequest(c *gin.Context) {
+func (a *Authenticator) EmailRequest(c *reqCtx) {
 	var body struct {
 		Email, Next string
 		Remember    bool
 	}
 	_ = c.ShouldBindJSON(&body)
 	email := normEmail(body.Email)
-	generic := gin.H{"ok": true, "message": "If an account exists for that address, we've sent a sign-in link."}
+	generic := H{"ok": true, "message": "If an account exists for that address, we've sent a sign-in link."}
 	if !validEmail(email) || !a.ipLimiter.allow("magic:"+c.ClientIP()) || !a.acctLimiter.allow("magic:"+email) {
 		c.JSON(http.StatusOK, generic)
 		return
@@ -72,16 +70,16 @@ func (a *Authenticator) EmailRequest(c *gin.Context) {
 
 // EmailLogin (GET /auth/email/login?token=) redeems a magic-login token and signs the user
 // in. Redeeming the emailed link proves email control, so it also confirms the address.
-func (a *Authenticator) EmailLogin(c *gin.Context) { a.redeemAndLogin(c, purposeMagicLogin, true) }
+func (a *Authenticator) EmailLogin(c *reqCtx) { a.redeemAndLogin(c, purposeMagicLogin, true) }
 
 // EmailVerify (GET /auth/email/verify?token=) redeems a verify-email token, marks the email
 // verified, and signs the user in.
-func (a *Authenticator) EmailVerify(c *gin.Context) { a.redeemAndLogin(c, purposeVerifyEmail, true) }
+func (a *Authenticator) EmailVerify(c *reqCtx) { a.redeemAndLogin(c, purposeVerifyEmail, true) }
 
 // redeemAndLogin consumes a single-use email token, optionally marks the email verified, then
 // completes login and redirects. These are browser link-clicks (GET), so failures redirect to
 // the login page with a message rather than returning JSON.
-func (a *Authenticator) redeemAndLogin(c *gin.Context, purpose string, markVerified bool) {
+func (a *Authenticator) redeemAndLogin(c *reqCtx, purpose string, markVerified bool) {
 	fail := func(msg string) {
 		c.Redirect(http.StatusFound, a.baseURL()+"/login?error="+url.QueryEscape(msg))
 	}

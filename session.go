@@ -18,8 +18,8 @@ type SessionClaims struct {
 	Email   string   `json:"email,omitempty"`
 	Name    string   `json:"name,omitempty"`
 	Groups  []string `json:"groups,omitempty"`
-	Role    string   `json:"role,omitempty"`  // optional role from an Authorizer
-	IDToken string   `json:"idt,omitempty"`   // raw OIDC id_token — used as id_token_hint at RP-initiated logout
+	Role    string   `json:"role,omitempty"` // optional role from an Authorizer
+	IDToken string   `json:"idt,omitempty"`  // raw OIDC id_token — used as id_token_hint at RP-initiated logout
 	jwt.RegisteredClaims
 }
 

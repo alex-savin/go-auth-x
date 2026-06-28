@@ -61,8 +61,8 @@ type CredentialStore interface {
 	SetEmailVerified(userID uint, verified bool) error
 
 	// Passkeys (WebAuthn)
-	EnsureWebauthnHandle(userID uint) ([]byte, error)        // get-or-create the stable user handle
-	UserByWebauthnHandle(handle []byte) (*AuthUser, error)   // resolve a discoverable login
+	EnsureWebauthnHandle(userID uint) ([]byte, error)      // get-or-create the stable user handle
+	UserByWebauthnHandle(handle []byte) (*AuthUser, error) // resolve a discoverable login
 	Passkeys(userID uint) ([]Passkey, error)
 	AddPasskey(userID uint, p Passkey) error
 	TouchPasskey(credentialID []byte, signCount uint32) error // update sign count + last-used
@@ -74,7 +74,7 @@ type CredentialStore interface {
 
 	// Social (OAuth) identities — natural key (provider, subject), NOT email, so an upstream
 	// email change doesn't fork the account.
-	UserByOAuth(provider, subject string) (*AuthUser, error)         // ErrNoUser if unlinked
+	UserByOAuth(provider, subject string) (*AuthUser, error)      // ErrNoUser if unlinked
 	LinkOAuth(userID uint, provider, subject, email string) error // idempotent per (provider,subject)
 
 	// Single-use, hashed-at-rest email tokens (magic-link, verify-email, password-reset, invite)

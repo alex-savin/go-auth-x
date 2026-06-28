@@ -5,7 +5,6 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -18,10 +17,10 @@ type passkeyView struct {
 }
 
 // AccountInfo (GET /auth/api/account) returns the signed-in user's identity + sign-in methods.
-func (a *Authenticator) AccountInfo(c *gin.Context) {
+func (a *Authenticator) AccountInfo(c *reqCtx) {
 	au, err := a.currentAuthUser(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthenticated"})
+		c.JSON(http.StatusUnauthorized, H{"error": "unauthenticated"})
 		return
 	}
 	pks, _ := a.creds.Passkeys(au.ID)
@@ -30,71 +29,71 @@ func (a *Authenticator) AccountInfo(c *gin.Context) {
 		views = append(views, passkeyView{ID: p.ID, Name: p.Name, CreatedAt: p.CreatedAt, LastUsedAt: p.LastUsedAt})
 	}
 	_, _, perr := a.creds.PasswordHash(au.ID)
-	c.JSON(http.StatusOK, gin.H{
-		"email":         au.Email,
-		"name":          au.Name,
-		"emailVerified": au.EmailVerified,
-		"hasPassword":   perr == nil,
+	c.JSON(http.StatusOK, H{
+		"email":           au.Email,
+		"name":            au.Name,
+		"emailVerified":   au.EmailVerified,
+		"hasPassword":     perr == nil,
 		"passkeysEnabled": a.wauthn != nil,
-		"passkeys":      views,
+		"passkeys":        views,
 	})
 }
 
 // AccountSetPassword (POST /auth/api/account/password) sets or changes the signed-in user's
 // password. If one already exists, the current password is required.
-func (a *Authenticator) AccountSetPassword(c *gin.Context) {
+func (a *Authenticator) AccountSetPassword(c *reqCtx) {
 	au, err := a.currentAuthUser(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthenticated"})
+		c.JSON(http.StatusUnauthorized, H{"error": "unauthenticated"})
 		return
 	}
 	var body struct{ Current, New string }
 	if err := c.ShouldBindJSON(&body); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		c.JSON(http.StatusBadRequest, H{"error": "invalid request"})
 		return
 	}
 	if hash, _, perr := a.creds.PasswordHash(au.ID); perr == nil {
 		if bcrypt.CompareHashAndPassword([]byte(hash), []byte(body.Current)) != nil {
-			c.JSON(http.StatusForbidden, gin.H{"error": "current password is incorrect"})
+			c.JSON(http.StatusForbidden, H{"error": "current password is incorrect"})
 			return
 		}
 	}
 	if msg := passwordStrengthError(body.New, au.Email); msg != "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": msg})
+		c.JSON(http.StatusBadRequest, H{"error": msg})
 		return
 	}
 	hash, herr := hashPassword(body.New)
 	if herr != nil || a.creds.SetPasswordHash(au.ID, hash, "bcrypt") != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not update password"})
+		c.JSON(http.StatusInternalServerError, H{"error": "could not update password"})
 		return
 	}
 	a.creds.RecordAudit(au.ID, au.Email, c.ClientIP(), "password", "password_changed", true, "")
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	c.JSON(http.StatusOK, H{"ok": true})
 }
 
 // PasskeyRemove (DELETE /auth/api/passkeys/:id) deletes one of the user's passkeys, refusing
 // to remove their last remaining sign-in method.
-func (a *Authenticator) PasskeyRemove(c *gin.Context) {
+func (a *Authenticator) PasskeyRemove(c *reqCtx) {
 	au, err := a.currentAuthUser(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthenticated"})
+		c.JSON(http.StatusUnauthorized, H{"error": "unauthenticated"})
 		return
 	}
 	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid id"})
+		c.JSON(http.StatusBadRequest, H{"error": "invalid id"})
 		return
 	}
 	pks, _ := a.creds.Passkeys(au.ID)
 	_, _, perr := a.creds.PasswordHash(au.ID)
 	if perr != nil && len(pks) <= 1 {
-		c.JSON(http.StatusConflict, gin.H{"error": "add a password or another passkey before removing your last one"})
+		c.JSON(http.StatusConflict, H{"error": "add a password or another passkey before removing your last one"})
 		return
 	}
 	if err := a.creds.RemovePasskey(au.ID, uint(id)); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not remove passkey"})
+		c.JSON(http.StatusInternalServerError, H{"error": "could not remove passkey"})
 		return
 	}
 	a.creds.RecordAudit(au.ID, au.Email, c.ClientIP(), "passkey", "passkey_removed", true, "")
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	c.JSON(http.StatusOK, H{"ok": true})
 }

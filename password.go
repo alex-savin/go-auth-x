@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/gin-gonic/gin"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -59,23 +58,23 @@ func hashPassword(pw string) (string, error) {
 // PasswordSignup (POST /auth/password/signup) creates a local, unverified account and emails
 // a verification link. Always responds 200 with a generic message (anti-enumeration); it
 // never overwrites the password of an existing VERIFIED account.
-func (a *Authenticator) PasswordSignup(c *gin.Context) {
+func (a *Authenticator) PasswordSignup(c *reqCtx) {
 	var body struct{ Email, Password, Name string }
 	if err := c.ShouldBindJSON(&body); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		c.JSON(http.StatusBadRequest, H{"error": "invalid request"})
 		return
 	}
 	email := normEmail(body.Email)
 	if !validEmail(email) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "enter a valid email address"})
+		c.JSON(http.StatusBadRequest, H{"error": "enter a valid email address"})
 		return
 	}
 	if msg := passwordStrengthError(body.Password, email); msg != "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": msg})
+		c.JSON(http.StatusBadRequest, H{"error": msg})
 		return
 	}
 	if !a.ipLimiter.allow("signup:" + c.ClientIP()) {
-		c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many attempts — try again shortly"})
+		c.JSON(http.StatusTooManyRequests, H{"error": "too many attempts — try again shortly"})
 		return
 	}
 	const generic = "Check your email to finish creating your account."
@@ -85,12 +84,12 @@ func (a *Authenticator) PasswordSignup(c *gin.Context) {
 	case errors.Is(err, ErrNoUser):
 		nu, cerr := a.creds.CreateLocalUser(email, strings.TrimSpace(body.Name))
 		if cerr != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "could not create account"})
+			c.JSON(http.StatusInternalServerError, H{"error": "could not create account"})
 			return
 		}
 		u = nu
 	case err != nil:
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not create account"})
+		c.JSON(http.StatusInternalServerError, H{"error": "could not create account"})
 		return
 	case u.EmailVerified:
 		// Account already exists and is verified: do NOT touch its password. Nudge them to
@@ -102,52 +101,52 @@ func (a *Authenticator) PasswordSignup(c *gin.Context) {
 			"Sign in", base+"/login",
 			"If you didn't try to sign up, you can ignore this email.")
 		a.creds.RecordAudit(u.ID, email, c.ClientIP(), "password", "signup_existing", false, "")
-		c.JSON(http.StatusOK, gin.H{"ok": true, "message": generic})
+		c.JSON(http.StatusOK, H{"ok": true, "message": generic})
 		return
 	}
 
 	// New or still-unverified account: (re)set the password and send a fresh verify link.
 	hash, herr := hashPassword(body.Password)
 	if herr != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not create account"})
+		c.JSON(http.StatusInternalServerError, H{"error": "could not create account"})
 		return
 	}
 	if err := a.creds.SetPasswordHash(u.ID, hash, "bcrypt"); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not create account"})
+		c.JSON(http.StatusInternalServerError, H{"error": "could not create account"})
 		return
 	}
 	a.sendVerifyEmail(u.ID, email)
 	a.creds.RecordAudit(u.ID, email, c.ClientIP(), "password", "signup", true, "")
-	c.JSON(http.StatusOK, gin.H{"ok": true, "message": generic})
+	c.JSON(http.StatusOK, H{"ok": true, "message": generic})
 }
 
 // PasswordLogin (POST /auth/password/login) verifies email+password and starts a session.
-func (a *Authenticator) PasswordLogin(c *gin.Context) {
+func (a *Authenticator) PasswordLogin(c *reqCtx) {
 	var body struct {
 		Email, Password, Next string
 		Remember              bool
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		c.JSON(http.StatusBadRequest, H{"error": "invalid request"})
 		return
 	}
 	email := normEmail(body.Email)
 	ip := c.ClientIP()
 	if !a.ipLimiter.allow("login:" + ip) {
-		c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many attempts — try again shortly"})
+		c.JSON(http.StatusTooManyRequests, H{"error": "too many attempts — try again shortly"})
 		return
 	}
 	// Per-account soft lockout from durable failure history (owner exempt). Recovery via the
 	// email-link / reset paths stays open regardless.
 	if !a.isOwnerEmail(email) {
 		if fails, _ := a.creds.RecentFailures(email, time.Now().Add(-15*time.Minute)); fails >= 5 {
-			c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many attempts — use “email me a sign-in link” instead"})
+			c.JSON(http.StatusTooManyRequests, H{"error": "too many attempts — use “email me a sign-in link” instead"})
 			return
 		}
 	}
 
 	invalid := func() {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "incorrect email or password"})
+		c.JSON(http.StatusUnauthorized, H{"error": "incorrect email or password"})
 	}
 	u, err := a.creds.UserByEmail(email)
 	if errors.Is(err, ErrNoUser) {
@@ -157,7 +156,7 @@ func (a *Authenticator) PasswordLogin(c *gin.Context) {
 		return
 	}
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "login failed"})
+		c.JSON(http.StatusInternalServerError, H{"error": "login failed"})
 		return
 	}
 	hash, _, perr := a.creds.PasswordHash(u.ID)
@@ -168,7 +167,7 @@ func (a *Authenticator) PasswordLogin(c *gin.Context) {
 		return
 	}
 	if perr != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "login failed"})
+		c.JSON(http.StatusInternalServerError, H{"error": "login failed"})
 		return
 	}
 	if bcrypt.CompareHashAndPassword([]byte(hash), []byte(body.Password)) != nil {
@@ -177,7 +176,7 @@ func (a *Authenticator) PasswordLogin(c *gin.Context) {
 		return
 	}
 	if u.Disabled {
-		c.JSON(http.StatusForbidden, gin.H{"error": "this account has been disabled"})
+		c.JSON(http.StatusForbidden, H{"error": "this account has been disabled"})
 		return
 	}
 	if !u.EmailVerified {
@@ -186,23 +185,23 @@ func (a *Authenticator) PasswordLogin(c *gin.Context) {
 		if a.acctLimiter.allow("verify:" + email) {
 			a.sendVerifyEmail(u.ID, email)
 		}
-		c.JSON(http.StatusForbidden, gin.H{"error": "Please confirm your email — we've sent a fresh confirmation link to your inbox.", "needsVerify": true})
+		c.JSON(http.StatusForbidden, H{"error": "Please confirm your email — we've sent a fresh confirmation link to your inbox.", "needsVerify": true})
 		return
 	}
 	a.creds.RecordAudit(u.ID, email, ip, "password", "login", true, "")
 	if err := a.completeLogin(c, Identity{Subject: u.Sub, Email: u.Email, Name: u.Name}, body.Remember); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "login failed"})
+		c.JSON(http.StatusInternalServerError, H{"error": "login failed"})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"ok": true, "next": sanitizeNext(body.Next)})
+	c.JSON(http.StatusOK, H{"ok": true, "next": sanitizeNext(body.Next)})
 }
 
 // PasswordResetRequest (POST /auth/password/reset/request) emails a reset link. Always 200.
-func (a *Authenticator) PasswordResetRequest(c *gin.Context) {
+func (a *Authenticator) PasswordResetRequest(c *reqCtx) {
 	var body struct{ Email string }
 	_ = c.ShouldBindJSON(&body)
 	email := normEmail(body.Email)
-	generic := gin.H{"ok": true, "message": "If an account exists for that address, we've sent a reset link."}
+	generic := H{"ok": true, "message": "If an account exists for that address, we've sent a reset link."}
 	if !validEmail(email) || !a.ipLimiter.allow("reset:"+c.ClientIP()) || !a.acctLimiter.allow("reset:"+email) {
 		c.JSON(http.StatusOK, generic)
 		return
@@ -221,29 +220,29 @@ func (a *Authenticator) PasswordResetRequest(c *gin.Context) {
 
 // PasswordResetConfirm (POST /auth/password/reset/confirm) redeems a reset token and sets a
 // new password. The token proves email control, so we also mark the email verified.
-func (a *Authenticator) PasswordResetConfirm(c *gin.Context) {
+func (a *Authenticator) PasswordResetConfirm(c *reqCtx) {
 	var body struct{ Token, Password string }
 	if err := c.ShouldBindJSON(&body); err != nil || body.Token == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+		c.JSON(http.StatusBadRequest, H{"error": "invalid request"})
 		return
 	}
 	claim, err := a.creds.ConsumeToken(purposePasswordReset, hashToken(body.Token))
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "this reset link is invalid or has expired"})
+		c.JSON(http.StatusBadRequest, H{"error": "this reset link is invalid or has expired"})
 		return
 	}
 	if msg := passwordStrengthError(body.Password, claim.Email); msg != "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": msg})
+		c.JSON(http.StatusBadRequest, H{"error": msg})
 		return
 	}
 	hash, herr := hashPassword(body.Password)
 	if herr != nil || a.creds.SetPasswordHash(claim.UserID, hash, "bcrypt") != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "could not update password"})
+		c.JSON(http.StatusInternalServerError, H{"error": "could not update password"})
 		return
 	}
 	_ = a.creds.SetEmailVerified(claim.UserID, true)
 	a.creds.RecordAudit(claim.UserID, claim.Email, c.ClientIP(), "password", "reset", true, "")
-	c.JSON(http.StatusOK, gin.H{"ok": true, "message": "Your password has been updated. You can now sign in."})
+	c.JSON(http.StatusOK, H{"ok": true, "message": "Your password has been updated. You can now sign in."})
 }
 
 // isOwnerEmail reports whether the email is the configured instance owner (lockout-exempt).

@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
-	"github.com/gin-gonic/gin"
 	"golang.org/x/oauth2"
 )
 
@@ -22,51 +21,43 @@ func ctEqual(a, b string) bool {
 	return subtle.ConstantTimeCompare([]byte(a), []byte(b)) == 1
 }
 
-// Register attaches the /auth/* routes. Safe to call when disabled — the handlers
-// short-circuit, and the middleware never gates anything anyway. The consuming app owns its
-// own login/landing UI pages; this module only serves the JSON + ceremony endpoints.
-func (a *Authenticator) Register(r gin.IRouter) {
-	g := r.Group("/auth")
-	g.GET("/login", a.Login)       // OIDC: start the Authorization Code + PKCE flow
-	g.GET("/callback", a.Callback) // OIDC: redirect target
-	g.GET("/logout", a.Logout)
-	g.GET("/me", a.Me)
-	g.GET("/config", a.AuthConfig) // public: which sign-in methods are available
-	// In-app auth methods (password/passkey/email), registered only when local auth is on.
-	// OIDC routes above keep working alongside them.
+// routes registers the /auth/* endpoints on a net/http ServeMux (Go 1.22 method+pattern routing).
+// Used by Handler(). The consuming app owns its own login/landing UI; this only serves the JSON +
+// ceremony endpoints. Disabled methods simply aren't registered.
+func (a *Authenticator) routes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /auth/login", a.wrap(a.Login))       // OIDC: start Authorization Code + PKCE
+	mux.HandleFunc("GET /auth/callback", a.wrap(a.Callback)) // OIDC: redirect target
+	mux.HandleFunc("GET /auth/logout", a.wrap(a.Logout))
+	mux.HandleFunc("GET /auth/me", a.wrap(a.Me))
+	mux.HandleFunc("GET /auth/config", a.wrap(a.AuthConfig)) // public: which methods are available
 	if a.LocalEnabled() {
-		g.POST("/password/signup", a.PasswordSignup)
-		g.POST("/password/login", a.PasswordLogin)
-		g.POST("/password/reset/request", a.PasswordResetRequest)
-		g.POST("/password/reset/confirm", a.PasswordResetConfirm)
-		g.POST("/email/request", a.EmailRequest)
-		g.GET("/email/login", a.EmailLogin)
-		g.GET("/email/verify", a.EmailVerify)
-		// Passkeys (WebAuthn) — register is session-gated; login is discoverable (QR-capable).
-		g.POST("/webauthn/register/begin", a.WebauthnRegisterBegin)
-		g.POST("/webauthn/register/finish", a.WebauthnRegisterFinish)
-		g.POST("/webauthn/login/begin", a.WebauthnLoginBegin)
-		g.POST("/webauthn/login/finish", a.WebauthnLoginFinish)
-		// Self-service account management (session-gated inside each handler).
-		g.GET("/api/account", a.AccountInfo)
-		g.POST("/api/account/password", a.AccountSetPassword)
-		g.DELETE("/api/passkeys/:id", a.PasskeyRemove)
+		mux.HandleFunc("POST /auth/password/signup", a.wrap(a.PasswordSignup))
+		mux.HandleFunc("POST /auth/password/login", a.wrap(a.PasswordLogin))
+		mux.HandleFunc("POST /auth/password/reset/request", a.wrap(a.PasswordResetRequest))
+		mux.HandleFunc("POST /auth/password/reset/confirm", a.wrap(a.PasswordResetConfirm))
+		mux.HandleFunc("POST /auth/email/request", a.wrap(a.EmailRequest))
+		mux.HandleFunc("GET /auth/email/login", a.wrap(a.EmailLogin))
+		mux.HandleFunc("GET /auth/email/verify", a.wrap(a.EmailVerify))
+		mux.HandleFunc("POST /auth/webauthn/register/begin", a.wrap(a.WebauthnRegisterBegin))
+		mux.HandleFunc("POST /auth/webauthn/register/finish", a.wrap(a.WebauthnRegisterFinish))
+		mux.HandleFunc("POST /auth/webauthn/login/begin", a.wrap(a.WebauthnLoginBegin))
+		mux.HandleFunc("POST /auth/webauthn/login/finish", a.wrap(a.WebauthnLoginFinish))
+		mux.HandleFunc("GET /auth/api/account", a.wrap(a.AccountInfo))
+		mux.HandleFunc("POST /auth/api/account/password", a.wrap(a.AccountSetPassword))
+		mux.HandleFunc("DELETE /auth/api/passkeys/{id}", a.wrap(a.PasskeyRemove))
 	}
-	// Social login (Google / GitHub) — independent of local auth; registered when any provider
-	// is configured. The handler 404s an unconfigured :provider.
 	if a.socialConfigured("google") || a.socialConfigured("github") {
-		g.GET("/social/:provider/login", a.SocialLogin)
-		g.GET("/social/:provider/callback", a.SocialCallback)
+		mux.HandleFunc("GET /auth/social/{provider}/login", a.wrap(a.SocialLogin))
+		mux.HandleFunc("GET /auth/social/{provider}/callback", a.wrap(a.SocialCallback))
 	}
-	// Admin REST API (groups / users / API keys) — mounted when a directory store is wired.
 	if a.DirectoryEnabled() {
-		a.registerAdmin(g)
+		a.adminRoutes(mux)
 	}
 }
 
 // Login starts the Authorization Code + PKCE flow: stash state/nonce/verifier/next in
 // a short-lived signed cookie and redirect to the IdP.
-func (a *Authenticator) Login(c *gin.Context) {
+func (a *Authenticator) Login(c *reqCtx) {
 	if !a.Enabled() {
 		c.Redirect(http.StatusFound, "/")
 		return
@@ -82,7 +73,7 @@ func (a *Authenticator) Login(c *gin.Context) {
 		Next:     sanitizeNext(c.Query("next")),
 	}, time.Now())
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "login init failed"})
+		c.JSON(http.StatusInternalServerError, H{"error": "login init failed"})
 		return
 	}
 	a.setCookie(c, flowCookie, flow, int(flowTTL/time.Second))
@@ -93,7 +84,7 @@ func (a *Authenticator) Login(c *gin.Context) {
 
 // Callback completes the flow: validate state, exchange the code, verify the ID
 // token, enforce group access, then set the session cookie.
-func (a *Authenticator) Callback(c *gin.Context) {
+func (a *Authenticator) Callback(c *reqCtx) {
 	if !a.Enabled() {
 		c.Redirect(http.StatusFound, "/")
 		return
@@ -103,37 +94,37 @@ func (a *Authenticator) Callback(c *gin.Context) {
 	flowTok, _ := c.Cookie(flowCookie)
 	fc, err := parseFlow(a.cfg.SessionSecret, flowTok)
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "login session expired — try again"})
+		c.JSON(http.StatusBadRequest, H{"error": "login session expired — try again"})
 		return
 	}
 	a.clearCookie(c, flowCookie)
 
 	if errMsg := c.Query("error"); errMsg != "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "identity provider: " + errMsg})
+		c.JSON(http.StatusUnauthorized, H{"error": "identity provider: " + errMsg})
 		return
 	}
 	if !ctEqual(c.Query("state"), fc.State) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "state mismatch"})
+		c.JSON(http.StatusBadRequest, H{"error": "state mismatch"})
 		return
 	}
 
 	oauthToken, err := a.oauth.Exchange(ctx, c.Query("code"), oauth2.VerifierOption(fc.Verifier))
 	if err != nil {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "token exchange failed"})
+		c.JSON(http.StatusBadGateway, H{"error": "token exchange failed"})
 		return
 	}
 	rawID, ok := oauthToken.Extra("id_token").(string)
 	if !ok {
-		c.JSON(http.StatusBadGateway, gin.H{"error": "no id_token in response"})
+		c.JSON(http.StatusBadGateway, H{"error": "no id_token in response"})
 		return
 	}
 	idToken, err := a.verifier.Verify(ctx, rawID)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "id_token verification failed"})
+		c.JSON(http.StatusUnauthorized, H{"error": "id_token verification failed"})
 		return
 	}
 	if !ctEqual(idToken.Nonce, fc.Nonce) {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "nonce mismatch"})
+		c.JSON(http.StatusUnauthorized, H{"error": "nonce mismatch"})
 		return
 	}
 
@@ -146,7 +137,7 @@ func (a *Authenticator) Callback(c *gin.Context) {
 	_ = idToken.Claims(&claims)
 
 	if !a.groupAllowed(claims.Groups) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "your account is not in an allowed group"})
+		c.JSON(http.StatusForbidden, H{"error": "your account is not in an allowed group"})
 		return
 	}
 
@@ -163,9 +154,9 @@ func (a *Authenticator) Callback(c *gin.Context) {
 		})
 		if err != nil {
 			if errors.Is(err, ErrAccessDenied) {
-				c.JSON(http.StatusForbidden, gin.H{"error": "your account is not authorized"})
+				c.JSON(http.StatusForbidden, H{"error": "your account is not authorized"})
 			} else {
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "authorization failed"})
+				c.JSON(http.StatusInternalServerError, H{"error": "authorization failed"})
 			}
 			return
 		}
@@ -173,7 +164,7 @@ func (a *Authenticator) Callback(c *gin.Context) {
 
 	session, err := mintSession(a.cfg.SessionSecret, idToken.Subject, claims.Email, name, role, rawID, claims.Groups, time.Now(), sessionTTL)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "session creation failed"})
+		c.JSON(http.StatusInternalServerError, H{"error": "session creation failed"})
 		return
 	}
 	a.setCookie(c, sessionCookie, session, int(sessionTTL/time.Second))
@@ -182,7 +173,7 @@ func (a *Authenticator) Callback(c *gin.Context) {
 
 // Logout clears the session and, if the IdP advertises one, redirects to its
 // RP-initiated logout endpoint.
-func (a *Authenticator) Logout(c *gin.Context) {
+func (a *Authenticator) Logout(c *reqCtx) {
 	// Read the id_token (logout hint) before clearing the session cookie.
 	var idHint string
 	if tok, _ := c.Cookie(sessionCookie); tok != "" {
@@ -222,19 +213,19 @@ func (a *Authenticator) postLogoutURL() string {
 }
 
 // Me reports auth status + the current identity for the SPA. Always 200.
-func (a *Authenticator) Me(c *gin.Context) {
+func (a *Authenticator) Me(c *reqCtx) {
 	if !a.Enabled() {
-		c.JSON(http.StatusOK, gin.H{"authEnabled": false, "authenticated": false})
+		c.JSON(http.StatusOK, H{"authEnabled": false, "authenticated": false})
 		return
 	}
 	// The /auth group is public, so parse the cookie directly here.
 	tok, _ := c.Cookie(sessionCookie)
 	sc, err := parseSession(a.cfg.SessionSecret, tok)
 	if err != nil {
-		c.JSON(http.StatusOK, gin.H{"authEnabled": true, "authenticated": false})
+		c.JSON(http.StatusOK, H{"authEnabled": true, "authenticated": false})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{
+	c.JSON(http.StatusOK, H{
 		"authEnabled":   true,
 		"authenticated": true,
 		"sub":           sc.Subject,
