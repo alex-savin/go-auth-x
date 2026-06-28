@@ -130,6 +130,7 @@ func (a *Authenticator) Callback(c *reqCtx) {
 
 	var claims struct {
 		Email             string   `json:"email"`
+		EmailVerified     bool     `json:"email_verified"`
 		Name              string   `json:"name"`
 		PreferredUsername string   `json:"preferred_username"`
 		Groups            []string `json:"groups"`
@@ -151,6 +152,7 @@ func (a *Authenticator) Callback(c *reqCtx) {
 	if a.authorizer != nil {
 		role, err = a.authorizer.Authorize(ctx, Identity{
 			Subject: idToken.Subject, Email: claims.Email, Name: name, Groups: claims.Groups,
+			EmailVerified: claims.EmailVerified || a.cfg.OIDCAssumeVerified,
 		})
 		if err != nil {
 			if errors.Is(err, ErrAccessDenied) {

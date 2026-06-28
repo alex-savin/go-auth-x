@@ -29,16 +29,21 @@ func TrustedProxies() []string {
 	return []string{"127.0.0.1/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
 }
 
-// isPublicPath lists routes reachable without a session: the auth flow itself, static assets, the
-// container healthcheck, and the consuming app's login pages. (Consumer-configurable matching is a
-// roadmap item; today these defaults cover the reference UI.)
-func isPublicPath(p string) bool {
-	if strings.HasPrefix(p, "/_next/") || strings.HasPrefix(p, "/auth/") {
+// publicPath reports routes reachable without a session: the auth flow itself, static assets, the
+// container healthcheck — plus the consuming app's login pages, via Config.PublicPath (or the
+// built-in reference defaults when that's nil).
+func (a *Authenticator) publicPath(p string) bool {
+	// The library's own surface is ALWAYS public, regardless of Config.PublicPath.
+	if strings.HasPrefix(p, "/_next/") || strings.HasPrefix(p, "/auth/") || p == "/api/health" || p == "/favicon.ico" {
 		return true
 	}
+	// Consumer-supplied matcher takes over the app-route decision when set.
+	if a.cfg.PublicPath != nil {
+		return a.cfg.PublicPath(p)
+	}
+	// Built-in reference-UI public routes (used only when no matcher is configured).
 	switch p {
-	case "/api/health", "/favicon.ico", "/signup", "/welcome", "/restore",
-		"/login", "/register", "/recover", "/reset", "/verify":
+	case "/signup", "/welcome", "/restore", "/login", "/register", "/recover", "/reset", "/verify":
 		return true
 	}
 	return false

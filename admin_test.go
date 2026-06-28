@@ -42,12 +42,15 @@ func TestAdminGuardScopesAndGroups(t *testing.T) {
 		t.Fatal("adminGuard should reject an invalid key")
 	}
 
-	// Scope checks.
+	// Scope checks (deny-by-default).
 	if !a.ValidateAPIKeyScope(raw, "admin") || a.ValidateAPIKeyScope(raw, "scim") {
 		t.Fatal("key should have 'admin' scope but not 'scim'")
 	}
-	if !KeyHasScope(&APIKeyInfo{}, "anything") {
-		t.Fatal("empty Scopes must be unrestricted")
+	if KeyHasScope(&APIKeyInfo{}, "anything") {
+		t.Fatal("empty Scopes must grant nothing (deny-by-default)")
+	}
+	if !KeyHasScope(&APIKeyInfo{Scopes: []string{"*"}}, "anything") {
+		t.Fatal(`["*"] must grant everything`)
 	}
 
 	// requestGroups merges the key's groups.

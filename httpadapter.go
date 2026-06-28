@@ -40,7 +40,7 @@ func (a *Authenticator) GateHTTP(next http.Handler) http.Handler {
 			return
 		}
 		p := r.URL.Path
-		if isPublicPath(p) {
+		if a.publicPath(p) {
 			next.ServeHTTP(w, r)
 			return
 		}

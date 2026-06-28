@@ -348,7 +348,7 @@ func (s *Store) Authorizer() authx.Authorizer { return &authorizer{s} }
 type authorizer struct{ s *Store }
 
 func (a *authorizer) Authorize(_ context.Context, id authx.Identity) (string, error) {
-	_, err := a.s.UpsertUserOnLogin(id.Subject, id.Email, id.Name, true)
+	_, err := a.s.UpsertUserOnLogin(id.Subject, id.Email, id.Name, id.EmailVerified)
 	return "", err
 }
 

@@ -189,7 +189,7 @@ func (a *Authenticator) PasswordLogin(c *reqCtx) {
 		return
 	}
 	a.creds.RecordAudit(u.ID, email, ip, "password", "login", true, "")
-	if err := a.completeLogin(c, Identity{Subject: u.Sub, Email: u.Email, Name: u.Name}, body.Remember); err != nil {
+	if err := a.completeLogin(c, Identity{Subject: u.Sub, Email: u.Email, Name: u.Name, EmailVerified: true}, body.Remember); err != nil {
 		c.JSON(http.StatusInternalServerError, H{"error": "login failed"})
 		return
 	}

@@ -9,12 +9,16 @@ import (
 	"golang.org/x/oauth2"
 )
 
-// Identity is the verified OIDC identity handed to an Authorizer after login.
+// Identity is the authenticated identity handed to an Authorizer after login.
 type Identity struct {
 	Subject string
 	Email   string
 	Name    string
 	Groups  []string
+	// EmailVerified reports whether THIS login proved the email — the OIDC email_verified claim,
+	// a provider-verified social email, or a redeemed in-app token. The reference Authorizer feeds
+	// it to the safe account-linking rule (only a proven email may reclaim/adopt another row).
+	EmailVerified bool
 }
 
 // Authorizer is an optional post-login hook (e.g. multi-tenant provisioning). It may

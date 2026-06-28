@@ -26,6 +26,15 @@ type Config struct {
 	// OwnerEmail (OWNER_EMAIL) is exempt from hard per-account lockout so the operator can't
 	// be locked out mid-migration (recovery via email link stays open regardless).
 	OwnerEmail string
+	// OIDCAssumeVerified (OIDC_ASSUME_VERIFIED) trusts the issuer's email as verified even when the
+	// id_token omits an email_verified claim. Leave false (default) to require the claim — the
+	// correct posture for multi-IdP setups; set true only for a single, fully-trusted issuer that
+	// doesn't emit the claim.
+	OIDCAssumeVerified bool
+	// PublicPath, if set, is consulted (in addition to the always-public /auth, /_next, health
+	// routes) to decide which paths the gate lets through unauthenticated — e.g. your SPA's login
+	// pages. nil = the built-in reference defaults (/login, /register, /welcome, …).
+	PublicPath func(path string) bool
 	// Social login (OAuth). Each provider turns on only when its client id + secret are set.
 	// Callback URLs are AppURL + /auth/social/{google,github}/callback (register them upstream).
 	GoogleClientID     string // GOOGLE_CLIENT_ID
@@ -46,6 +55,8 @@ func ConfigFromEnv() Config {
 		CookieSecure:  os.Getenv("COOKIE_SECURE") == "true",
 		AppURL:        strings.TrimRight(os.Getenv("APP_URL"), "/"),
 		OwnerEmail:    strings.ToLower(strings.TrimSpace(os.Getenv("OWNER_EMAIL"))),
+
+		OIDCAssumeVerified: os.Getenv("OIDC_ASSUME_VERIFIED") == "true",
 
 		GoogleClientID:     os.Getenv("GOOGLE_CLIENT_ID"),
 		GoogleClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),

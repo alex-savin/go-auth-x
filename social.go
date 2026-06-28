@@ -156,7 +156,7 @@ func (a *Authenticator) SocialCallback(c *reqCtx) {
 		return
 	}
 	a.creds.RecordAudit(au.ID, au.Email, c.ClientIP(), provider, "login", true, "")
-	if err := a.completeLogin(c, Identity{Subject: au.Sub, Email: au.Email, Name: au.Name}, false); err != nil {
+	if err := a.completeLogin(c, Identity{Subject: au.Sub, Email: au.Email, Name: au.Name, EmailVerified: true}, false); err != nil {
 		c.JSON(http.StatusInternalServerError, H{"error": "sign-in failed"})
 		return
 	}
