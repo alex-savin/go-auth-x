@@ -73,7 +73,7 @@ func (a *Authenticator) PasswordSignup(c *reqCtx) {
 		c.JSON(http.StatusBadRequest, H{"error": msg})
 		return
 	}
-	if !a.ipLimiter.allow("signup:" + c.ClientIP()) {
+	if !a.ipLimiter.Allow("signup:" + c.ClientIP()) {
 		c.JSON(http.StatusTooManyRequests, H{"error": "too many attempts — try again shortly"})
 		return
 	}
@@ -132,7 +132,7 @@ func (a *Authenticator) PasswordLogin(c *reqCtx) {
 	}
 	email := normEmail(body.Email)
 	ip := c.ClientIP()
-	if !a.ipLimiter.allow("login:" + ip) {
+	if !a.ipLimiter.Allow("login:" + ip) {
 		c.JSON(http.StatusTooManyRequests, H{"error": "too many attempts — try again shortly"})
 		return
 	}
@@ -182,7 +182,7 @@ func (a *Authenticator) PasswordLogin(c *reqCtx) {
 	if !u.EmailVerified {
 		// Correct password but unverified: (re)send the confirmation link so "check your
 		// inbox" is truthful. Rate-limited per account to avoid spamming.
-		if a.acctLimiter.allow("verify:" + email) {
+		if a.acctLimiter.Allow("verify:" + email) {
 			a.sendVerifyEmail(u.ID, email)
 		}
 		c.JSON(http.StatusForbidden, H{"error": "Please confirm your email — we've sent a fresh confirmation link to your inbox.", "needsVerify": true})
@@ -202,7 +202,7 @@ func (a *Authenticator) PasswordResetRequest(c *reqCtx) {
 	_ = c.ShouldBindJSON(&body)
 	email := normEmail(body.Email)
 	generic := H{"ok": true, "message": "If an account exists for that address, we've sent a reset link."}
-	if !validEmail(email) || !a.ipLimiter.allow("reset:"+c.ClientIP()) || !a.acctLimiter.allow("reset:"+email) {
+	if !validEmail(email) || !a.ipLimiter.Allow("reset:"+c.ClientIP()) || !a.acctLimiter.Allow("reset:"+email) {
 		c.JSON(http.StatusOK, generic)
 		return
 	}

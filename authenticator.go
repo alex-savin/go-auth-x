@@ -50,8 +50,9 @@ type Authenticator struct {
 	// localEnabled mirrors AUTH_LOCAL: in-app methods are wired only when true.
 	localEnabled bool
 	// Rate limiters for the local auth endpoints (per-IP + per-account); nil until enabled.
-	ipLimiter   *rateLimiter
-	acctLimiter *rateLimiter
+	// RateLimiter so consumers can swap in a shared-store backend via SetRateLimiters.
+	ipLimiter   RateLimiter
+	acctLimiter RateLimiter
 	// wauthn is the WebAuthn relying-party instance for passkeys; nil until configured.
 	wauthn *webauthn.WebAuthn
 	// Social login OAuth (nil until the provider's client id + secret are set).

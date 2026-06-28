@@ -46,7 +46,7 @@ func (a *Authenticator) EmailRequest(c *reqCtx) {
 	_ = c.ShouldBindJSON(&body)
 	email := normEmail(body.Email)
 	generic := H{"ok": true, "message": "If an account exists for that address, we've sent a sign-in link."}
-	if !validEmail(email) || !a.ipLimiter.allow("magic:"+c.ClientIP()) || !a.acctLimiter.allow("magic:"+email) {
+	if !validEmail(email) || !a.ipLimiter.Allow("magic:"+c.ClientIP()) || !a.acctLimiter.Allow("magic:"+email) {
 		c.JSON(http.StatusOK, generic)
 		return
 	}

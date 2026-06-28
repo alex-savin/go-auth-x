@@ -5,10 +5,24 @@ import (
 	"time"
 )
 
-// rateLimiter is a small in-memory sliding-window limiter keyed by an arbitrary string
-// (per-IP or per-account email). Safe for concurrent use. The single-replica deployment
-// makes the in-memory state coherent; horizontal scaling would require a shared store
-// (Postgres/Redis) instead.
+// RateLimiter throttles auth attempts keyed by an arbitrary string (a client IP or an account
+// email). Allow records ONE attempt for key and reports whether it remains within budget (false =
+// throttle). Implementations MUST be safe for concurrent use. The built-in default is in-memory and
+// per-process; for a multi-replica deployment supply a shared-store (e.g. Redis) implementation via
+// SetRateLimiters so the budget is coherent across replicas.
+type RateLimiter interface {
+	Allow(key string) bool
+}
+
+// SetRateLimiters overrides the per-IP and per-account limiters with custom (e.g. Redis-backed)
+// backends. Call it during setup, BEFORE auth is enabled — once set, the built-in in-memory
+// defaults (and their GC ticker) are not installed. Both arguments are required.
+func (a *Authenticator) SetRateLimiters(perIP, perAccount RateLimiter) {
+	a.ipLimiter, a.acctLimiter = perIP, perAccount
+}
+
+// rateLimiter is the built-in in-memory sliding-window RateLimiter, keyed by an arbitrary string.
+// Safe for concurrent use; per-process only (use SetRateLimiters for horizontal scaling).
 type rateLimiter struct {
 	mu     sync.Mutex
 	hits   map[string][]time.Time
@@ -20,26 +34,28 @@ func newRateLimiter(limit int, window time.Duration) *rateLimiter {
 	return &rateLimiter{hits: make(map[string][]time.Time), window: window, limit: limit}
 }
 
-// enableLimiters lazily creates the per-IP and per-account limiters and starts a GC ticker.
-// Called when in-app auth is turned on.
+// enableLimiters lazily installs the per-IP and per-account limiters and starts a GC ticker.
+// Called when in-app auth is turned on. A no-op if the consumer already supplied limiters via
+// SetRateLimiters (they own their backend's expiry, so no GC ticker is started).
 func (a *Authenticator) enableLimiters() {
 	if a.ipLimiter != nil {
 		return
 	}
-	a.ipLimiter = newRateLimiter(20, 5*time.Minute)    // total auth attempts per IP
-	a.acctLimiter = newRateLimiter(10, 15*time.Minute) // request-mail attempts per account
+	ip := newRateLimiter(20, 5*time.Minute)    // total auth attempts per IP
+	acct := newRateLimiter(10, 15*time.Minute) // request-mail attempts per account
+	a.ipLimiter, a.acctLimiter = ip, acct
 	go func() {
 		t := time.NewTicker(10 * time.Minute)
 		defer t.Stop()
 		for range t.C {
-			a.ipLimiter.gc()
-			a.acctLimiter.gc()
+			ip.gc()
+			acct.gc()
 		}
 	}()
 }
 
-// allow records an attempt for key and reports whether it is within the limit.
-func (r *rateLimiter) allow(key string) bool {
+// Allow records an attempt for key and reports whether it is within the limit.
+func (r *rateLimiter) Allow(key string) bool {
 	now := time.Now()
 	cutoff := now.Add(-r.window)
 	r.mu.Lock()
