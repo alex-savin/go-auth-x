@@ -218,6 +218,7 @@ provider activates when its client id + secret are present.
 | `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | `ClientID` / `ClientSecret` | Confidential OIDC client. |
 | `OIDC_REDIRECT_URL` | `RedirectURL` | e.g. `https://app.example.com/auth/callback`. |
 | `OIDC_ALLOWED_GROUPS` | `AllowedGroups` | Comma-sep allow-list; empty = any authenticated user. |
+| `OIDC_ASSUME_VERIFIED` | `OIDCAssumeVerified` | Trust the issuer's email when the id_token omits `email_verified` (single trusted IdP only). Default off → require the claim. |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | `GoogleClientID` / `…Secret` | Enables Google login. |
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | `GitHubClientID` / `…Secret` | Enables GitHub login. |
 | `TRUSTED_PROXIES` | — (`authx.TrustedProxies()`) | CSV of proxy CIDRs; default = private ranges + loopback. |
@@ -297,8 +298,9 @@ mux.Handle("/reports", authn.RequireGroupsHTTP("analysts", "admins")(reportsHand
 ```
 
 ### API keys
-`axk_`-prefixed, **sha256-at-rest**, with optional expiry, groups, and **scopes** (empty = unrestricted;
-e.g. `["admin"]`, `["scim"]`). The `Authorization: Bearer <key>` header is validated via
+`axk_`-prefixed, **sha256-at-rest**, with optional expiry, groups, and **scopes**. Scopes are
+**deny-by-default** (least privilege): an empty list grants **nothing** — use `["admin"]`, `["scim"]`,
+or `["*"]` for a root key. The `Authorization: Bearer <key>` header is validated via
 `authn.ValidateAPIKey(raw)` / `authn.ValidateAPIKeyScope(raw, "scim")`. CSRF is correctly **skipped**
 for Bearer requests (not cookie-based). The raw key is shown **once** at creation.
 
@@ -330,9 +332,10 @@ result, err := syncer.Sync() // run on a schedule
 
 ### SCIM 2.0
 A mountable provisioning server so an upstream IdP (Okta, Entra/Azure AD, JumpCloud) can push and
-deprovision Users + Groups. Supports create / read / list (`userName eq` filter) / **PATCH deprovision
-(`active=false`)** / delete, plus `ServiceProviderConfig` / `ResourceTypes` / `Schemas`. Bearer-auth via
-`ValidateAPIKey`. *(Pragmatic v0 — no PUT-replace / complex filters / bulk.)*
+deprovision Users + Groups. Supports create / read / list (filters: `eq`, `co`, `sw`, `pr`) / **PATCH
+deprovision (`active=false`)** / **PUT replace** / delete, a **`/Bulk`** endpoint, plus
+`ServiceProviderConfig` / `ResourceTypes` / `Schemas`. Bearer-auth via `ValidateAPIKey`. *(Not yet:
+sorting, ETags, AND/OR-composed filters.)*
 
 ```go
 mux.Handle("/scim/v2/", http.StripPrefix("/scim/v2",
@@ -367,9 +370,11 @@ ORM. Compile-time conformance: `var _ authx.CredentialStore = (*MyStore)(nil)`.
 - **Tokens** (magic-link / verify / reset) — 256-bit `crypto/rand`, sha256-at-rest, single-use (atomic),
   per-purpose TTL, always-200 anti-enumeration.
 - **Passkeys** — fixed `rpID`/origin (never host-inferred), signed challenge cookie, **clone detection**.
-- **OAuth/OIDC** — Authorization Code + **PKCE (S256)** + `state` + `nonce`, constant-time compares.
+- **OAuth/OIDC** — Authorization Code + **PKCE (S256)** + `state` + `nonce`, constant-time compares;
+  email trusted only when `email_verified` is set (or `OIDC_ASSUME_VERIFIED` for a single trusted IdP).
 - **Rate limiting** — sliding-window per-IP + soft per-account lockout (durable counts; recovery paths
-  stay open; owner exempt).
+  stay open; owner exempt). Pluggable: supply a shared-store backend via `SetRateLimiters` for
+  multi-replica deployments.
 - **Trusted proxies** — a built-in `X-Forwarded-For` walk trusting only `TrustedProxies()` ranges, so
   the client IP (and per-IP limits) can't be spoofed.
 
@@ -435,10 +440,11 @@ go-auth-x/
 
 - **Done**: pure **net/http** (zero framework dependency); OIDC, password, passkey (+ QR), magic-link,
   social (Google/GitHub); GORM + in-memory stores; SMTP mailer; groups + per-group access control;
-  API keys with **scopes** + admin REST API; LDAP sync (+ deprovision-by-absence); SCIM 2.0 (incl. PUT
-  + filters); the **squatter-reclaim** path.
-- **Planned**: **Apple + Facebook** social; consumer-configurable public-path matcher; richer SCIM
-  (complex filters, bulk); pluggable rate-limit backends.
+  API keys with **deny-by-default scopes** + admin REST API; LDAP sync (+ deprovision-by-absence);
+  SCIM 2.0 (PUT + `eq`/`co`/`sw`/`pr` filters + `/Bulk`); the **squatter-reclaim** path;
+  `email_verified`-gated OIDC linking; **configurable public paths** (`Config.PublicPath`); **pluggable
+  rate-limit backends** (`SetRateLimiters`).
+- **Planned**: **Apple + Facebook** social; AND/OR-composed SCIM filters + sorting/ETags.
 
 ---
 
