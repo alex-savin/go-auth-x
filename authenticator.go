@@ -50,6 +50,9 @@ type Authenticator struct {
 	acctLimiter *rateLimiter
 	// wauthn is the WebAuthn relying-party instance for passkeys; nil until configured.
 	wauthn *webauthn.WebAuthn
+	// Social login OAuth (nil until the provider's client id + secret are set).
+	googleOAuth, githubOAuth *oauth2.Config
+	googleVerifier           *oidc.IDTokenVerifier
 }
 
 // SetAuthorizer installs an optional post-login authorization hook.
@@ -60,32 +63,32 @@ func (a *Authenticator) SetAuthorizer(z Authorizer) { a.authorizer = z }
 // issuer and fails on error — we'd rather refuse to boot than run unprotected when
 // auth was intended (fail closed).
 func New(ctx context.Context, cfg Config) (*Authenticator, error) {
-	if !cfg.Enabled() {
-		return &Authenticator{cfg: cfg, enabled: false}, nil
-	}
-	provider, err := oidc.NewProvider(ctx, cfg.Issuer)
-	if err != nil {
-		return nil, err
-	}
-	var meta struct {
-		EndSessionEndpoint string `json:"end_session_endpoint"`
-	}
-	_ = provider.Claims(&meta)
-
-	return &Authenticator{
-		cfg:      cfg,
-		enabled:  true,
-		provider: provider,
-		verifier: provider.Verifier(&oidc.Config{ClientID: cfg.ClientID}),
-		oauth: oauth2.Config{
+	a := &Authenticator{cfg: cfg}
+	if cfg.Enabled() {
+		provider, err := oidc.NewProvider(ctx, cfg.Issuer)
+		if err != nil {
+			return nil, err
+		}
+		var meta struct {
+			EndSessionEndpoint string `json:"end_session_endpoint"`
+		}
+		_ = provider.Claims(&meta)
+		a.enabled = true
+		a.provider = provider
+		a.verifier = provider.Verifier(&oidc.Config{ClientID: cfg.ClientID})
+		a.oauth = oauth2.Config{
 			ClientID:     cfg.ClientID,
 			ClientSecret: cfg.ClientSecret,
 			RedirectURL:  cfg.RedirectURL,
 			Endpoint:     provider.Endpoint(),
 			Scopes:       []string{oidc.ScopeOpenID, "profile", "email", "groups"},
-		},
-		endSession: meta.EndSessionEndpoint,
-	}, nil
+		}
+		a.endSession = meta.EndSessionEndpoint
+	}
+	// Social providers are independent of the primary OIDC issuer (best-effort; a provider
+	// stays off if its discovery fails or its credentials are unset).
+	a.enableSocial(ctx)
+	return a, nil
 }
 
 // Enabled reports whether auth is enforced.

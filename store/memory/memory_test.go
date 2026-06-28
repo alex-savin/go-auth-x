@@ -58,3 +58,19 @@ func TestCredentialRoundTrip(t *testing.T) {
 		t.Fatalf("password round-trip: %q %q %v", h, algo, err)
 	}
 }
+
+// TestOAuthLink exercises the social-identity natural key (provider, subject).
+func TestOAuthLink(t *testing.T) {
+	s := New()
+	u, _ := s.CreateLocalUser("g@x.com", "G")
+	if _, err := s.UserByOAuth("google", "sub-123"); err != authx.ErrNoUser {
+		t.Fatalf("unlinked lookup: want ErrNoUser, got %v", err)
+	}
+	if err := s.LinkOAuth(u.ID, "google", "sub-123", "g@x.com"); err != nil {
+		t.Fatalf("link: %v", err)
+	}
+	got, err := s.UserByOAuth("google", "sub-123")
+	if err != nil || got.ID != u.ID {
+		t.Fatalf("linked lookup: err=%v user=%+v", err, got)
+	}
+}

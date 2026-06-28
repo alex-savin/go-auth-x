@@ -20,8 +20,8 @@ func (a *Authenticator) AuthConfig(c *gin.Context) {
 			"password": a.LocalEnabled(),
 			"email":    emailOn,
 			"passkey":  a.LocalEnabled() && a.wauthn != nil,
-			"google":   false, // Phase 3
-			"github":   false, // Phase 3
+			"google":   a.socialConfigured("google"),
+			"github":   a.socialConfigured("github"),
 		},
 	})
 }

@@ -53,6 +53,7 @@ type Store struct {
 	passwords map[uint]struct{ hash, algo string }
 	passkeys  map[uint]*passkey // keyed by passkey id
 	pkSeq     uint
+	oauth     map[string]uint // (provider|subject) -> userID
 	tokens    []*token
 	audits    []*audit
 }
@@ -63,6 +64,7 @@ func New() *Store {
 		users:     map[uint]*user{},
 		passwords: map[uint]struct{ hash, algo string }{},
 		passkeys:  map[uint]*passkey{},
+		oauth:     map[string]uint{},
 	}
 }
 
@@ -218,6 +220,26 @@ func (s *Store) SetPasswordHash(userID uint, hash, algo string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.passwords[userID] = struct{ hash, algo string }{hash, algo}
+	return nil
+}
+
+func (s *Store) UserByOAuth(provider, subject string) (*authx.AuthUser, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if uid, ok := s.oauth[provider+"|"+subject]; ok {
+		if u := s.users[uid]; u != nil {
+			return view(u), nil
+		}
+	}
+	return nil, authx.ErrNoUser
+}
+
+func (s *Store) LinkOAuth(userID uint, provider, subject, email string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.oauth[provider+"|"+subject]; !exists {
+		s.oauth[provider+"|"+subject] = userID
+	}
 	return nil
 }
 

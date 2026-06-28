@@ -260,6 +260,28 @@ func (s *Store) SetPasswordHash(userID uint, hash, algo string) error {
 	}).Create(&PasswordCredential{UserID: userID, Hash: hash, Algo: algo, CreatedAt: now, UpdatedAt: now}).Error
 }
 
+func (s *Store) UserByOAuth(provider, subject string) (*authx.AuthUser, error) {
+	var oa OAuthIdentity
+	if err := s.db.Where("provider = ? AND subject = ?", provider, subject).First(&oa).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, authx.ErrNoUser
+		}
+		return nil, err
+	}
+	var u User
+	if err := s.db.First(&u, oa.UserID).Error; err != nil {
+		return nil, err
+	}
+	return toAuthUser(&u), nil
+}
+
+func (s *Store) LinkOAuth(userID uint, provider, subject, email string) error {
+	return s.db.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "provider"}, {Name: "subject"}},
+		DoNothing: true,
+	}).Create(&OAuthIdentity{UserID: userID, Provider: provider, Subject: subject, Email: normalizeEmail(email), CreatedAt: time.Now()}).Error
+}
+
 func (s *Store) CreateToken(purpose string, userID uint, email string, tokenHash []byte, expiresAt time.Time) error {
 	return s.db.Create(&AuthToken{
 		Purpose: purpose, UserID: userID, Email: normalizeEmail(email),

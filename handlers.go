@@ -52,6 +52,12 @@ func (a *Authenticator) Register(r gin.IRouter) {
 		g.POST("/api/account/password", a.AccountSetPassword)
 		g.DELETE("/api/passkeys/:id", a.PasskeyRemove)
 	}
+	// Social login (Google / GitHub) — independent of local auth; registered when any provider
+	// is configured. The handler 404s an unconfigured :provider.
+	if a.socialConfigured("google") || a.socialConfigured("github") {
+		g.GET("/social/:provider/login", a.SocialLogin)
+		g.GET("/social/:provider/callback", a.SocialCallback)
+	}
 }
 
 // Login starts the Authorization Code + PKCE flow: stash state/nonce/verifier/next in

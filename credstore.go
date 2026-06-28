@@ -72,6 +72,11 @@ type CredentialStore interface {
 	PasswordHash(userID uint) (hash, algo string, err error) // ErrNoCredential if unset
 	SetPasswordHash(userID uint, hash, algo string) error
 
+	// Social (OAuth) identities — natural key (provider, subject), NOT email, so an upstream
+	// email change doesn't fork the account.
+	UserByOAuth(provider, subject string) (*AuthUser, error)         // ErrNoUser if unlinked
+	LinkOAuth(userID uint, provider, subject, email string) error // idempotent per (provider,subject)
+
 	// Single-use, hashed-at-rest email tokens (magic-link, verify-email, password-reset, invite)
 	CreateToken(purpose string, userID uint, email string, tokenHash []byte, expiresAt time.Time) error
 	ConsumeToken(purpose string, tokenHash []byte) (*TokenClaim, error) // marks consumed atomically; ErrTokenInvalid

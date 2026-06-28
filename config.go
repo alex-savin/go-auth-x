@@ -26,6 +26,12 @@ type Config struct {
 	// OwnerEmail (OWNER_EMAIL) is exempt from hard per-account lockout so the operator can't
 	// be locked out mid-migration (recovery via email link stays open regardless).
 	OwnerEmail string
+	// Social login (OAuth). Each provider turns on only when its client id + secret are set.
+	// Callback URLs are AppURL + /auth/social/{google,github}/callback (register them upstream).
+	GoogleClientID     string // GOOGLE_CLIENT_ID
+	GoogleClientSecret string // GOOGLE_CLIENT_SECRET
+	GitHubClientID     string // GITHUB_CLIENT_ID
+	GitHubClientSecret string // GITHUB_CLIENT_SECRET
 }
 
 // ConfigFromEnv loads the OIDC configuration from the environment.
@@ -40,6 +46,11 @@ func ConfigFromEnv() Config {
 		CookieSecure:   os.Getenv("COOKIE_SECURE") == "true",
 		AppURL:         strings.TrimRight(os.Getenv("APP_URL"), "/"),
 		OwnerEmail:     strings.ToLower(strings.TrimSpace(os.Getenv("OWNER_EMAIL"))),
+
+		GoogleClientID:     os.Getenv("GOOGLE_CLIENT_ID"),
+		GoogleClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
+		GitHubClientID:     os.Getenv("GITHUB_CLIENT_ID"),
+		GitHubClientSecret: os.Getenv("GITHUB_CLIENT_SECRET"),
 	}
 }
 
