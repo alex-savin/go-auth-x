@@ -24,6 +24,16 @@ func (a *Authenticator) completeLogin(c *gin.Context, id Identity, remember bool
 		}
 		role = r
 	}
+	// Enrich the session with the user's groups (for per-group access control) when a directory
+	// is wired and the upstream identity didn't already carry groups (e.g. local/social logins;
+	// OIDC logins keep the IdP-asserted groups).
+	if a.dir != nil && a.creds != nil && len(id.Groups) == 0 {
+		if u, uerr := a.creds.UserBySub(id.Subject); uerr == nil {
+			if gs, gerr := a.dir.UserGroups(u.ID); gerr == nil {
+				id.Groups = groupNames(gs)
+			}
+		}
+	}
 	ttl := sessionTTL
 	if remember {
 		ttl = rememberTTL

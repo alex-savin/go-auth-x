@@ -56,15 +56,29 @@ type Store struct {
 	oauth     map[string]uint // (provider|subject) -> userID
 	tokens    []*token
 	audits    []*audit
+	// directory state
+	groups      map[uint]*authx.Group
+	groupSeq    uint
+	memberships map[uint]map[uint]bool // userID -> set of groupID
+	apikeys     map[uint]*apiKey
+	apiSeq      uint
+}
+
+type apiKey struct {
+	info authx.APIKeyInfo
+	hash string
 }
 
 // New returns an empty in-memory store.
 func New() *Store {
 	return &Store{
-		users:     map[uint]*user{},
-		passwords: map[uint]struct{ hash, algo string }{},
-		passkeys:  map[uint]*passkey{},
-		oauth:     map[string]uint{},
+		users:       map[uint]*user{},
+		passwords:   map[uint]struct{ hash, algo string }{},
+		passkeys:    map[uint]*passkey{},
+		oauth:       map[string]uint{},
+		groups:      map[uint]*authx.Group{},
+		memberships: map[uint]map[uint]bool{},
+		apikeys:     map[uint]*apiKey{},
 	}
 }
 

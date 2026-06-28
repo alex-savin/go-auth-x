@@ -80,6 +80,12 @@ func (a *Authenticator) CSRFMiddleware() gin.HandlerFunc {
 			c.Next()
 			return
 		}
+		// Bearer (API key) auth isn't cookie-based, so it can't be CSRF'd — and would otherwise be
+		// wrongly blocked here. Skip CSRF for those requests.
+		if bearerToken(c.GetHeader("Authorization")) != "" {
+			c.Next()
+			return
+		}
 		if csrfExempt[p] {
 			c.Next()
 			return

@@ -81,6 +81,11 @@ func (a *Authenticator) CSRFHTTP(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		// Bearer (API key) auth isn't cookie-based → not CSRF-able; skip.
+		if bearerToken(r.Header.Get("Authorization")) != "" {
+			next.ServeHTTP(w, r)
+			return
+		}
 		if !a.csrfValidHTTP(r) {
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "invalid or missing CSRF token"})
 			return

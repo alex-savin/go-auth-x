@@ -58,6 +58,10 @@ func (a *Authenticator) Register(r gin.IRouter) {
 		g.GET("/social/:provider/login", a.SocialLogin)
 		g.GET("/social/:provider/callback", a.SocialCallback)
 	}
+	// Admin REST API (groups / users / API keys) — mounted when a directory store is wired.
+	if a.DirectoryEnabled() {
+		a.registerAdmin(g)
+	}
 }
 
 // Login starts the Authorization Code + PKCE flow: stash state/nonce/verifier/next in

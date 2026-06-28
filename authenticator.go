@@ -53,6 +53,8 @@ type Authenticator struct {
 	// Social login OAuth (nil until the provider's client id + secret are set).
 	googleOAuth, githubOAuth *oauth2.Config
 	googleVerifier           *oidc.IDTokenVerifier
+	// dir backs groups / API keys / admin REST (optional; nil = those features off).
+	dir DirectoryStore
 }
 
 // SetAuthorizer installs an optional post-login authorization hook.

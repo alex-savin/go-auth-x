@@ -123,7 +123,11 @@ func New(db *gorm.DB) (*Store, error) {
 	if err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uniq_authx_users_email ON authx_users (email)`).Error; err != nil {
 		return nil, err
 	}
-	return &Store{db}, nil
+	s := &Store{db}
+	if err := s.migrateDirectory(); err != nil {
+		return nil, err
+	}
+	return s, nil
 }
 
 func normalizeEmail(e string) string { return strings.ToLower(strings.TrimSpace(e)) }
