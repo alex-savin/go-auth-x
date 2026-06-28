@@ -9,17 +9,28 @@ import (
 // compile-time proof the in-memory store satisfies the interface.
 var _ authx.CredentialStore = (*Store)(nil)
 
-// TestLinkingRule is the account-takeover regression test: an unverified, non-bootstrap squatter
-// must never be adopted by a later verified login; bootstrap placeholders and verified rows may be.
+// TestLinkingRule is the account-takeover regression test: an unverified, non-bootstrap squatter is
+// never ADOPTED. A verified login RECLAIMS the email (squatter deleted, fresh user); an unverified
+// login is refused. Bootstrap placeholders and already-verified rows are adopted/linked.
 func TestLinkingRule(t *testing.T) {
-	// 1. Takeover attempt: attacker pre-signs-up victim@x (unverified local row).
+	// 1a. Reclaim: attacker pre-signs-up victim@x (unverified). Victim's VERIFIED OIDC login must
+	// reclaim the email — a new user under the IdP sub, with the squatter (and its creds) gone.
 	s := New()
-	if _, err := s.CreateLocalUser("victim@x.com", "attacker"); err != nil {
-		t.Fatalf("seed squatter: %v", err)
+	atk, _ := s.CreateLocalUser("victim@x.com", "attacker")
+	_ = s.SetPasswordHash(atk.ID, "attacker-hash", "bcrypt")
+	u, err := s.UpsertUserOnLogin("idp-sub-real", "victim@x.com", "Victim", true)
+	if err != nil || u.Sub != "idp-sub-real" || u.ID == atk.ID {
+		t.Fatalf("verified login should reclaim the email: err=%v user=%+v (squatter id %d)", err, u, atk.ID)
 	}
-	// Victim logs in via OIDC (verified). MUST refuse, not adopt.
-	if _, err := s.UpsertUserOnLogin("idp-sub-real", "victim@x.com", "Victim", true); err != authx.ErrEmailConflict {
-		t.Fatalf("squatter takeover not blocked: got err=%v, want ErrEmailConflict", err)
+	if _, _, e := s.PasswordHash(atk.ID); e != authx.ErrNoCredential {
+		t.Fatalf("squatter credentials should be gone after reclaim, got %v", e)
+	}
+
+	// 1b. An UNVERIFIED incoming login colliding with an unverified squatter is still refused.
+	s2 := New()
+	_, _ = s2.CreateLocalUser("dup@x.com", "first")
+	if _, err := s2.UpsertUserOnLogin("local:second", "dup@x.com", "second", false); err != authx.ErrEmailConflict {
+		t.Fatalf("unverified collision: want ErrEmailConflict, got %v", err)
 	}
 
 	// 2. Bootstrap adopt: an operator-seeded bootstrap: placeholder IS adopted on first real login.
@@ -27,9 +38,9 @@ func TestLinkingRule(t *testing.T) {
 	if _, err := b.UpsertUserOnLogin("bootstrap:owner@x.com", "owner@x.com", "Owner", false); err != nil {
 		t.Fatalf("seed bootstrap: %v", err)
 	}
-	u, err := b.UpsertUserOnLogin("real-owner-sub", "owner@x.com", "Owner", true)
-	if err != nil || u.Sub != "real-owner-sub" {
-		t.Fatalf("bootstrap adopt failed: err=%v user=%+v", err, u)
+	bu, berr := b.UpsertUserOnLogin("real-owner-sub", "owner@x.com", "Owner", true)
+	if berr != nil || bu.Sub != "real-owner-sub" {
+		t.Fatalf("bootstrap adopt failed: err=%v user=%+v", berr, bu)
 	}
 
 	// 3. Verified-row adopt: a verified account re-resolved under a new subject IS linked.

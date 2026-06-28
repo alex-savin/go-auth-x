@@ -375,7 +375,16 @@ func (s *Store) UpsertUserOnLogin(sub, email, name string, emailVerified bool) (
 				}
 				return toAuthUser(&existing), nil
 			}
-			return nil, authx.ErrEmailConflict
+			// The existing row is an unverified, non-bootstrap squatter. If the INCOMING login
+			// proved the email (OIDC/social/redeemed), reclaim the address: the squatter never
+			// owned it, so we delete it (and its credentials) and provision a clean verified user.
+			// If the incoming did NOT prove the email, refuse rather than risk a takeover.
+			if !emailVerified {
+				return nil, authx.ErrEmailConflict
+			}
+			if derr := s.deleteUserCascade(existing.ID); derr != nil {
+				return nil, derr
+			}
 		}
 		u = User{Sub: sub, Email: email, Name: name, EmailVerified: emailVerified, CreatedAt: time.Now(), LastLoginAt: time.Now()}
 		if err := s.db.Create(&u).Error; err != nil {
@@ -394,4 +403,17 @@ func (s *Store) UpsertUserOnLogin(sub, email, name string, emailVerified bool) (
 		return nil, err
 	}
 	return toAuthUser(&u), nil
+}
+
+// deleteUserCascade removes a user and everything keyed to it (credentials, tokens, OAuth links,
+// group memberships) in one transaction. Used to reclaim an email from an unverified squatter.
+func (s *Store) deleteUserCascade(id uint) error {
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		for _, m := range []any{&PasswordCredential{}, &WebauthnCredential{}, &OAuthIdentity{}, &AuthToken{}, &GroupMembership{}} {
+			if err := tx.Where("user_id = ?", id).Delete(m).Error; err != nil {
+				return err
+			}
+		}
+		return tx.Delete(&User{}, id).Error
+	})
 }

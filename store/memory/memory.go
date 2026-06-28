@@ -330,10 +330,39 @@ func (s *Store) UpsertUserOnLogin(sub, email, name string, emailVerified bool) (
 			}
 			return view(existing), nil
 		}
-		return nil, authx.ErrEmailConflict
+		// Unverified, non-bootstrap squatter: a verified incoming login reclaims the email
+		// (delete the squatter + its credentials); an unproven one is refused.
+		if !emailVerified {
+			return nil, authx.ErrEmailConflict
+		}
+		s.deleteUserCascadeLocked(existing.id)
 	}
 	s.seq++
 	u := &user{id: s.seq, sub: sub, email: email, name: name, emailVerified: emailVerified, lastLoginAt: time.Now()}
 	s.users[u.id] = u
 	return view(u), nil
+}
+
+// deleteUserCascadeLocked removes a user + everything keyed to it. Caller holds s.mu.
+func (s *Store) deleteUserCascadeLocked(id uint) {
+	delete(s.users, id)
+	delete(s.passwords, id)
+	delete(s.memberships, id)
+	for pkid, pk := range s.passkeys {
+		if pk.userID == id {
+			delete(s.passkeys, pkid)
+		}
+	}
+	for k, uid := range s.oauth {
+		if uid == id {
+			delete(s.oauth, k)
+		}
+	}
+	kept := s.tokens[:0]
+	for _, t := range s.tokens {
+		if t.userID != id {
+			kept = append(kept, t)
+		}
+	}
+	s.tokens = kept
 }

@@ -174,13 +174,23 @@ func (a *Authenticator) resolveSocialUser(provider, subject, email, name string)
 		return nil, err
 	}
 	if u, err := a.creds.UserByEmail(email); err == nil {
-		if !u.EmailVerified {
+		if u.EmailVerified {
+			if err := a.creds.LinkOAuth(u.ID, provider, subject, email); err != nil {
+				return nil, err
+			}
+			return u, nil
+		}
+		// Unverified squatter on a provider-verified email. With a directory wired, reclaim it
+		// (the verified social login wins); otherwise refuse rather than risk a takeover.
+		if a.dir == nil {
 			return nil, ErrEmailConflict
 		}
-		if err := a.creds.LinkOAuth(u.ID, provider, subject, email); err != nil {
-			return nil, err
+		nu, rerr := a.dir.UpsertExternalUser("social:"+provider+":"+subject, email, name, true)
+		if rerr != nil {
+			return nil, rerr
 		}
-		return u, nil
+		_ = a.creds.LinkOAuth(nu.ID, provider, subject, email)
+		return nu, nil
 	} else if !errors.Is(err, ErrNoUser) {
 		return nil, err
 	}
