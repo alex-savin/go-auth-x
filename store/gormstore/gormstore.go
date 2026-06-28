@@ -407,6 +407,8 @@ func (s *Store) UpsertUserOnLogin(sub, email, name string, emailVerified bool) (
 
 // deleteUserCascade removes a user and everything keyed to it (credentials, tokens, OAuth links,
 // group memberships) in one transaction. Used to reclaim an email from an unverified squatter.
+// LoginAudit rows are deliberately NOT deleted — the forensic trail is kept, and orphaned audit
+// rows grant no access (they can't resolve to a login).
 func (s *Store) deleteUserCascade(id uint) error {
 	return s.db.Transaction(func(tx *gorm.DB) error {
 		for _, m := range []any{&PasswordCredential{}, &WebauthnCredential{}, &OAuthIdentity{}, &AuthToken{}, &GroupMembership{}} {

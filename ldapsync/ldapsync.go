@@ -171,7 +171,12 @@ func (s *Syncer) Sync() (*Result, error) {
 	}
 
 	// Deprovision: disable any previously-synced LDAP user that wasn't seen this run.
-	if s.cfg.DeprovisionMissing {
+	// SAFETY GUARD: if zero users were synced (a mis-set base DN/filter, an empty page, or a
+	// replication blip), refuse to deprovision — otherwise a transient empty result would disable
+	// every ldap: user at once. Bounded anyway (disable, never delete), but fail safe.
+	if s.cfg.DeprovisionMissing && res.Users == 0 {
+		res.Errors = append(res.Errors, "deprovision skipped: user search returned 0 entries")
+	} else if s.cfg.DeprovisionMissing {
 		all, lerr := s.dir.ListUsers()
 		if lerr != nil {
 			res.Errors = append(res.Errors, fmt.Sprintf("deprovision list: %v", lerr))
