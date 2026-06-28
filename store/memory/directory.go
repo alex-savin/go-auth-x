@@ -142,11 +142,11 @@ func (s *Store) UpsertExternalUser(sub, email, name string, emailVerified bool) 
 
 // --- api keys ---
 
-func (s *Store) CreateAPIKey(name string, groups []string, prefix string, hash []byte, expiresAt *time.Time) (*authx.APIKeyInfo, error) {
+func (s *Store) CreateAPIKey(name string, groups, scopes []string, prefix string, hash []byte, expiresAt *time.Time) (*authx.APIKeyInfo, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.apiSeq++
-	info := authx.APIKeyInfo{ID: s.apiSeq, Name: name, Prefix: prefix, Groups: groups, ExpiresAt: expiresAt, CreatedAt: time.Now()}
+	info := authx.APIKeyInfo{ID: s.apiSeq, Name: name, Prefix: prefix, Groups: groups, Scopes: scopes, ExpiresAt: expiresAt, CreatedAt: time.Now()}
 	s.apikeys[info.ID] = &apiKey{info: info, hash: string(hash)}
 	cp := info
 	return &cp, nil

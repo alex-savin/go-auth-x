@@ -11,10 +11,7 @@ import (
 
 // --- access control: groups (the per-client analog for a single-app BFF) ---
 
-const (
-	ctxAPIKeyGroups = "authxAPIKeyGroups"
-	ctxAPIKeyID     = "authxAPIKeyID"
-)
+const ctxAPIKey = "authxAPIKey" // holds the *APIKeyInfo set by APIKeyAuth
 
 // RequireGroups is Gin middleware that permits only principals (a session user OR an API key) in
 // at least one of the named groups. With no names it permits any authenticated principal. Chain it
@@ -57,9 +54,9 @@ func (a *Authenticator) principalGroups(c *gin.Context) []string {
 	if sc := sessionFrom(c); sc != nil {
 		have = append(have, sc.Groups...)
 	}
-	if v, ok := c.Get(ctxAPIKeyGroups); ok {
-		if gs, ok := v.([]string); ok {
-			have = append(have, gs...)
+	if v, ok := c.Get(ctxAPIKey); ok {
+		if info, ok := v.(*APIKeyInfo); ok {
+			have = append(have, info.Groups...)
 		}
 	}
 	return have
@@ -93,6 +90,15 @@ func (a *Authenticator) ValidateAPIKey(raw string) (*APIKeyInfo, bool) {
 	return info, true
 }
 
+// ValidateAPIKeyScope is ValidateAPIKey plus a scope check — convenient for gating a surface (e.g.
+// the SCIM server) to keys that carry a specific scope:
+//
+//	scim.NewServer(store, func(t string) bool { return authn.ValidateAPIKeyScope(t, "scim") })
+func (a *Authenticator) ValidateAPIKeyScope(raw, scope string) bool {
+	info, ok := a.ValidateAPIKey(raw)
+	return ok && KeyHasScope(info, scope)
+}
+
 func bearerToken(h string) string {
 	const p = "Bearer "
 	if strings.HasPrefix(h, p) {
@@ -117,8 +123,7 @@ func (a *Authenticator) APIKeyAuth() gin.HandlerFunc {
 			return
 		}
 		_ = a.dir.TouchAPIKey(info.ID)
-		c.Set(ctxAPIKeyGroups, info.Groups)
-		c.Set(ctxAPIKeyID, info.ID)
+		c.Set(ctxAPIKey, info)
 		c.Next()
 	}
 }
@@ -128,14 +133,18 @@ func (a *Authenticator) APIKeyAuth() gin.HandlerFunc {
 // adminGuard permits the instance owner (OWNER_EMAIL session) or any valid API key. API keys are
 // admin-scoped server-to-server credentials; the owner mints the first one via an owner session.
 func (a *Authenticator) adminGuard(c *gin.Context) bool {
-	if _, ok := c.Get(ctxAPIKeyID); ok {
-		return true
+	if v, ok := c.Get(ctxAPIKey); ok {
+		if info, ok := v.(*APIKeyInfo); ok && KeyHasScope(info, "admin") {
+			return true
+		}
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "API key lacks the 'admin' scope"})
+		return false
 	}
 	if sc := sessionFrom(c); sc != nil && a.cfg.OwnerEmail != "" &&
 		strings.EqualFold(strings.TrimSpace(sc.Email), a.cfg.OwnerEmail) {
 		return true
 	}
-	c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "owner or API key required"})
+	c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "owner session or API key with 'admin' scope required"})
 	return false
 }
 
@@ -285,6 +294,7 @@ func (a *Authenticator) adminCreateKey(c *gin.Context) {
 	var body struct {
 		Name      string   `json:"name"`
 		Groups    []string `json:"groups"`
+		Scopes    []string `json:"scopes"`    // optional; empty = unrestricted (e.g. ["admin"], ["scim"])
 		ExpiresAt *string  `json:"expiresAt"` // optional RFC3339
 	}
 	if err := c.ShouldBindJSON(&body); err != nil || strings.TrimSpace(body.Name) == "" {
@@ -301,7 +311,7 @@ func (a *Authenticator) adminCreateKey(c *gin.Context) {
 		expires = &t
 	}
 	raw, prefix, hash := generateAPIKey()
-	info, err := a.dir.CreateAPIKey(body.Name, body.Groups, prefix, hash, expires)
+	info, err := a.dir.CreateAPIKey(body.Name, body.Groups, body.Scopes, prefix, hash, expires)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return

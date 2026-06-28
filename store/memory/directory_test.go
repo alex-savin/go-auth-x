@@ -24,13 +24,19 @@ func TestDirectory(t *testing.T) {
 		t.Fatalf("group members: %+v", m)
 	}
 
-	info, err := s.CreateAPIKey("ci", []string{"admins"}, "axk_abc123", []byte("hash-bytes"), nil)
+	info, err := s.CreateAPIKey("ci", []string{"admins"}, []string{"scim"}, "axk_abc123", []byte("hash-bytes"), nil)
 	if err != nil {
 		t.Fatalf("create key: %v", err)
 	}
 	got, err := s.APIKeyByHash([]byte("hash-bytes"))
 	if err != nil || got.ID != info.ID || len(got.Groups) != 1 || got.Groups[0] != "admins" {
 		t.Fatalf("apikey by hash: err=%v key=%+v", err, got)
+	}
+	if len(got.Scopes) != 1 || got.Scopes[0] != "scim" {
+		t.Fatalf("apikey scopes round-trip: %+v", got.Scopes)
+	}
+	if !authx.KeyHasScope(got, "scim") || authx.KeyHasScope(got, "admin") {
+		t.Fatalf("scope check wrong for %+v", got.Scopes)
 	}
 	if _, err := s.APIKeyByHash([]byte("nope")); err != authx.ErrNoCredential {
 		t.Fatalf("unknown key: want ErrNoCredential, got %v", err)

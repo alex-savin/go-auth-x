@@ -38,12 +38,13 @@ func TestAPIKeyAuthAndGroups(t *testing.T) {
 	c.Request = httptest.NewRequest(http.MethodPost, "/auth/admin/groups", nil)
 	c.Request.Header.Set("Authorization", "Bearer "+raw)
 	a.APIKeyAuth()(c)
-	v, ok := c.Get(ctxAPIKeyGroups)
-	if !ok || v.([]string)[0] != "admin" {
-		t.Fatalf("APIKeyAuth did not stamp groups: %v %v", ok, v)
+	v, ok := c.Get(ctxAPIKey)
+	info, isInfo := v.(*APIKeyInfo)
+	if !ok || !isInfo || len(info.Groups) == 0 || info.Groups[0] != "admin" {
+		t.Fatalf("APIKeyAuth did not stamp the key info: ok=%v v=%v", ok, v)
 	}
 	if !a.adminGuard(c) {
-		t.Fatal("adminGuard should accept a valid API key")
+		t.Fatal("adminGuard should accept a valid API key (empty scopes = unrestricted)")
 	}
 
 	// An invalid key is rejected (401).

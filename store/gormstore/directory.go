@@ -39,6 +39,7 @@ type APIKey struct {
 	Prefix     string
 	Hash       []byte `gorm:"uniqueIndex"`
 	Groups     string // CSV of group names granted to calls made with this key
+	Scopes     string // CSV of scopes this key is limited to (empty = unrestricted)
 	ExpiresAt  *time.Time
 	CreatedAt  time.Time
 	LastUsedAt *time.Time
@@ -67,7 +68,7 @@ func csvSplit(s string) []string {
 
 func toAPIKeyInfo(k *APIKey) authx.APIKeyInfo {
 	return authx.APIKeyInfo{
-		ID: k.ID, Name: k.Name, Prefix: k.Prefix, Groups: csvSplit(k.Groups),
+		ID: k.ID, Name: k.Name, Prefix: k.Prefix, Groups: csvSplit(k.Groups), Scopes: csvSplit(k.Scopes),
 		ExpiresAt: k.ExpiresAt, CreatedAt: k.CreatedAt, LastUsedAt: k.LastUsedAt,
 	}
 }
@@ -191,9 +192,9 @@ func (s *Store) UpsertExternalUser(sub, email, name string, emailVerified bool) 
 
 // --- api keys ---
 
-func (s *Store) CreateAPIKey(name string, groups []string, prefix string, hash []byte, expiresAt *time.Time) (*authx.APIKeyInfo, error) {
+func (s *Store) CreateAPIKey(name string, groups, scopes []string, prefix string, hash []byte, expiresAt *time.Time) (*authx.APIKeyInfo, error) {
 	k := APIKey{
-		Name: name, Prefix: prefix, Hash: hash, Groups: strings.Join(groups, ","),
+		Name: name, Prefix: prefix, Hash: hash, Groups: strings.Join(groups, ","), Scopes: strings.Join(scopes, ","),
 		ExpiresAt: expiresAt, CreatedAt: time.Now(),
 	}
 	if err := s.db.Create(&k).Error; err != nil {

@@ -17,15 +17,34 @@ type Group struct {
 }
 
 // APIKeyInfo is the non-secret metadata of an API key. The raw key is shown ONCE at creation; only
-// its sha256 is stored. Calls made with the key act with the key's Groups for access control.
+// its sha256 is stored. Calls made with the key act with the key's Groups for access control, and
+// are limited to the key's Scopes (e.g. "admin", "scim") — an empty Scopes means unrestricted.
 type APIKeyInfo struct {
 	ID         uint       `json:"id"`
 	Name       string     `json:"name"`
 	Prefix     string     `json:"prefix"` // leading chars of the key, for identification in lists
 	Groups     []string   `json:"groups"`
+	Scopes     []string   `json:"scopes,omitempty"` // empty = unrestricted; or e.g. ["scim"], ["admin"]
 	ExpiresAt  *time.Time `json:"expiresAt,omitempty"`
 	CreatedAt  time.Time  `json:"createdAt"`
 	LastUsedAt *time.Time `json:"lastUsedAt,omitempty"`
+}
+
+// KeyHasScope reports whether an API key may use a given scope. An empty Scopes list is unrestricted
+// (full access); "*" also grants everything.
+func KeyHasScope(info *APIKeyInfo, scope string) bool {
+	if info == nil {
+		return false
+	}
+	if len(info.Scopes) == 0 {
+		return true
+	}
+	for _, s := range info.Scopes {
+		if s == scope || s == "*" {
+			return true
+		}
+	}
+	return false
 }
 
 // DirectoryStore is the OPTIONAL persistence for groups, group membership, API keys, and admin
@@ -54,7 +73,7 @@ type DirectoryStore interface {
 
 	// API keys (sha256-at-rest). APIKeyByHash returns ErrNoCredential if absent and does NOT
 	// itself check expiry (the caller does, so an expired key can still be listed/revoked).
-	CreateAPIKey(name string, groups []string, prefix string, hash []byte, expiresAt *time.Time) (*APIKeyInfo, error)
+	CreateAPIKey(name string, groups, scopes []string, prefix string, hash []byte, expiresAt *time.Time) (*APIKeyInfo, error)
 	APIKeyByHash(hash []byte) (*APIKeyInfo, error)
 	ListAPIKeys() ([]APIKeyInfo, error)
 	RevokeAPIKey(id uint) error
