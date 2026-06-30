@@ -20,7 +20,9 @@ Direction and planned work for the library. Authoritative usage/feature docs liv
 
 ## Planned
 
-### Two-factor authentication (2FA / MFA) — TOTP + recovery codes
+Tracked in the **[v0.2.0 milestone](https://github.com/alex-savin/go-auth-x/milestone/1)**.
+
+### Two-factor authentication (2FA / MFA) — TOTP + recovery codes — [#1](https://github.com/alex-savin/go-auth-x/issues/1)
 
 The library has several *single*-factor login methods today but **no second-factor step** — there's no
 flow that authenticates with one factor and then requires another. Add genuine two-step verification:
@@ -41,7 +43,7 @@ flow that authenticates with one factor and then requires another. Add genuine t
 - **Step-up / re-auth** for sensitive actions (e.g. changing the password, revoking sessions) is a
   natural follow-on once the `2fa_pending` machinery exists.
 
-### Opaque entity IDs (uuid-friendly stores)
+### Opaque entity IDs (uuid-friendly stores) — [#2](https://github.com/alex-savin/go-auth-x/issues/2) · breaking
 
 Make the public user/group/API-key ID type an opaque `string` across the store interfaces so
 uuid/ULID/KSUID consumers pass their IDs straight through. The reference GORM store keeps its `uint`
@@ -49,11 +51,11 @@ primary keys and converts (`FormatUint`/`ParseUint`) at its own boundary — **n
 Verified safe: the IDs are never used arithmetically, ordered, or compared, and the session is keyed by
 `Sub` (a string), not the numeric ID. Removes the `uuid ↔ uint` adapter friction for non-`uint` apps.
 
-### Social providers
+### Social providers — [#3](https://github.com/alex-savin/go-auth-x/issues/3)
 
 - **Apple** (Sign in with Apple — ES256 client-secret JWT) and **Facebook** login.
 
-### SCIM
+### SCIM — [#4](https://github.com/alex-savin/go-auth-x/issues/4)
 
 - AND/OR-composed filters, plus sorting and ETags.
 
