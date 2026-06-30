@@ -5,6 +5,21 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.1] — 2026-06-30
+
+### Security
+
+- **`SESSION_SECRET` minimum length is now enforced at construction.** `New()` fails closed when
+  auth will mint cookies (OIDC configured, or a secret supplied for local/social) and the secret is
+  shorter than 32 bytes — the guarantee the docs already described. Previously only a non-empty
+  secret was required, so a short, weak HMAC key was silently accepted.
+
+### Fixed
+
+- **Docs:** corrected the passkey `rpID` description — it is derived from the configured app origin
+  (override via `WEBAUTHN_RPID`), **not** the request `Host`, so it can't be spoofed. The previous
+  "never host-inferred" wording was inaccurate.
+
 ## [0.1.0] — 2026-06-30
 
 First tagged release. A self-contained, embeddable authentication library for Go web apps
@@ -81,4 +96,5 @@ First tagged release. A self-contained, embeddable authentication library for Go
 - **Trusted-proxy client-IP** — `X-Forwarded-For` honored only when the direct peer is a
   trusted proxy (`TRUSTED_PROXIES`, or private-range default), so the client IP can't be spoofed.
 
+[0.1.1]: https://github.com/alex-savin/go-auth-x/releases/tag/v0.1.1
 [0.1.0]: https://github.com/alex-savin/go-auth-x/releases/tag/v0.1.0

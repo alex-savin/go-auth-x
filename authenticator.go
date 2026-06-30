@@ -3,6 +3,7 @@ package authx
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/go-webauthn/webauthn/webauthn"
@@ -70,6 +71,14 @@ func (a *Authenticator) SetAuthorizer(z Authorizer) { a.authorizer = z }
 // issuer and fails on error — we'd rather refuse to boot than run unprotected when
 // auth was intended (fail closed).
 func New(ctx context.Context, cfg Config) (*Authenticator, error) {
+	// Fail closed: the signed session/flow/CSRF cookies need a strong HMAC key. Whenever auth will
+	// mint cookies — OIDC is configured, or a secret was supplied for local/social methods — require
+	// SESSION_SECRET to be at least 32 bytes. A short key would silently weaken every signed cookie.
+	if (cfg.Issuer != "" && cfg.ClientID != "") || len(cfg.SessionSecret) > 0 {
+		if len(cfg.SessionSecret) < 32 {
+			return nil, fmt.Errorf("authx: SESSION_SECRET must be at least 32 bytes (got %d)", len(cfg.SessionSecret))
+		}
+	}
 	a := &Authenticator{cfg: cfg}
 	if cfg.Enabled() {
 		provider, err := oidc.NewProvider(ctx, cfg.Issuer)

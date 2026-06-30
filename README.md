@@ -369,7 +369,7 @@ ORM. Compile-time conformance: `var _ authx.CredentialStore = (*MyStore)(nil)`.
 - **Passwords** — bcrypt cost 12; NIST-style policy; constant-cost dummy-hash anti-enumeration; rehash tag.
 - **Tokens** (magic-link / verify / reset) — 256-bit `crypto/rand`, sha256-at-rest, single-use (atomic),
   per-purpose TTL, always-200 anti-enumeration.
-- **Passkeys** — fixed `rpID`/origin (never host-inferred), signed challenge cookie, **clone detection**.
+- **Passkeys** — `rpID`/origin taken from the configured app origin (override with `WEBAUTHN_RPID`), **not** the request `Host` (so it can't be spoofed); signed challenge cookie, **clone detection**.
 - **OAuth/OIDC** — Authorization Code + **PKCE (S256)** + `state` + `nonce`, constant-time compares;
   email trusted only when `email_verified` is set (or `OIDC_ASSUME_VERIFIED` for a single trusted IdP).
 - **Rate limiting** — sliding-window per-IP + soft per-account lockout (durable counts; recovery paths
