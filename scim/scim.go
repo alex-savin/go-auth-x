@@ -138,6 +138,19 @@ func scimError(w http.ResponseWriter, code int, detail string) {
 	writeSCIM(w, code, map[string]any{"schemas": []string{schemaErr}, "status": strconv.Itoa(code), "detail": detail})
 }
 
+// scimErrorType is scimError with a SCIM "scimType" (e.g. "invalidFilter").
+func scimErrorType(w http.ResponseWriter, code int, scimType, detail string) {
+	writeSCIM(w, code, map[string]any{"schemas": []string{schemaErr}, "scimType": scimType, "status": strconv.Itoa(code), "detail": detail})
+}
+
+// listEnvelope wraps resources in a SCIM ListResponse.
+func listEnvelope[T any](resources []T) map[string]any {
+	return map[string]any{
+		"schemas": []string{schemaList}, "totalResults": len(resources),
+		"startIndex": 1, "itemsPerPage": len(resources), "Resources": resources,
+	}
+}
+
 func toSCIMUser(u *authx.AuthUser) scimUser {
 	return scimUser{
 		Schemas: []string{schemaUser}, ID: strconv.FormatUint(uint64(u.ID), 10), UserName: u.Email,
@@ -168,26 +181,29 @@ func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
 		scimError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	// Filters: `userName`, `emails[.value]`, `externalId` (all map to the email) with eq/co/sw/pr,
-	// plus `active eq true|false`. A single term — AND/OR composition isn't supported.
-	if f := r.URL.Query().Get("filter"); f != "" {
-		flt := parseFilter(f)
+	// Filtering: boolean-composed (and / or / not / parens) over eq/ne/co/sw/ew/pr on userName,
+	// emails, externalId (→ email), active, and id. Plus sortBy / sortOrder.
+	q := r.URL.Query()
+	if f := q.Get("filter"); f != "" {
+		p, ferr := compileFilter(f)
+		if ferr != nil {
+			scimErrorType(w, http.StatusBadRequest, "invalidFilter", "invalid filter: "+ferr.Error())
+			return
+		}
 		filtered := users[:0]
-		for _, u := range users {
-			if matchUser(u, flt) {
-				filtered = append(filtered, u)
+		for i := range users {
+			if p(userGetter(&users[i])) {
+				filtered = append(filtered, users[i])
 			}
 		}
 		users = filtered
 	}
+	sortUsers(users, q.Get("sortBy"), q.Get("sortOrder"))
 	resources := make([]scimUser, 0, len(users))
 	for i := range users {
 		resources = append(resources, toSCIMUser(&users[i]))
 	}
-	writeSCIM(w, http.StatusOK, map[string]any{
-		"schemas": []string{schemaList}, "totalResults": len(resources),
-		"startIndex": 1, "itemsPerPage": len(resources), "Resources": resources,
-	})
+	writeSCIM(w, http.StatusOK, listEnvelope(resources))
 }
 
 func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
@@ -292,25 +308,28 @@ func (s *Server) listGroups(w http.ResponseWriter, r *http.Request) {
 		scimError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if f := r.URL.Query().Get("filter"); f != "" { // displayName eq|co|sw|pr "x"
-		flt := parseFilter(f)
+	q := r.URL.Query()
+	if f := q.Get("filter"); f != "" { // displayName / id with eq/ne/co/sw/ew/pr + and/or/not
+		p, ferr := compileFilter(f)
+		if ferr != nil {
+			scimErrorType(w, http.StatusBadRequest, "invalidFilter", "invalid filter: "+ferr.Error())
+			return
+		}
 		filtered := gs[:0]
-		for _, g := range gs {
-			if matchStr(g.Name, flt.op, flt.value) {
-				filtered = append(filtered, g)
+		for i := range gs {
+			if p(groupGetter(&gs[i])) {
+				filtered = append(filtered, gs[i])
 			}
 		}
 		gs = filtered
 	}
+	sortGroups(gs, q.Get("sortBy"), q.Get("sortOrder"))
 	resources := make([]scimGroup, 0, len(gs))
 	for _, g := range gs {
 		members, _ := s.dir.GroupMembers(g.ID)
 		resources = append(resources, toSCIMGroup(g, members))
 	}
-	writeSCIM(w, http.StatusOK, map[string]any{
-		"schemas": []string{schemaList}, "totalResults": len(resources),
-		"startIndex": 1, "itemsPerPage": len(resources), "Resources": resources,
-	})
+	writeSCIM(w, http.StatusOK, listEnvelope(resources))
 }
 
 func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
@@ -477,7 +496,7 @@ func (s *Server) serviceProviderConfig(w http.ResponseWriter, _ *http.Request) {
 		"bulk":                  map[string]any{"supported": true, "maxOperations": maxBulkOperations, "maxPayloadSize": 1048576},
 		"filter":                map[string]any{"supported": true, "maxResults": 200},
 		"changePassword":        map[string]bool{"supported": false},
-		"sort":                  map[string]bool{"supported": false},
+		"sort":                  map[string]bool{"supported": true},
 		"etag":                  map[string]bool{"supported": false},
 		"authenticationSchemes": []map[string]string{{"type": "oauthbearertoken", "name": "Bearer Token"}},
 	})
@@ -494,58 +513,7 @@ func (s *Server) schemasEndpoint(w http.ResponseWriter, _ *http.Request) {
 	writeSCIM(w, http.StatusOK, []map[string]any{{"id": schemaUser, "name": "User"}, {"id": schemaGroup, "name": "Group"}})
 }
 
-// --- tiny parsers ---
-
-// scimFilter is a single parsed filter term: `field op value`.
-type scimFilter struct {
-	field string
-	op    string // eq | co | sw | pr
-	value string
-}
-
-// parseFilter parses a single-term SCIM filter: `field op "value"` (op ∈ eq, co, sw) or the unary
-// `field pr` (present). AND/OR composition isn't supported — the first recognized operator wins.
-func parseFilter(filter string) scimFilter {
-	filter = strings.TrimSpace(filter)
-	lower := strings.ToLower(filter)
-	for _, op := range []string{"eq", "co", "sw"} {
-		if i := strings.Index(lower, " "+op+" "); i >= 0 {
-			return scimFilter{
-				field: strings.TrimSpace(filter[:i]),
-				op:    op,
-				value: strings.Trim(strings.TrimSpace(filter[i+len(op)+2:]), `"`),
-			}
-		}
-	}
-	if strings.HasSuffix(lower, " pr") {
-		return scimFilter{field: strings.TrimSpace(filter[:len(filter)-3]), op: "pr"}
-	}
-	return scimFilter{op: "eq", value: strings.Trim(filter, `"`)} // lenient bare-value fallback
-}
-
-// matchStr applies a SCIM string operator (eq, co, sw, pr) case-insensitively.
-func matchStr(have, op, want string) bool {
-	h, w := strings.ToLower(have), strings.ToLower(strings.TrimSpace(want))
-	switch op {
-	case "co":
-		return strings.Contains(h, w)
-	case "sw":
-		return strings.HasPrefix(h, w)
-	case "pr":
-		return strings.TrimSpace(have) != ""
-	default: // eq
-		return h == w
-	}
-}
-
-// matchUser tests a user against a filter term. userName/emails/externalId map to the email;
-// `active` is a boolean eq.
-func matchUser(u authx.AuthUser, f scimFilter) bool {
-	if strings.EqualFold(f.field, "active") {
-		return (!u.Disabled) == strings.EqualFold(strings.TrimSpace(f.value), "true")
-	}
-	return matchStr(u.Email, f.op, f.value)
-}
+// --- patch / member-value parsers ---
 
 // activeFromOp returns the boolean for an `active` replace op (path "active", or value {"active":x}).
 func activeFromOp(path string, value json.RawMessage) (bool, bool) {

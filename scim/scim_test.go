@@ -143,3 +143,73 @@ func TestSCIMFiltersAndBulk(t *testing.T) {
 		t.Fatalf("active eq false: want 1, got %d", inactive.TotalResults)
 	}
 }
+
+func TestSCIMComposedFiltersAndSort(t *testing.T) {
+	dir := memory.New()
+	srv := NewServer(dir, func(tok string) bool { return tok == "secret" })
+	h := http.StripPrefix("/scim/v2", srv.Handler())
+	do := func(method, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer secret")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		return w
+	}
+	mk := func(email string, active bool) {
+		b := `{"userName":"` + email + `","active":` + map[bool]string{true: "true", false: "false"}[active] + `}`
+		if w := do(http.MethodPost, "/scim/v2/Users", b); w.Code != http.StatusCreated {
+			t.Fatalf("create %s: %d %s", email, w.Code, w.Body.String())
+		}
+	}
+	mk("alice@acme.com", true)
+	mk("bob@acme.com", false)
+	mk("carol@other.com", true)
+
+	count := func(filter string) int {
+		w := do(http.MethodGet, "/scim/v2/Users?filter="+url.QueryEscape(filter), "")
+		if w.Code != http.StatusOK {
+			t.Fatalf("filter %q: code %d %s", filter, w.Code, w.Body.String())
+		}
+		var list struct {
+			TotalResults int `json:"totalResults"`
+		}
+		_ = json.Unmarshal(w.Body.Bytes(), &list)
+		return list.TotalResults
+	}
+	// AND, OR, NOT composition + precedence/grouping.
+	if n := count(`emails co "acme" and active eq true`); n != 1 { // bob deactivated → alice only
+		t.Fatalf("AND: want 1, got %d", n)
+	}
+	if n := count(`userName sw "alice" or userName sw "carol"`); n != 2 {
+		t.Fatalf("OR: want 2, got %d", n)
+	}
+	if n := count(`not (emails co "acme")`); n != 1 { // only carol@other.com
+		t.Fatalf("NOT: want 1, got %d", n)
+	}
+	if n := count(`active eq true and (userName sw "alice" or userName sw "zzz")`); n != 1 {
+		t.Fatalf("grouped: want 1, got %d", n)
+	}
+
+	// Malformed filter → 400 invalidFilter.
+	if w := do(http.MethodGet, "/scim/v2/Users?filter="+url.QueryEscape(`userName eq`), ""); w.Code != http.StatusBadRequest ||
+		!strings.Contains(w.Body.String(), "invalidFilter") {
+		t.Fatalf("malformed filter: want 400 invalidFilter, got %d %s", w.Code, w.Body.String())
+	}
+
+	// Sorting: userName descending → carol, bob, alice.
+	w := do(http.MethodGet, "/scim/v2/Users?sortBy=userName&sortOrder=descending", "")
+	var sorted struct {
+		Resources []struct {
+			UserName string `json:"userName"`
+		} `json:"Resources"`
+	}
+	_ = json.Unmarshal(w.Body.Bytes(), &sorted)
+	got := []string{}
+	for _, r := range sorted.Resources {
+		got = append(got, r.UserName)
+	}
+	want := []string{"carol@other.com", "bob@acme.com", "alice@acme.com"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("sort desc: got %v, want %v", got, want)
+	}
+}
