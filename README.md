@@ -438,13 +438,15 @@ go-auth-x/
 
 ## Roadmap
 
-- **Done**: pure **net/http** (zero framework dependency); OIDC, password, passkey (+ QR), magic-link,
-  social (Google/GitHub); GORM + in-memory stores; SMTP mailer; groups + per-group access control;
-  API keys with **deny-by-default scopes** + admin REST API; LDAP sync (+ deprovision-by-absence);
+See **[ROADMAP.md](./ROADMAP.md)** for the full shipped/planned list.
+
+- **Shipped**: pure **net/http** (zero framework dependency); OIDC, password, passkey (+ QR),
+  magic-link, social (Google/GitHub); GORM + in-memory stores; SMTP mailer; groups + per-group access
+  control; API keys with **deny-by-default scopes** + admin REST API; LDAP sync (+ deprovision-by-absence);
   SCIM 2.0 (PUT + `eq`/`co`/`sw`/`pr` filters + `/Bulk`); the **squatter-reclaim** path;
-  `email_verified`-gated OIDC linking; **configurable public paths** (`Config.PublicPath`); **pluggable
-  rate-limit backends** (`SetRateLimiters`).
-- **Planned**: **Apple + Facebook** social; AND/OR-composed SCIM filters + sorting/ETags.
+  `email_verified`-gated OIDC linking; **configurable public paths**; **pluggable rate-limit backends**.
+- **Planned**: **2FA / MFA** (TOTP + recovery codes); **opaque entity IDs** (uuid-friendly stores);
+  **Apple + Facebook** social; AND/OR-composed SCIM filters + sorting/ETags.
 
 ---
 
