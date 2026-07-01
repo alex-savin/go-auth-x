@@ -35,7 +35,12 @@ func (a *Authenticator) enableWebauthn() {
 	if name == "" {
 		name = "AI Trading System"
 	}
-	if w, err := webauthn.New(&webauthn.Config{RPID: rpID, RPDisplayName: name, RPOrigins: []string{base}}); err == nil {
+	if w, err := webauthn.New(&webauthn.Config{
+		RPID: rpID, RPDisplayName: name, RPOrigins: []string{base},
+		// Require user verification (PIN/biometric) so a passkey is a real multi-factor credential,
+		// not a bare possession factor — the library enforces the UV flag at Finish.
+		AuthenticatorSelection: protocol.AuthenticatorSelection{UserVerification: protocol.VerificationRequired},
+	}); err == nil {
 		a.wauthn = w
 	}
 }
@@ -123,7 +128,7 @@ func (a *Authenticator) setWauthnFlow(c *reqCtx, sd *webauthn.SessionData) error
 	}
 	tok, err := signJWT(a.cfg.SessionSecret, webauthnFlowClaims{
 		Session:          raw,
-		RegisteredClaims: jwt.RegisteredClaims{ExpiresAt: jwt.NewNumericDate(time.Now().Add(5 * time.Minute))},
+		RegisteredClaims: jwt.RegisteredClaims{Audience: jwt.ClaimStrings{audWebauthn}, ExpiresAt: jwt.NewNumericDate(time.Now().Add(5 * time.Minute))},
 	})
 	if err != nil {
 		return err
@@ -135,7 +140,7 @@ func (a *Authenticator) setWauthnFlow(c *reqCtx, sd *webauthn.SessionData) error
 func (a *Authenticator) getWauthnFlow(c *reqCtx) (*webauthn.SessionData, error) {
 	tok, _ := c.Cookie(wauthnFlowCookie)
 	var claims webauthnFlowClaims
-	if err := parseJWT(a.cfg.SessionSecret, tok, &claims); err != nil {
+	if err := parseJWT(a.cfg.SessionSecret, tok, &claims, audWebauthn); err != nil {
 		return nil, err
 	}
 	var sd webauthn.SessionData
@@ -188,7 +193,7 @@ func (a *Authenticator) WebauthnRegisterBegin(c *reqCtx) {
 	sel := protocol.AuthenticatorSelection{
 		ResidentKey:        protocol.ResidentKeyRequirementRequired,
 		RequireResidentKey: &reqResidentKey,
-		UserVerification:   protocol.VerificationPreferred,
+		UserVerification:   protocol.VerificationRequired,
 	}
 	creation, sd, err := a.wauthn.BeginRegistration(wu, webauthn.WithExclusions(excl), webauthn.WithAuthenticatorSelection(sel))
 	if err != nil {
@@ -252,7 +257,7 @@ func (a *Authenticator) WebauthnLoginBegin(c *reqCtx) {
 		c.JSON(http.StatusNotImplemented, H{"error": "passkeys not available"})
 		return
 	}
-	assertion, sd, err := a.wauthn.BeginDiscoverableLogin()
+	assertion, sd, err := a.wauthn.BeginDiscoverableLogin(webauthn.WithUserVerification(protocol.VerificationRequired))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, H{"error": "could not start sign-in"})
 		return

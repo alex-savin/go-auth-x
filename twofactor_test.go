@@ -106,3 +106,28 @@ func TestPendingCookieRoundTrip(t *testing.T) {
 		t.Fatal("the pending token must not verify under a different secret")
 	}
 }
+
+// TestTokenAudienceSegregation pins the fix for the token-confusion bug: a 2FA-pending token (first
+// factor only) MUST NOT be accepted in the session-cookie slot — otherwise it bypasses the 2nd factor.
+func TestTokenAudienceSegregation(t *testing.T) {
+	secret := []byte("0123456789abcdef0123456789abcdef")
+	a := &Authenticator{cfg: Config{SessionSecret: secret}}
+
+	pending, err := a.mintPending(Identity{Subject: "local:u1", Email: "u@x.com"}, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The pending token must NOT parse as a session (wrong audience).
+	if _, err := parseSession(secret, pending); err == nil {
+		t.Fatal("a 2fa-pending token must be rejected as a session cookie (2FA bypass)")
+	}
+	// And a real session token must NOT parse as a pending token.
+	session, _ := mintSession(secret, "local:u1", "u@x.com", "U", "", "", nil, time.Now(), sessionTTL)
+	if _, err := a.parsePending(session); err == nil {
+		t.Fatal("a session token must be rejected as a 2fa-pending token")
+	}
+	// The session token parses correctly as a session.
+	if sc, err := parseSession(secret, session); err != nil || sc.Subject != "local:u1" {
+		t.Fatalf("a session token should parse as a session: %v", err)
+	}
+}

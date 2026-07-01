@@ -248,7 +248,11 @@ func (a *Authenticator) Me(c *reqCtx) {
 
 func randToken() string {
 	b := make([]byte, 32)
-	_, _ = rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		// crypto/rand failing is catastrophic; issuing a guessable state/CSRF/API-key token would be
+		// worse than aborting. Fail closed (matches oauth2.GenerateVerifier's contract).
+		panic("authx: crypto/rand read failed: " + err.Error())
+	}
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 

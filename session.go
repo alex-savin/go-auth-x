@@ -13,6 +13,17 @@ const (
 	flowTTL     = 10 * time.Minute
 )
 
+// Per-purpose token audiences. All our cookies are HS256-signed with the same SESSION_SECRET, so we
+// stamp a distinct `aud` on each and require it on parse — otherwise e.g. a 2FA-pending token (first
+// factor only) could be replayed in the session-cookie slot and bypass the second factor.
+const (
+	audSession  = "authx:session"
+	audFlow     = "authx:oauth-flow"
+	audWebauthn = "authx:webauthn-flow"
+	audPending  = "authx:2fa-pending"
+	audStepUp   = "authx:stepup"
+)
+
 // SessionClaims is the signed session-cookie payload — the authenticated identity.
 type SessionClaims struct {
 	Email   string   `json:"email,omitempty"`
@@ -37,15 +48,16 @@ func signJWT(secret []byte, claims jwt.Claims) (string, error) {
 	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(secret)
 }
 
-// parseJWT verifies the HMAC signature (rejecting any other alg) and populates dest,
-// which also enforces the standard exp/iat checks.
-func parseJWT(secret []byte, token string, dest jwt.Claims) error {
+// parseJWT verifies the HMAC signature (rejecting any other alg), requires the token's audience to
+// match audience (so a token minted for one purpose can't be accepted for another), requires exp,
+// and populates dest.
+func parseJWT(secret []byte, token string, dest jwt.Claims, audience string) error {
 	_, err := jwt.ParseWithClaims(token, dest, func(t *jwt.Token) (any, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, errors.New("unexpected signing method")
 		}
 		return secret, nil
-	})
+	}, jwt.WithAudience(audience), jwt.WithExpirationRequired())
 	return err
 }
 
@@ -58,6 +70,7 @@ func mintSession(secret []byte, sub, email, name, role, idToken string, groups [
 		IDToken: idToken,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   sub,
+			Audience:  jwt.ClaimStrings{audSession},
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),
 		},
@@ -69,7 +82,7 @@ func parseSession(secret []byte, token string) (*SessionClaims, error) {
 		return nil, errors.New("no session cookie")
 	}
 	var c SessionClaims
-	if err := parseJWT(secret, token, &c); err != nil {
+	if err := parseJWT(secret, token, &c, audSession); err != nil {
 		return nil, err
 	}
 	if c.Subject == "" {
@@ -79,6 +92,7 @@ func parseSession(secret []byte, token string) (*SessionClaims, error) {
 }
 
 func mintFlow(secret []byte, fc flowClaims, now time.Time) (string, error) {
+	fc.Audience = jwt.ClaimStrings{audFlow}
 	fc.IssuedAt = jwt.NewNumericDate(now)
 	fc.ExpiresAt = jwt.NewNumericDate(now.Add(flowTTL))
 	return signJWT(secret, fc)
@@ -89,7 +103,7 @@ func parseFlow(secret []byte, token string) (*flowClaims, error) {
 		return nil, errors.New("no login-flow cookie")
 	}
 	var c flowClaims
-	if err := parseJWT(secret, token, &c); err != nil {
+	if err := parseJWT(secret, token, &c, audFlow); err != nil {
 		return nil, err
 	}
 	return &c, nil

@@ -28,10 +28,13 @@ func TestTOTPValidate(t *testing.T) {
 		t.Fatalf("287082 @T=59 should validate at step 1: ok=%v step=%d", ok, step)
 	}
 
-	// Skew: a code from the adjacent step still validates (clock drift tolerance).
-	nextStepCode := hotp([]byte("12345678901234567890"), 2)
-	if _, ok := totpValidate(secretB32, nextStepCode, at); !ok {
-		t.Fatal("a next-step code should validate within the ±1 skew window")
+	// Past-leaning skew: the PREVIOUS step validates (clock drift); a FUTURE step does not.
+	prevStepCode := hotp([]byte("12345678901234567890"), 0)
+	if _, ok := totpValidate(secretB32, prevStepCode, at); !ok {
+		t.Fatal("a previous-step code should validate within the skew window")
+	}
+	if _, ok := totpValidate(secretB32, hotp([]byte("12345678901234567890"), 2), at); ok {
+		t.Fatal("a future-step code must NOT validate (past-leaning window)")
 	}
 
 	// Wrong code, wrong length, junk secret all fail.

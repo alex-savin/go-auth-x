@@ -101,6 +101,7 @@ func (a *Authenticator) mintPending(id Identity, role string, remember bool) (st
 		Email: id.Email, Name: id.Name, Groups: id.Groups, Role: role, Remember: remember,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   id.Subject,
+			Audience:  jwt.ClaimStrings{audPending},
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(now.Add(twoFactorPendingTTL)),
 		},
@@ -112,7 +113,7 @@ func (a *Authenticator) parsePending(token string) (*pendingClaims, error) {
 		return nil, errors.New("no 2fa-pending cookie")
 	}
 	var c pendingClaims
-	if err := parseJWT(a.cfg.SessionSecret, token, &c); err != nil {
+	if err := parseJWT(a.cfg.SessionSecret, token, &c, audPending); err != nil {
 		return nil, err
 	}
 	if c.Subject == "" {

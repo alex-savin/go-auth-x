@@ -119,10 +119,19 @@ func (a *Authenticator) TwoFactorVerify(c *reqCtx) {
 		c.JSON(http.StatusNotFound, H{"error": "2fa not enabled"})
 		return
 	}
+	// Throttle second-factor guessing (a 6-digit code space in a short window is brute-forceable).
+	if a.ipLimiter != nil && !a.ipLimiter.Allow("2fa:"+c.ClientIP()) {
+		c.JSON(http.StatusTooManyRequests, H{"error": "too many attempts — wait and try again"})
+		return
+	}
 	tok, _ := c.Cookie(twoFactorPendingCookie)
 	pc, err := a.parsePending(tok)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, H{"error": "your login session expired — sign in again"})
+		return
+	}
+	if a.acctLimiter != nil && !a.acctLimiter.Allow("2fa:"+pc.Subject) {
+		c.JSON(http.StatusTooManyRequests, H{"error": "too many attempts — wait and try again"})
 		return
 	}
 	u, uerr := a.creds.UserBySub(pc.Subject)

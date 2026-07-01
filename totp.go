@@ -61,8 +61,11 @@ func totpValidate(secretB32, code string, t time.Time) (step uint64, ok bool) {
 	if err != nil {
 		return 0, false
 	}
+	// Past-leaning window (current + previous step): tolerates clock drift/latency without accepting a
+	// FUTURE step. Accepting now+1 both widened the live window to ~90s and — since the replay guard
+	// records the matched step — locked out the legitimate code once wall-clock reached now+1.
 	now := uint64(t.Unix()) / totpPeriod
-	for _, c := range []uint64{now - 1, now, now + 1} { // now is ~5.8e7, so now-1 never underflows
+	for _, c := range []uint64{now, now - 1} { // now is ~5.8e7, so now-1 never underflows
 		if subtle.ConstantTimeCompare([]byte(hotp(secret, c)), []byte(code)) == 1 {
 			return c, true
 		}
