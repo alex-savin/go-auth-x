@@ -120,8 +120,12 @@ func (a *Authenticator) appleIdentity(ctx context.Context, tok *oauth2.Token, wa
 	var cl struct {
 		Email         string `json:"email"`
 		EmailVerified any    `json:"email_verified"` // Apple sends a bool OR the string "true"
+		AZP           string `json:"azp"`
 	}
 	_ = idt.Claims(&cl)
+	if err := verifyAZP(idt.Audience, cl.AZP, a.cfg.AppleClientID); err != nil {
+		return "", "", "", errors.New("id_token not authorized for this client")
+	}
 	verified := false
 	switch t := cl.EmailVerified.(type) {
 	case bool:

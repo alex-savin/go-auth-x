@@ -142,8 +142,13 @@ func (a *Authenticator) Callback(c *reqCtx) {
 		Name              string   `json:"name"`
 		PreferredUsername string   `json:"preferred_username"`
 		Groups            []string `json:"groups"`
+		AZP               string   `json:"azp"`
 	}
 	_ = idToken.Claims(&claims)
+	if err := verifyAZP(idToken.Audience, claims.AZP, a.cfg.ClientID); err != nil {
+		c.JSON(http.StatusUnauthorized, H{"error": "id_token not authorized for this client"})
+		return
+	}
 
 	if !a.groupAllowed(claims.Groups) {
 		c.JSON(http.StatusForbidden, H{"error": "your account is not in an allowed group"})
@@ -244,6 +249,18 @@ func (a *Authenticator) Me(c *reqCtx) {
 		"groups":        sc.Groups,
 		"role":          sc.Role,
 	})
+}
+
+// verifyAZP enforces OIDC Core §3.1.3.7 items 4-5: a multi-audience id_token MUST carry azp, and when
+// azp is present it MUST name this client — else the token was authorized for a different party.
+func verifyAZP(aud []string, azp, clientID string) error {
+	if len(aud) > 1 && azp == "" {
+		return errors.New("id_token has multiple audiences but no azp")
+	}
+	if azp != "" && !ctEqual(azp, clientID) {
+		return errors.New("id_token azp is not this client")
+	}
+	return nil
 }
 
 func randToken() string {

@@ -6,7 +6,9 @@ package ldapsync
 
 import (
 	"crypto/tls"
+	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/go-ldap/ldap/v3"
@@ -85,12 +87,24 @@ type Result struct {
 }
 
 func (s *Syncer) dial() (*ldap.Conn, error) {
+	u, uerr := url.Parse(s.cfg.URL)
+	if uerr != nil {
+		return nil, fmt.Errorf("ldap: invalid URL %q: %w", s.cfg.URL, uerr)
+	}
+	ldaps := strings.EqualFold(u.Scheme, "ldaps")
+	// Never send a bind password over an unprotected channel (RFC 4513 §5.1.3): require StartTLS or
+	// ldaps:// whenever an authenticated bind is configured.
+	if s.cfg.BindPassword != "" && !s.cfg.StartTLS && !ldaps {
+		return nil, errors.New("ldap: refusing to send a bind password over cleartext — enable StartTLS or use ldaps://")
+	}
 	conn, err := ldap.DialURL(s.cfg.URL)
 	if err != nil {
 		return nil, err
 	}
 	if s.cfg.StartTLS {
-		if err := conn.StartTLS(&tls.Config{InsecureSkipVerify: s.cfg.InsecureTLS}); err != nil {
+		// ServerName is required for hostname verification (RFC 4513 §3.1.3); without it the secure
+		// default fails on real certs, pushing operators to disable verification (a MITM footgun).
+		if err := conn.StartTLS(&tls.Config{ServerName: u.Hostname(), InsecureSkipVerify: s.cfg.InsecureTLS}); err != nil {
 			conn.Close()
 			return nil, err
 		}

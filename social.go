@@ -157,8 +157,13 @@ func (a *Authenticator) SocialCallback(c *reqCtx) {
 			Email         string `json:"email"`
 			EmailVerified bool   `json:"email_verified"`
 			Name          string `json:"name"`
+			AZP           string `json:"azp"`
 		}
 		_ = idt.Claims(&cl)
+		if err := verifyAZP(idt.Audience, cl.AZP, a.cfg.GoogleClientID); err != nil {
+			c.JSON(http.StatusUnauthorized, H{"error": "id_token not authorized for this client"})
+			return
+		}
 		if !cl.EmailVerified || cl.Email == "" {
 			c.JSON(http.StatusForbidden, H{"error": "your Google email is not verified"})
 			return
