@@ -5,6 +5,7 @@ Go web apps. Embed multi-method auth directly in your service with **no separate
 to run**: one signed, HttpOnly session cookie; the browser never sees a token.
 
 [![Go Reference](https://img.shields.io/badge/go-reference-blue)](https://pkg.go.dev/github.com/alex-savin/go-auth-x)
+[![Release](https://img.shields.io/github/v/release/alex-savin/go-auth-x)](https://github.com/alex-savin/go-auth-x/releases)
 [![Go 1.26+](https://img.shields.io/badge/go-1.26%2B-00ADD8)](https://go.dev/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 
@@ -13,8 +14,9 @@ import authx "github.com/alex-savin/go-auth-x"
 ```
 
 > Extracted from a production trading platform's backend-for-frontend (BFF). Passwords, passkeys
-> (incl. **cross-device QR**), email magic-links, OIDC, and social login — all behind a single
-> `completeLogin` funnel, plus an optional enterprise directory layer (groups, API keys, LDAP, SCIM).
+> (incl. **cross-device QR**), email magic-links, OIDC, social login, and **2FA** (TOTP + passkey +
+> step-up) — all behind a single `completeLogin` funnel, plus an optional enterprise directory layer
+> (groups, API keys, LDAP, SCIM).
 
 ---
 
@@ -340,7 +342,11 @@ Mounted under `/auth` by `Handler()`:
 | GET | `/auth/email/login` · `/auth/email/verify` | redeem magic-link / verify email | token |
 | POST | `/auth/webauthn/login/begin` · `/auth/webauthn/login/finish` | passkey sign-in (discoverable / QR) | public |
 | POST | `/auth/webauthn/register/begin` · `/auth/webauthn/register/finish` | enroll a passkey | session |
-| GET | `/auth/social/{provider}/login` · `/auth/social/{provider}/callback` | Google / GitHub | public |
+| GET / POST | `/auth/social/{provider}/login` · `/auth/social/{provider}/callback` | Google / GitHub / Facebook / Apple | public |
+| POST | `/auth/2fa/totp/begin` · `/auth/2fa/totp/confirm` · `/auth/2fa/disable` | enroll / confirm / disable TOTP | session |
+| POST · GET | `/auth/2fa/verify` · `/auth/2fa/pending` | finish a 2FA-challenged login / poll state | 2fa-pending cookie |
+| POST | `/auth/2fa/webauthn/begin` · `/auth/2fa/webauthn/finish` | passkey as the second factor | 2fa-pending cookie |
+| POST | `/auth/reauth` | step-up re-auth (password or a 2FA code) | session + CSRF |
 | GET | `/auth/api/account` | account + passkeys | session |
 | POST | `/auth/api/account/password` | set/change password | session + CSRF |
 | DELETE | `/auth/api/passkeys/{id}` | remove a passkey | session + CSRF |
@@ -503,15 +509,15 @@ go-auth-x/
 
 ## Roadmap
 
-See **[ROADMAP.md](./ROADMAP.md)** for the full shipped/planned list.
+See **[ROADMAP.md](./ROADMAP.md)** for the full list and **[CHANGELOG.md](./CHANGELOG.md)** for details.
 
-- **Shipped**: pure **net/http** (zero framework dependency); OIDC, password, passkey (+ QR),
-  magic-link, social (Google/GitHub); GORM + in-memory stores; SMTP mailer; groups + per-group access
-  control; API keys with **deny-by-default scopes** + admin REST API; LDAP sync (+ deprovision-by-absence);
-  SCIM 2.0 (PUT + `eq`/`co`/`sw`/`pr` filters + `/Bulk`); the **squatter-reclaim** path;
-  `email_verified`-gated OIDC linking; **configurable public paths**; **pluggable rate-limit backends**.
-- **Planned**: **2FA / MFA** (TOTP + recovery codes); **opaque entity IDs** (uuid-friendly stores);
-  **Apple + Facebook** social; AND/OR-composed SCIM filters + sorting/ETags.
+- **v0.2.0** (latest): **2FA** (TOTP + recovery codes, passkey-as-2FA, step-up re-auth);
+  **Apple + Facebook** social; a much richer **SCIM** server (full filter grammar + valuePath, sorting,
+  strong ETags, Location/uniqueness/PATCH validation); and an **RFC-compliance hardening** pass.
+- **v0.1.x**: pure **net/http**; OIDC, password, passkey (+ QR), magic-link, Google/GitHub social;
+  GORM + in-memory stores; SMTP mailer; groups + per-group access control; API keys with
+  **deny-by-default scopes** + admin REST API; LDAP sync; SCIM 2.0; the **squatter-reclaim** path.
+- **Planned**: **opaque entity IDs** (uuid-friendly stores) — deferred, breaking; land pre-v1.0.
 
 ---
 

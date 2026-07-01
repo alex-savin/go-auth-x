@@ -46,7 +46,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   **valuePath** (`emails[type eq "work"]`, `members[value eq "42"]`), on `userName`/`emails`/`externalId`/`active`/`id`
   (users) and `displayName`/`id`/`members` (groups). Malformed filters return `400` `invalidFilter`. ([#4])
 - **SCIM: sorting** — `sortBy` / `sortOrder` on the list endpoints. ([#4])
-- **SCIM: ETags** — weak ETags on resources (`meta.version` + `ETag` header), `If-None-Match` (→ `304`)
+- **SCIM: ETags** — strong ETags on resources (`meta.version` + `ETag` header), `If-None-Match` (→ `304`)
   on reads, and `If-Match` (→ `412`) optimistic-concurrency on PUT/PATCH/DELETE. `ServiceProviderConfig`
   now advertises `sort` + `etag` supported. ([#4])
 
