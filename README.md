@@ -171,19 +171,50 @@ func main() {
 go-auth-x is a **backend-for-frontend**. The single-page app talks only to your backend; the backend
 holds all secrets and issues one signed cookie.
 
-```
- Browser/SPA                 Your Go app (go-auth-x embedded)              External
- ┌──────────┐   cookie       ┌───────────────────────────────┐
- │  /login  │ ─────────────► │  Middleware (gate + CSRF)      │
- │  /app    │ ◄───────────── │  /auth/* handlers ──┐          │
- └──────────┘  sweep_session │                     ▼          │           ┌────────────┐
-                             │   completeLogin()  ── Authorizer hook ────►│ provisioning│
-                             │     │  (every method funnels here)         └────────────┘
-                             │     ├─ CredentialStore  (persist users/creds)  ┌──────────┐
-                             │     ├─ DirectoryStore   (groups/API keys) ────►│ Postgres │
-                             │     └─ Mailer           (magic-links) ─────────│  / LDAP  │
-                             │   OIDC / Google / GitHub clients ──────────────┤  / SMTP  │
-                             └───────────────────────────────┘                └──────────┘
+```mermaid
+flowchart LR
+    SPA["Browser / SPA<br/>one signed cookie · never a token"]
+
+    subgraph app["Your Go app — go-auth-x embedded"]
+      direction TB
+      MW["Middleware<br/>Gate · CSRF · RequireGroups"]
+      PW["password"]
+      PK["passkey / QR"]
+      MK["magic-link"]
+      OI["OIDC"]
+      SO["social"]
+      FUN(["completeLogin — the one funnel<br/>run Authorizer · add groups · mint cookie + CSRF"])
+      MW --> PW & PK & MK & OI & SO
+      PW & PK & MK & OI & SO --> FUN
+    end
+
+    subgraph seams["Seams — small interfaces you implement"]
+      direction TB
+      AZ["Authorizer<br/>post-login hook"]
+      CS["CredentialStore"]
+      DS["DirectoryStore<br/>optional · groups · API keys · admin"]
+      MR["Mailer"]
+      RL["RateLimiter"]
+    end
+
+    subgraph ext["External"]
+      direction TB
+      IDP["OIDC · Google · GitHub"]
+      DB[("Postgres — gormstore<br/>or in-memory")]
+      SMTP["SMTP"]
+      LDAP["LDAP · AD · SCIM push"]
+    end
+
+    SPA <-->|"session cookie · HS256"| MW
+    OI <-->|"auth code + PKCE"| IDP
+    SO <--> IDP
+    FUN --> AZ & CS & DS
+    MK --> MR
+    MW -.->|"rate-limit /auth"| RL
+    CS --> DB
+    DS --> DB
+    DS <-->|"sync / provision"| LDAP
+    MR --> SMTP
 ```
 
 **The funnel.** Password, passkey, magic-link, OIDC, and social logins all end in **one**
