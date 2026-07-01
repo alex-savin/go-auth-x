@@ -3,8 +3,8 @@
 // implements create / read / list / PATCH / PUT / delete, deprovision via PATCH active=false,
 // filtered list (eq/ne/co/sw/ew/pr with and/or/not/parens composition), sorting (sortBy/sortOrder),
 // weak ETags with If-Match / If-None-Match, the /Bulk endpoint, bearer-token auth, and the discovery
-// endpoints. Not implemented: valuePath filters (emails[type eq "work"]) and gt/ge/lt/le. Mount it
-// with StripPrefix:
+// endpoints. Filtering covers eq/ne/co/sw/ew/gt/ge/lt/le/pr with and/or/not composition, parentheses,
+// and valuePath (emails[type eq "work"]). Mount it with StripPrefix:
 //
 //	mux.Handle("/scim/v2/", http.StripPrefix("/scim/v2", scim.NewServer(dir, auth).Handler()))
 package scim
@@ -195,7 +195,7 @@ func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
 		}
 		filtered := users[:0]
 		for i := range users {
-			if p(userGetter(&users[i])) {
+			if p(userResource(&users[i])) {
 				filtered = append(filtered, users[i])
 			}
 		}
@@ -342,7 +342,8 @@ func (s *Server) listGroups(w http.ResponseWriter, r *http.Request) {
 		}
 		filtered := gs[:0]
 		for i := range gs {
-			if p(groupGetter(&gs[i])) {
+			g := gs[i]
+			if p(groupResource(&g, func() []authx.AuthUser { m, _ := s.dir.GroupMembers(g.ID); return m })) {
 				filtered = append(filtered, gs[i])
 			}
 		}

@@ -9,16 +9,34 @@ import (
 	authx "github.com/alex-savin/go-auth-x"
 )
 
-// This file implements SCIM 2.0 filtering (RFC 7644 §3.4.2.2) with boolean composition — `and`,
-// `or`, `not(...)`, and parentheses — over attribute expressions (`attr op value` / `attr pr`),
-// plus the attribute getters used for both filtering and sorting. Supported operators:
-// eq, ne, co, sw, ew, pr. Not supported: valuePath (`emails[type eq "work"]`), gt/ge/lt/le.
+// This file implements SCIM 2.0 filtering (RFC 7644 §3.4.2.2): boolean composition (`and`, `or`,
+// `not(...)`, parentheses), attribute expressions (`attr op value` / `attr pr`), and valuePath
+// (`emails[type eq "work"]`). Operators: eq, ne, co, sw, ew, gt, ge, lt, le, pr (gt/ge/lt/le are
+// lexicographic — our attributes are strings). Plus the attribute getters used for sorting.
 
 // attrGetter resolves a resource attribute by name (case-insensitive) to its value + presence.
 type attrGetter func(attr string) (value string, present bool)
 
-// pred is a compiled filter predicate.
-type pred func(get attrGetter) bool
+// pred is a compiled filter predicate evaluated against a resource.
+type pred func(r resource) bool
+
+// resource exposes a SCIM resource for filtering: scalar attributes, plus multi-valued attributes
+// (emails, members) so valuePath expressions like emails[type eq "work"] can be evaluated.
+type resource struct {
+	scalar attrGetter
+	multi  func(attr string) []elem
+}
+
+// elem is one sub-value of a multi-valued attribute, addressable by its lower-cased sub-attributes.
+type elem map[string]string
+
+// asResource wraps a sub-value so an inner valuePath filter can be evaluated against it.
+func (e elem) asResource() resource {
+	return resource{
+		scalar: func(a string) (string, bool) { v, ok := e[strings.ToLower(a)]; return v, ok },
+		multi:  func(string) []elem { return nil },
+	}
+}
 
 func toID(id uint) string { return strconv.FormatUint(uint64(id), 10) }
 
@@ -54,6 +72,36 @@ func groupAttr(g *authx.Group, attr string) (string, bool) {
 
 func groupGetter(g *authx.Group) attrGetter {
 	return func(a string) (string, bool) { return groupAttr(g, a) }
+}
+
+// userResource / groupResource build a filterable resource. multi() exposes the multi-valued
+// attributes for valuePath: users' emails (one element), groups' members (loaded lazily).
+func userResource(u *authx.AuthUser) resource {
+	return resource{
+		scalar: userGetter(u),
+		multi: func(attr string) []elem {
+			if strings.EqualFold(attr, "emails") && u.Email != "" {
+				return []elem{{"value": u.Email, "primary": "true"}}
+			}
+			return nil
+		},
+	}
+}
+
+func groupResource(g *authx.Group, members func() []authx.AuthUser) resource {
+	return resource{
+		scalar: groupGetter(g),
+		multi: func(attr string) []elem {
+			if strings.EqualFold(attr, "members") {
+				out := []elem{}
+				for _, m := range members() {
+					out = append(out, elem{"value": toID(m.ID), "display": m.Email})
+				}
+				return out
+			}
+			return nil
+		},
+	}
 }
 
 // --- sorting ---
@@ -99,6 +147,8 @@ const (
 	tkString
 	tkLParen
 	tkRParen
+	tkLBracket
+	tkRBracket
 	tkEOF
 )
 
@@ -119,6 +169,12 @@ func tokenize(s string) ([]token, error) {
 		case c == ')':
 			toks = append(toks, token{tkRParen, ")"})
 			i++
+		case c == '[':
+			toks = append(toks, token{tkLBracket, "["})
+			i++
+		case c == ']':
+			toks = append(toks, token{tkRBracket, "]"})
+			i++
 		case c == '"':
 			var b strings.Builder
 			j := i + 1
@@ -136,7 +192,7 @@ func tokenize(s string) ([]token, error) {
 			i = j + 1
 		default:
 			j := i
-			for j < n && s[j] != ' ' && s[j] != '\t' && s[j] != '(' && s[j] != ')' {
+			for j < n && s[j] != ' ' && s[j] != '\t' && s[j] != '(' && s[j] != ')' && s[j] != '[' && s[j] != ']' {
 				j++
 			}
 			toks = append(toks, token{tkWord, s[i:j]})
@@ -187,8 +243,8 @@ func (p *parser) parseOr() (pred, error) {
 		if err != nil {
 			return nil, err
 		}
-		l, r := left, right
-		left = func(g attrGetter) bool { return l(g) || r(g) }
+		l, rr := left, right
+		left = func(res resource) bool { return l(res) || rr(res) }
 	}
 	return left, nil
 }
@@ -204,8 +260,8 @@ func (p *parser) parseAnd() (pred, error) {
 		if err != nil {
 			return nil, err
 		}
-		l, r := left, right
-		left = func(g attrGetter) bool { return l(g) && r(g) }
+		l, rr := left, right
+		left = func(res resource) bool { return l(res) && rr(res) }
 	}
 	return left, nil
 }
@@ -225,7 +281,7 @@ func (p *parser) parseNot() (pred, error) {
 			return nil, fmt.Errorf("expected ')'")
 		}
 		p.next()
-		return func(g attrGetter) bool { return !inner(g) }, nil
+		return func(res resource) bool { return !inner(res) }, nil
 	}
 	return p.parsePrimary()
 }
@@ -251,16 +307,40 @@ func (p *parser) parseAttrExp() (pred, error) {
 	if at.kind != tkWord {
 		return nil, fmt.Errorf("expected an attribute, got %q", at.val)
 	}
+	attr := strings.ToLower(at.val)
+
+	// valuePath: attr[ FILTER ] — matches if ANY sub-value of the multi-valued attr satisfies FILTER
+	// (e.g. emails[type eq "work" and primary eq true], members[value eq "42"]).
+	if p.peek().kind == tkLBracket {
+		p.next()
+		inner, err := p.parseOr()
+		if err != nil {
+			return nil, err
+		}
+		if p.peek().kind != tkRBracket {
+			return nil, fmt.Errorf("expected ']'")
+		}
+		p.next()
+		return func(res resource) bool {
+			for _, e := range res.multi(attr) {
+				if inner(e.asResource()) {
+					return true
+				}
+			}
+			return false
+		}, nil
+	}
+
 	opTok := p.next()
 	if opTok.kind != tkWord {
 		return nil, fmt.Errorf("expected an operator after %q", at.val)
 	}
-	attr, op := strings.ToLower(at.val), strings.ToLower(opTok.val)
+	op := strings.ToLower(opTok.val)
 	if op == "pr" {
-		return func(g attrGetter) bool { v, ok := g(attr); return ok && v != "" }, nil
+		return func(res resource) bool { v, ok := res.scalar(attr); return ok && v != "" }, nil
 	}
 	switch op {
-	case "eq", "ne", "co", "sw", "ew":
+	case "eq", "ne", "co", "sw", "ew", "gt", "ge", "lt", "le":
 	default:
 		return nil, fmt.Errorf("unsupported operator %q", opTok.val)
 	}
@@ -269,12 +349,14 @@ func (p *parser) parseAttrExp() (pred, error) {
 		return nil, fmt.Errorf("expected a value after %q %q", at.val, opTok.val)
 	}
 	want := vt.val
-	return func(g attrGetter) bool {
-		have, present := g(attr)
+	return func(res resource) bool {
+		have, present := res.scalar(attr)
 		return matchAttr(have, present, op, want)
 	}, nil
 }
 
+// matchAttr applies a SCIM comparison operator. String attributes compare case-insensitively;
+// gt/ge/lt/le are lexicographic (SCIM string ordering).
 func matchAttr(have string, present bool, op, want string) bool {
 	h, w := strings.ToLower(have), strings.ToLower(want)
 	switch op {
@@ -288,6 +370,14 @@ func matchAttr(have string, present bool, op, want string) bool {
 		return present && strings.HasPrefix(h, w)
 	case "ew":
 		return present && strings.HasSuffix(h, w)
+	case "gt":
+		return present && h > w
+	case "ge":
+		return present && h >= w
+	case "lt":
+		return present && h < w
+	case "le":
+		return present && h <= w
 	}
 	return false
 }

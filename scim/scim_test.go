@@ -214,6 +214,64 @@ func TestSCIMComposedFiltersAndSort(t *testing.T) {
 	}
 }
 
+func TestSCIMFilterOperatorsAndValuePath(t *testing.T) {
+	dir := memory.New()
+	srv := NewServer(dir, func(tok string) bool { return tok == "secret" })
+	h := http.StripPrefix("/scim/v2", srv.Handler())
+	do := func(method, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer secret")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		return w
+	}
+	for _, e := range []string{"alice@acme.com", "bob@acme.com", "carol@other.com"} {
+		if w := do(http.MethodPost, "/scim/v2/Users", `{"userName":"`+e+`","active":true}`); w.Code != http.StatusCreated {
+			t.Fatalf("create %s: %d", e, w.Code)
+		}
+	}
+	count := func(filter string) int {
+		w := do(http.MethodGet, "/scim/v2/Users?filter="+url.QueryEscape(filter), "")
+		if w.Code != http.StatusOK {
+			t.Fatalf("filter %q: %d %s", filter, w.Code, w.Body.String())
+		}
+		var list struct {
+			TotalResults int `json:"totalResults"`
+		}
+		_ = json.Unmarshal(w.Body.Bytes(), &list)
+		return list.TotalResults
+	}
+	// Comparison operators (lexicographic).
+	for _, c := range []struct {
+		f    string
+		want int
+	}{
+		{`userName gt "b"`, 2},            // bob, carol (alice < b)
+		{`userName lt "b"`, 1},            // alice
+		{`userName ge "bob@acme.com"`, 2}, // bob, carol
+		{`userName le "bob@acme.com"`, 2}, // alice, bob
+	} {
+		if n := count(c.f); n != c.want {
+			t.Fatalf("%q: want %d, got %d", c.f, c.want, n)
+		}
+	}
+	// valuePath.
+	for _, c := range []struct {
+		f    string
+		want int
+	}{
+		{`emails[value eq "alice@acme.com"]`, 1},
+		{`emails[value co "acme"]`, 2},                    // alice, bob
+		{`emails[primary eq true]`, 3},                    // all have a primary email
+		{`emails[type eq "work"]`, 0},                     // type isn't tracked
+		{`active eq true and emails[value co "acme"]`, 2}, // composed with the outer filter
+	} {
+		if n := count(c.f); n != c.want {
+			t.Fatalf("%q: want %d, got %d", c.f, c.want, n)
+		}
+	}
+}
+
 func TestSCIMETags(t *testing.T) {
 	dir := memory.New()
 	srv := NewServer(dir, func(tok string) bool { return tok == "secret" })

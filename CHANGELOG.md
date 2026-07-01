@@ -22,9 +22,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   flow cookie) and Facebook (Graph API `/me` with an `appsecret_proof`). Both follow the same
   verified-email account-linking rule as Google/GitHub. New env: `FACEBOOK_CLIENT_ID/SECRET`,
   `APPLE_CLIENT_ID`/`APPLE_TEAM_ID`/`APPLE_KEY_ID`/`APPLE_PRIVATE_KEY`. ([#3])
-- **SCIM: boolean-composed filters** — `and` / `or` / `not` + parentheses over `eq`/`ne`/`co`/`sw`/`ew`/`pr`
-  (previously single-term only), on `userName`/`emails`/`externalId`/`active`/`id` (users) and
-  `displayName`/`id` (groups). Malformed filters return `400` with `scimType: invalidFilter`. ([#4])
+- **SCIM: boolean-composed filters** — `and` / `or` / `not` + parentheses over
+  `eq`/`ne`/`co`/`sw`/`ew`/`gt`/`ge`/`lt`/`le`/`pr` (previously single-term, eq/co/sw/pr only), plus
+  **valuePath** (`emails[type eq "work"]`, `members[value eq "42"]`), on `userName`/`emails`/`externalId`/`active`/`id`
+  (users) and `displayName`/`id`/`members` (groups). Malformed filters return `400` `invalidFilter`. ([#4])
 - **SCIM: sorting** — `sortBy` / `sortOrder` on the list endpoints. ([#4])
 - **SCIM: ETags** — weak ETags on resources (`meta.version` + `ETag` header), `If-None-Match` (→ `304`)
   on reads, and `If-Match` (→ `412`) optimistic-concurrency on PUT/PATCH/DELETE. `ServiceProviderConfig`
