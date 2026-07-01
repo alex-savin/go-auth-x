@@ -45,6 +45,7 @@ func (a *Authenticator) routes(mux *http.ServeMux) {
 		mux.HandleFunc("GET /auth/api/account", a.wrap(a.AccountInfo))
 		mux.HandleFunc("POST /auth/api/account/password", a.wrap(a.AccountSetPassword))
 		mux.HandleFunc("DELETE /auth/api/passkeys/{id}", a.wrap(a.PasskeyRemove))
+		mux.HandleFunc("POST /auth/reauth", a.wrap(a.ReAuth)) // step-up re-auth for sensitive actions
 	}
 	if a.TwoFactorEnabled() {
 		mux.HandleFunc("POST /auth/2fa/totp/begin", a.wrap(a.TOTPBegin))     // session-gated: start enrollment
