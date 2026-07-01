@@ -55,9 +55,9 @@ Verified safe: the IDs are never used arithmetically, ordered, or compared, and 
 
 - **Apple** (Sign in with Apple — ES256 client-secret JWT) and **Facebook** login.
 
-### SCIM — [#4](https://github.com/alex-savin/go-auth-x/issues/4)
+### SCIM — [#4](https://github.com/alex-savin/go-auth-x/issues/4) · ✅ landed on `main` (unreleased)
 
-- AND/OR-composed filters, plus sorting and ETags.
+- AND/OR-composed filters, sorting, and ETags. Done — ships in v0.2.0.
 
 ---
 

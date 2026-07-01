@@ -363,10 +363,11 @@ result, err := syncer.Sync() // run on a schedule
 
 ### SCIM 2.0
 A mountable provisioning server so an upstream IdP (Okta, Entra/Azure AD, JumpCloud) can push and
-deprovision Users + Groups. Supports create / read / list (filters: `eq`, `co`, `sw`, `pr`) / **PATCH
-deprovision (`active=false`)** / **PUT replace** / delete, a **`/Bulk`** endpoint, plus
-`ServiceProviderConfig` / `ResourceTypes` / `Schemas`. Bearer-auth via `ValidateAPIKey`. *(Not yet:
-sorting, ETags, AND/OR-composed filters.)*
+deprovision Users + Groups. Supports create / read / list / **PATCH deprovision (`active=false`)** /
+**PUT replace** / delete, a **`/Bulk`** endpoint, **filters** (`eq`/`ne`/`co`/`sw`/`ew`/`pr` with
+**`and`/`or`/`not`** + parens), **sorting** (`sortBy`/`sortOrder`), and **weak ETags** (`If-Match` /
+`If-None-Match`), plus `ServiceProviderConfig` / `ResourceTypes` / `Schemas`. Bearer-auth via
+`ValidateAPIKey`. *(Not yet: valuePath filters `emails[…]`, `gt`/`lt` operators.)*
 
 ```go
 mux.Handle("/scim/v2/", http.StripPrefix("/scim/v2",

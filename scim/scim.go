@@ -1,8 +1,10 @@
 // Package scim is a SCIM 2.0 provisioning server (Users + Groups) over an authx.DirectoryStore, so
 // an upstream IdP (Okta, Entra/Azure AD, JumpCloud) can push and deprovision users and groups. It
 // implements create / read / list / PATCH / PUT / delete, deprovision via PATCH active=false,
-// filtered list (eq / co / sw / pr), the /Bulk endpoint, bearer-token auth, and the discovery
-// endpoints. Not implemented: sorting, ETags, and AND/OR-composed filters. Mount it with StripPrefix:
+// filtered list (eq/ne/co/sw/ew/pr with and/or/not/parens composition), sorting (sortBy/sortOrder),
+// weak ETags with If-Match / If-None-Match, the /Bulk endpoint, bearer-token auth, and the discovery
+// endpoints. Not implemented: valuePath filters (emails[type eq "work"]) and gt/ge/lt/le. Mount it
+// with StripPrefix:
 //
 //	mux.Handle("/scim/v2/", http.StripPrefix("/scim/v2", scim.NewServer(dir, auth).Handler()))
 package scim
@@ -93,6 +95,7 @@ type scimEmail struct {
 type scimMeta struct {
 	ResourceType string `json:"resourceType"`
 	Location     string `json:"location,omitempty"`
+	Version      string `json:"version,omitempty"` // weak ETag
 }
 
 type scimUser struct {
@@ -156,7 +159,7 @@ func toSCIMUser(u *authx.AuthUser) scimUser {
 		Schemas: []string{schemaUser}, ID: strconv.FormatUint(uint64(u.ID), 10), UserName: u.Email,
 		Name:   &scimName{Formatted: u.Name},
 		Emails: []scimEmail{{Value: u.Email, Primary: true}},
-		Active: !u.Disabled, Meta: scimMeta{ResourceType: "User"},
+		Active: !u.Disabled, Meta: scimMeta{ResourceType: "User", Version: userVersion(u)},
 	}
 }
 
@@ -165,7 +168,7 @@ func toSCIMGroup(g authx.Group, members []authx.AuthUser) scimGroup {
 	for _, m := range members {
 		ms = append(ms, scimMember{Value: strconv.FormatUint(uint64(m.ID), 10), Display: m.Email})
 	}
-	return scimGroup{Schemas: []string{schemaGroup}, ID: strconv.FormatUint(uint64(g.ID), 10), DisplayName: g.Name, Members: ms, Meta: scimMeta{ResourceType: "Group"}}
+	return scimGroup{Schemas: []string{schemaGroup}, ID: strconv.FormatUint(uint64(g.ID), 10), DisplayName: g.Name, Members: ms, Meta: scimMeta{ResourceType: "Group", Version: groupVersion(g, members)}}
 }
 
 func pathID(r *http.Request) uint {
@@ -229,7 +232,7 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 		_ = s.dir.SetUserDisabled(u.ID, !in.Active)
 		u.Disabled = !in.Active
 	}
-	writeSCIM(w, http.StatusCreated, toSCIMUser(u))
+	writeResource(w, http.StatusCreated, toSCIMUser(u), userVersion(u))
 }
 
 func (s *Server) getUser(w http.ResponseWriter, r *http.Request) {
@@ -238,14 +241,25 @@ func (s *Server) getUser(w http.ResponseWriter, r *http.Request) {
 		scimError(w, http.StatusNotFound, "user not found")
 		return
 	}
-	writeSCIM(w, http.StatusOK, toSCIMUser(u))
+	v := userVersion(u)
+	if ifNoneMatchSatisfied(r, v) {
+		w.Header().Set("ETag", v)
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	writeResource(w, http.StatusOK, toSCIMUser(u), v)
 }
 
 // patchUser handles the deprovision/reactivate flow (replace active=true/false).
 func (s *Server) patchUser(w http.ResponseWriter, r *http.Request) {
 	id := pathID(r)
-	if _, err := s.dir.UserByID(id); err != nil {
+	cur, err := s.dir.UserByID(id)
+	if err != nil {
 		scimError(w, http.StatusNotFound, "user not found")
+		return
+	}
+	if ifMatchFails(r, userVersion(cur)) {
+		scimError(w, http.StatusPreconditionFailed, "ETag precondition failed")
 		return
 	}
 	var p patchOp
@@ -259,7 +273,7 @@ func (s *Server) patchUser(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	u, _ := s.dir.UserByID(id)
-	writeSCIM(w, http.StatusOK, toSCIMUser(u))
+	writeResource(w, http.StatusOK, toSCIMUser(u), userVersion(u))
 }
 
 // putUser replaces a user (name + active; email/userName too). The Sub is preserved.
@@ -267,6 +281,10 @@ func (s *Server) putUser(w http.ResponseWriter, r *http.Request) {
 	cur, err := s.dir.UserByID(pathID(r))
 	if err != nil {
 		scimError(w, http.StatusNotFound, "user not found")
+		return
+	}
+	if ifMatchFails(r, userVersion(cur)) {
+		scimError(w, http.StatusPreconditionFailed, "ETag precondition failed")
 		return
 	}
 	var in scimUser
@@ -288,12 +306,19 @@ func (s *Server) putUser(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = s.dir.SetUserDisabled(cur.ID, !in.Active)
 	u, _ := s.dir.UserByID(cur.ID)
-	writeSCIM(w, http.StatusOK, toSCIMUser(u))
+	writeResource(w, http.StatusOK, toSCIMUser(u), userVersion(u))
 }
 
 func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
+	id := pathID(r)
+	if r.Header.Get("If-Match") != "" { // optimistic-concurrency precondition
+		if cur, err := s.dir.UserByID(id); err == nil && ifMatchFails(r, userVersion(cur)) {
+			scimError(w, http.StatusPreconditionFailed, "ETag precondition failed")
+			return
+		}
+	}
 	// SCIM DELETE = deprovision; we soft-disable (safer than a hard delete of audit history).
-	if err := s.dir.SetUserDisabled(pathID(r), true); err != nil {
+	if err := s.dir.SetUserDisabled(id, true); err != nil {
 		scimError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -352,26 +377,46 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	members, _ := s.dir.GroupMembers(g.ID)
-	writeSCIM(w, http.StatusCreated, toSCIMGroup(*g, members))
+	writeResource(w, http.StatusCreated, toSCIMGroup(*g, members), groupVersion(*g, members))
 }
 
-func (s *Server) getGroup(w http.ResponseWriter, r *http.Request) {
-	id := pathID(r)
+// groupByID finds a group + its members by id (the DirectoryStore has no GroupByID lookup).
+func (s *Server) groupByID(id uint) (authx.Group, []authx.AuthUser, bool) {
 	gs, _ := s.dir.Groups()
 	for _, g := range gs {
 		if g.ID == id {
 			members, _ := s.dir.GroupMembers(id)
-			writeSCIM(w, http.StatusOK, toSCIMGroup(g, members))
-			return
+			return g, members, true
 		}
 	}
-	scimError(w, http.StatusNotFound, "group not found")
+	return authx.Group{}, nil, false
+}
+
+func (s *Server) getGroup(w http.ResponseWriter, r *http.Request) {
+	g, members, ok := s.groupByID(pathID(r))
+	if !ok {
+		scimError(w, http.StatusNotFound, "group not found")
+		return
+	}
+	v := groupVersion(g, members)
+	if ifNoneMatchSatisfied(r, v) {
+		w.Header().Set("ETag", v)
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	writeResource(w, http.StatusOK, toSCIMGroup(g, members), v)
 }
 
 // putGroup replaces a group's membership with the provided set (the canonical Okta/Azure group
 // PUT). Group rename isn't persisted (the directory has no rename); displayName is echoed back.
 func (s *Server) putGroup(w http.ResponseWriter, r *http.Request) {
 	id := pathID(r)
+	if r.Header.Get("If-Match") != "" {
+		if g, members, ok := s.groupByID(id); ok && ifMatchFails(r, groupVersion(g, members)) {
+			scimError(w, http.StatusPreconditionFailed, "ETag precondition failed")
+			return
+		}
+	}
 	var in scimGroup
 	if json.NewDecoder(r.Body).Decode(&in) != nil {
 		scimError(w, http.StatusBadRequest, "invalid Group")
@@ -392,13 +437,22 @@ func (s *Server) putGroup(w http.ResponseWriter, r *http.Request) {
 	for uid := range want { // add the desired set (idempotent)
 		_ = s.dir.AddUserToGroup(uid, id)
 	}
-	members, _ := s.dir.GroupMembers(id)
-	writeSCIM(w, http.StatusOK, toSCIMGroup(authx.Group{ID: id, Name: in.DisplayName}, members))
+	g, members, ok := s.groupByID(id)
+	if !ok {
+		g, members = authx.Group{ID: id, Name: in.DisplayName}, nil
+	}
+	writeResource(w, http.StatusOK, toSCIMGroup(g, members), groupVersion(g, members))
 }
 
 // patchGroup handles membership add/remove operations.
 func (s *Server) patchGroup(w http.ResponseWriter, r *http.Request) {
 	id := pathID(r)
+	if r.Header.Get("If-Match") != "" {
+		if g, members, ok := s.groupByID(id); ok && ifMatchFails(r, groupVersion(g, members)) {
+			scimError(w, http.StatusPreconditionFailed, "ETag precondition failed")
+			return
+		}
+	}
 	var p patchOp
 	if json.NewDecoder(r.Body).Decode(&p) != nil {
 		scimError(w, http.StatusBadRequest, "invalid PatchOp")
@@ -417,12 +471,22 @@ func (s *Server) patchGroup(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	members, _ := s.dir.GroupMembers(id)
-	writeSCIM(w, http.StatusOK, toSCIMGroup(authx.Group{ID: id}, members))
+	g, members, ok := s.groupByID(id)
+	if !ok {
+		g, members = authx.Group{ID: id}, nil
+	}
+	writeResource(w, http.StatusOK, toSCIMGroup(g, members), groupVersion(g, members))
 }
 
 func (s *Server) deleteGroup(w http.ResponseWriter, r *http.Request) {
-	if err := s.dir.DeleteGroup(pathID(r)); err != nil {
+	id := pathID(r)
+	if r.Header.Get("If-Match") != "" { // optimistic-concurrency precondition
+		if g, members, ok := s.groupByID(id); ok && ifMatchFails(r, groupVersion(g, members)) {
+			scimError(w, http.StatusPreconditionFailed, "ETag precondition failed")
+			return
+		}
+	}
+	if err := s.dir.DeleteGroup(id); err != nil {
 		scimError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -497,7 +561,7 @@ func (s *Server) serviceProviderConfig(w http.ResponseWriter, _ *http.Request) {
 		"filter":                map[string]any{"supported": true, "maxResults": 200},
 		"changePassword":        map[string]bool{"supported": false},
 		"sort":                  map[string]bool{"supported": true},
-		"etag":                  map[string]bool{"supported": false},
+		"etag":                  map[string]bool{"supported": true},
 		"authenticationSchemes": []map[string]string{{"type": "oauthbearertoken", "name": "Bearer Token"}},
 	})
 }

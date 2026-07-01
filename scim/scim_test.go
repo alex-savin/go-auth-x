@@ -213,3 +213,57 @@ func TestSCIMComposedFiltersAndSort(t *testing.T) {
 		t.Fatalf("sort desc: got %v, want %v", got, want)
 	}
 }
+
+func TestSCIMETags(t *testing.T) {
+	dir := memory.New()
+	srv := NewServer(dir, func(tok string) bool { return tok == "secret" })
+	h := http.StripPrefix("/scim/v2", srv.Handler())
+	do := func(method, path, body string, hdr map[string]string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer secret")
+		for k, v := range hdr {
+			req.Header.Set(k, v)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		return w
+	}
+
+	w := do(http.MethodPost, "/scim/v2/Users", `{"userName":"e@tag.com","active":true}`, nil)
+	if w.Code != http.StatusCreated || w.Header().Get("ETag") == "" {
+		t.Fatalf("create: %d, ETag=%q", w.Code, w.Header().Get("ETag"))
+	}
+	var created scimUser
+	_ = json.Unmarshal(w.Body.Bytes(), &created)
+	if created.Meta.Version == "" {
+		t.Fatal("resource should carry meta.version")
+	}
+	loc := "/scim/v2/Users/" + created.ID
+
+	// GET → ETag header equals meta.version.
+	g := do(http.MethodGet, loc, "", nil)
+	etag := g.Header().Get("ETag")
+	if etag == "" || etag != created.Meta.Version {
+		t.Fatalf("GET ETag %q should equal meta.version %q", etag, created.Meta.Version)
+	}
+
+	// If-None-Match with the current ETag → 304.
+	if nm := do(http.MethodGet, loc, "", map[string]string{"If-None-Match": etag}); nm.Code != http.StatusNotModified {
+		t.Fatalf("If-None-Match: want 304, got %d", nm.Code)
+	}
+
+	// PATCH with a stale If-Match → 412.
+	patch := `{"Operations":[{"op":"replace","path":"active","value":false}]}`
+	if pw := do(http.MethodPatch, loc, patch, map[string]string{"If-Match": `W/"deadbeefdeadbeef"`}); pw.Code != http.StatusPreconditionFailed {
+		t.Fatalf("stale If-Match: want 412, got %d %s", pw.Code, pw.Body.String())
+	}
+
+	// PATCH with the correct If-Match → 200 + a NEW ETag (active changed).
+	pw := do(http.MethodPatch, loc, patch, map[string]string{"If-Match": etag})
+	if pw.Code != http.StatusOK {
+		t.Fatalf("correct If-Match: want 200, got %d %s", pw.Code, pw.Body.String())
+	}
+	if nv := pw.Header().Get("ETag"); nv == "" || nv == etag {
+		t.Fatalf("PATCH should return a new ETag; got %q (old %q)", nv, etag)
+	}
+}
