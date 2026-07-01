@@ -46,6 +46,13 @@ func (a *Authenticator) routes(mux *http.ServeMux) {
 		mux.HandleFunc("POST /auth/api/account/password", a.wrap(a.AccountSetPassword))
 		mux.HandleFunc("DELETE /auth/api/passkeys/{id}", a.wrap(a.PasskeyRemove))
 	}
+	if a.TwoFactorEnabled() {
+		mux.HandleFunc("POST /auth/2fa/totp/begin", a.wrap(a.TOTPBegin))     // session-gated: start enrollment
+		mux.HandleFunc("POST /auth/2fa/totp/confirm", a.wrap(a.TOTPConfirm)) // session-gated: confirm + recovery codes
+		mux.HandleFunc("POST /auth/2fa/disable", a.wrap(a.TOTPDisable))      // session-gated
+		mux.HandleFunc("POST /auth/2fa/verify", a.wrap(a.TwoFactorVerify))   // pending-cookie: finish a challenged login
+		mux.HandleFunc("GET /auth/2fa/pending", a.wrap(a.TwoFactorPending))  // is a login awaiting a second factor?
+	}
 	if a.socialConfigured("google") || a.socialConfigured("github") || a.socialConfigured("facebook") || a.socialConfigured("apple") {
 		mux.HandleFunc("GET /auth/social/{provider}/login", a.wrap(a.SocialLogin))
 		mux.HandleFunc("GET /auth/social/{provider}/callback", a.wrap(a.SocialCallback))

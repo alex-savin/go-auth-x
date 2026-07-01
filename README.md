@@ -70,6 +70,7 @@ IdP hand-off, no "double login page."
   single-use, hashed-at-rest tokens.
 - 🌐 **OIDC client** — Authorization Code + PKCE; consume any OIDC provider (Keycloak, Auth0, …).
 - 👥 **Social login** — Google & Apple (OIDC), GitHub & Facebook (REST/Graph), verified-email only.
+- 🔐 **Two-factor (2FA)** — TOTP authenticator apps + single-use recovery codes; **stdlib, no dependency**.
 
 **Session & transport**
 - 🍪 **BFF sessions** — one HMAC-signed (HS256) HttpOnly cookie; the SPA never handles tokens.
@@ -139,6 +140,7 @@ func main() {
 	}
 	authn.SetCredentialStore(store)         // persistence
 	authn.SetDirectoryStore(store)          // optional: groups / API keys / admin API
+	authn.SetTwoFactorStore(store)          // optional: TOTP 2FA + recovery codes
 	authn.SetMailer(mailer.FromEnv())       // optional: enables magic-link / verify / reset
 	authn.SetAuthorizer(store.Authorizer()) // safe identity upsert (wrap to add provisioning)
 	authn.SetLocalEnabled(true)             // turn on password + passkey + email
@@ -299,6 +301,22 @@ identity links to a **verified-email** user, **reclaims** an unverified squatter
 for you and regenerates it per exchange. Because Apple returns its callback via **`form_post`** (a
 cross-site POST), the login flow cookie is set `SameSite=None`, so **Apple requires HTTPS** and the name
 is delivered only on the user's first authorization.
+
+### Two-factor (TOTP + recovery codes)
+Wire the optional `TwoFactorStore` with `SetTwoFactorStore(store)` (reference impls in `gormstore` +
+`memory`). TOTP is implemented with the **standard library only — no dependency** (RFC 4226/6238,
+HMAC-SHA1 / 6 digits / 30s, ±1-step skew), verified against the published RFC vectors.
+
+- **Enroll** — `POST /auth/2fa/totp/begin` (session-gated) returns the `otpauth://` URI + base32 secret
+  (**you render the QR** — the library ships no image dependency); `POST /auth/2fa/totp/confirm`
+  validates a code, enables it, and returns single-use **recovery codes** once.
+- **Enforce** — when a user has TOTP enabled, a first-factor login no longer mints the session: it sets
+  a short-lived signed **`2fa_pending`** cookie and the response signals a second factor is needed
+  (`{ "twoFactorRequired": true }` for the JSON methods; a redirect with `?mfa=required` for
+  social/magic-link — poll `GET /auth/2fa/pending`). `POST /auth/2fa/verify` with a TOTP **or** a
+  recovery code finishes the login.
+- **Security** — codes are constant-time compared; a used time-step is remembered to reject **replay**;
+  recovery codes are **sha256-at-rest + single-use**; `POST /auth/2fa/disable` requires a current code.
 
 ---
 

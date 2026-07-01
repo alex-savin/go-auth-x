@@ -198,8 +198,13 @@ func (a *Authenticator) SocialCallback(c *reqCtx) {
 		return
 	}
 	a.creds.RecordAudit(au.ID, au.Email, c.ClientIP(), provider, "login", true, "")
-	if err := a.completeLogin(c, Identity{Subject: au.Sub, Email: au.Email, Name: au.Name, EmailVerified: true}, false); err != nil {
+	tfr, err := a.completeLogin(c, Identity{Subject: au.Sub, Email: au.Email, Name: au.Name, EmailVerified: true}, false)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, H{"error": "sign-in failed"})
+		return
+	}
+	if tfr {
+		c.Redirect(http.StatusFound, withMFAMarker(fc.Next))
 		return
 	}
 	c.Redirect(http.StatusFound, fc.Next)

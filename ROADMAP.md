@@ -22,7 +22,10 @@ Direction and planned work for the library. Authoritative usage/feature docs liv
 
 Tracked in the **[v0.2.0 milestone](https://github.com/alex-savin/go-auth-x/milestone/1)**.
 
-### Two-factor authentication (2FA / MFA) — TOTP + recovery codes — [#1](https://github.com/alex-savin/go-auth-x/issues/1)
+### Two-factor authentication (2FA / MFA) — TOTP + recovery codes — [#1](https://github.com/alex-savin/go-auth-x/issues/1) · ✅ core landed on `main` (unreleased)
+
+Core TOTP + recovery codes + login enforcement shipped (stdlib, no dependency). Still open as
+follow-ons: passkey-as-second-factor and step-up / re-auth for sensitive actions.
 
 The library has several *single*-factor login methods today but **no second-factor step** — there's no
 flow that authenticates with one factor and then requires another. Add genuine two-step verification:

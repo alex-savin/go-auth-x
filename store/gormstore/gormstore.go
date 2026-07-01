@@ -127,6 +127,9 @@ func New(db *gorm.DB) (*Store, error) {
 	if err := s.migrateDirectory(); err != nil {
 		return nil, err
 	}
+	if err := s.migrateTwoFactor(); err != nil {
+		return nil, err
+	}
 	return s, nil
 }
 

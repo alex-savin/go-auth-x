@@ -62,6 +62,15 @@ type Store struct {
 	memberships map[uint]map[uint]bool // userID -> set of groupID
 	apikeys     map[uint]*apiKey
 	apiSeq      uint
+	// 2fa state
+	totp     map[uint]*totpRec
+	recovery map[uint]map[string]bool // userID -> set of hex(sha256(code))
+}
+
+type totpRec struct {
+	secret   string
+	enabled  bool
+	lastStep uint64
 }
 
 type apiKey struct {
@@ -79,6 +88,8 @@ func New() *Store {
 		groups:      map[uint]*authx.Group{},
 		memberships: map[uint]map[uint]bool{},
 		apikeys:     map[uint]*apiKey{},
+		totp:        map[uint]*totpRec{},
+		recovery:    map[uint]map[string]bool{},
 	}
 }
 

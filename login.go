@@ -13,35 +13,52 @@ import (
 //
 // Because all four methods funnel here, no method can mint a session that bypasses
 // provisioning or the disabled/verified gates the callers enforce before calling in.
-func (a *Authenticator) completeLogin(c *reqCtx, id Identity, remember bool) error {
+// It returns twoFactorRequired=true when the user has confirmed TOTP: instead of the full session it
+// sets a short-lived 2fa-pending cookie, and the caller must tell the client to finish at
+// POST /auth/2fa/verify. Otherwise it mints the session and returns false.
+func (a *Authenticator) completeLogin(c *reqCtx, id Identity, remember bool) (twoFactorRequired bool, err error) {
 	var role string
 	if a.authorizer != nil {
-		r, err := a.authorizer.Authorize(c.Request.Context(), id)
-		if err != nil {
-			return err
+		r, aerr := a.authorizer.Authorize(c.Request.Context(), id)
+		if aerr != nil {
+			return false, aerr
 		}
 		role = r
+	}
+	// Resolve the local user once (for group enrichment + the 2FA check).
+	var u *AuthUser
+	if a.creds != nil {
+		u, _ = a.creds.UserBySub(id.Subject)
 	}
 	// Enrich the session with the user's groups (for per-group access control) when a directory
 	// is wired and the upstream identity didn't already carry groups (e.g. local/social logins;
 	// OIDC logins keep the IdP-asserted groups).
-	if a.dir != nil && a.creds != nil && len(id.Groups) == 0 {
-		if u, uerr := a.creds.UserBySub(id.Subject); uerr == nil {
-			if gs, gerr := a.dir.UserGroups(u.ID); gerr == nil {
-				id.Groups = groupNames(gs)
-			}
+	if a.dir != nil && u != nil && len(id.Groups) == 0 {
+		if gs, gerr := a.dir.UserGroups(u.ID); gerr == nil {
+			id.Groups = groupNames(gs)
 		}
+	}
+	// Second-factor gate: if the user has confirmed TOTP, don't mint the session yet — stash the
+	// half-authenticated identity in a signed, short-lived pending cookie and require a code.
+	if u != nil && a.userHasTOTP(u.ID) {
+		pending, perr := a.mintPending(Identity{Subject: id.Subject, Email: id.Email, Name: id.Name, Groups: id.Groups}, role, remember)
+		if perr != nil {
+			return false, perr
+		}
+		a.setCookie(c, twoFactorPendingCookie, pending, int(twoFactorPendingTTL/time.Second))
+		a.clearCookie(c, flowCookie)
+		return true, nil
 	}
 	ttl := sessionTTL
 	if remember {
 		ttl = rememberTTL
 	}
-	session, err := mintSession(a.cfg.SessionSecret, id.Subject, id.Email, id.Name, role, "", id.Groups, time.Now(), ttl)
-	if err != nil {
-		return err
+	session, serr := mintSession(a.cfg.SessionSecret, id.Subject, id.Email, id.Name, role, "", id.Groups, time.Now(), ttl)
+	if serr != nil {
+		return false, serr
 	}
 	a.setCookie(c, sessionCookie, session, int(ttl/time.Second))
 	a.issueCSRF(c)
 	a.clearCookie(c, flowCookie)
-	return nil
+	return false, nil
 }

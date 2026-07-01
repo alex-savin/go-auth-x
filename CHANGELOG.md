@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Two-factor auth (2FA): TOTP + recovery codes** — a genuine second factor, **no third-party
+  dependency** (RFC 4226/6238 in the stdlib, verified against the published vectors). Enrollment
+  (`POST /auth/2fa/totp/begin` → `otpauth://` URI + secret; `/confirm` validates a code, enables it,
+  returns single-use recovery codes once), `/auth/2fa/disable` (requires a current code), and login
+  enforcement: when 2FA is on, `completeLogin` issues a short-lived signed `2fa_pending` cookie
+  instead of the session, and `POST /auth/2fa/verify` (a TOTP or recovery code) finishes it. Replay
+  is rejected via a stored last-used time-step; recovery codes are sha256-at-rest + single-use. Wire
+  the optional `TwoFactorStore` (reference impls in gormstore + memory) with `SetTwoFactorStore`. ([#1])
 - **Social login: Apple + Facebook.** Sign in with Apple (OIDC — the library signs the ES256
   client-secret JWT from your `.p8` and handles Apple's `form_post` callback via a `SameSite=None`
   flow cookie) and Facebook (Graph API `/me` with an `appsecret_proof`). Both follow the same
@@ -115,5 +123,6 @@ First tagged release. A self-contained, embeddable authentication library for Go
 
 [0.1.1]: https://github.com/alex-savin/go-auth-x/releases/tag/v0.1.1
 [0.1.0]: https://github.com/alex-savin/go-auth-x/releases/tag/v0.1.0
+[#1]: https://github.com/alex-savin/go-auth-x/issues/1
 [#3]: https://github.com/alex-savin/go-auth-x/issues/3
 [#4]: https://github.com/alex-savin/go-auth-x/issues/4

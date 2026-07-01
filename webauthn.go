@@ -310,8 +310,13 @@ func (a *Authenticator) WebauthnLoginFinish(c *reqCtx) {
 	}
 	_ = a.creds.TouchPasskey(cred.ID, cred.Authenticator.SignCount)
 	a.creds.RecordAudit(matched.ID, matched.Email, c.ClientIP(), "passkey", "login", true, "")
-	if err := a.completeLogin(c, Identity{Subject: matched.Sub, Email: matched.Email, Name: matched.Name, EmailVerified: true}, c.Query("remember") == "true"); err != nil {
+	tfr, err := a.completeLogin(c, Identity{Subject: matched.Sub, Email: matched.Email, Name: matched.Name, EmailVerified: true}, c.Query("remember") == "true")
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, H{"error": "sign-in failed"})
+		return
+	}
+	if tfr {
+		c.JSON(http.StatusOK, H{"twoFactorRequired": true})
 		return
 	}
 	c.JSON(http.StatusOK, H{"ok": true, "next": sanitizeNext(c.Query("next")), "email": matched.Email})

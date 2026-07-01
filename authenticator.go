@@ -63,6 +63,8 @@ type Authenticator struct {
 	appleKey                                            *ecdsa.PrivateKey // parsed .p8, signs Apple's client-secret JWT
 	// dir backs groups / API keys / admin REST (optional; nil = those features off).
 	dir DirectoryStore
+	// twoFactor backs optional TOTP 2FA + recovery codes (nil = 2FA off).
+	twoFactor TwoFactorStore
 }
 
 // SetAuthorizer installs an optional post-login authorization hook.
