@@ -5,7 +5,7 @@ Direction and planned work for the library. Authoritative usage/feature docs liv
 
 ## Shipped
 
-### Unreleased
+### v0.3.0
 
 - **Social login: Microsoft/Entra + Discord + any OIDC provider** — Microsoft (Entra ID / Azure AD)
   and Discord as named providers, plus a generic `Config.SocialOIDC` registration for any OIDC IdP
@@ -53,4 +53,4 @@ a pre-v1.0 breaking change if/when a uuid-keyed consumer adopts the library or t
 
 ---
 
-_Updated 2026-06._
+_Updated 2026-07._

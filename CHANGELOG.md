@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-07-01
+
 ### Added
 
 - **Social login: Microsoft/Entra, Discord, and any OIDC provider.** Sign in with Microsoft
@@ -159,6 +161,7 @@ First tagged release. A self-contained, embeddable authentication library for Go
 - **Trusted-proxy client-IP** — `X-Forwarded-For` honored only when the direct peer is a
   trusted proxy (`TRUSTED_PROXIES`, or private-range default), so the client IP can't be spoofed.
 
+[0.3.0]: https://github.com/alex-savin/go-auth-x/releases/tag/v0.3.0
 [0.2.0]: https://github.com/alex-savin/go-auth-x/releases/tag/v0.2.0
 [0.1.1]: https://github.com/alex-savin/go-auth-x/releases/tag/v0.1.1
 [0.1.0]: https://github.com/alex-savin/go-auth-x/releases/tag/v0.1.0

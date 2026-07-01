@@ -204,7 +204,7 @@ flowchart LR
 
     subgraph ext["External"]
       direction TB
-      IDP["OIDC · Google · GitHub"]
+      IDP["OIDC · Google · Apple · Microsoft/Entra<br/>GitHub · Facebook · Discord · any OIDC"]
       DB[("Postgres — gormstore<br/>or in-memory")]
       SMTP["SMTP"]
       LDAP["LDAP · AD · SCIM push"]
@@ -531,7 +531,9 @@ go-auth-x/
 
 See **[ROADMAP.md](./ROADMAP.md)** for the full list and **[CHANGELOG.md](./CHANGELOG.md)** for details.
 
-- **v0.2.0** (latest): **2FA** (TOTP + recovery codes, passkey-as-2FA, step-up re-auth);
+- **v0.3.0** (latest): **Microsoft/Entra + Discord + any-OIDC** social (`Config.SocialOIDC`); **SCIM**
+  pagination (`startIndex`/`count`), `meta.created`/`lastModified`, and full `/Schemas` documents.
+- **v0.2.0**: **2FA** (TOTP + recovery codes, passkey-as-2FA, step-up re-auth);
   **Apple + Facebook** social; a much richer **SCIM** server (full filter grammar + valuePath, sorting,
   strong ETags, Location/uniqueness/PATCH validation); and an **RFC-compliance hardening** pass.
 - **v0.1.x**: pure **net/http**; OIDC, password, passkey (+ QR), magic-link, Google/GitHub social;
