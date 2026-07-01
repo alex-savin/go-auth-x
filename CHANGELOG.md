@@ -9,6 +9,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Social login: Apple + Facebook.** Sign in with Apple (OIDC — the library signs the ES256
+  client-secret JWT from your `.p8` and handles Apple's `form_post` callback via a `SameSite=None`
+  flow cookie) and Facebook (Graph API `/me` with an `appsecret_proof`). Both follow the same
+  verified-email account-linking rule as Google/GitHub. New env: `FACEBOOK_CLIENT_ID/SECRET`,
+  `APPLE_CLIENT_ID`/`APPLE_TEAM_ID`/`APPLE_KEY_ID`/`APPLE_PRIVATE_KEY`. ([#3])
 - **SCIM: boolean-composed filters** — `and` / `or` / `not` + parentheses over `eq`/`ne`/`co`/`sw`/`ew`/`pr`
   (previously single-term only), on `userName`/`emails`/`externalId`/`active`/`id` (users) and
   `displayName`/`id` (groups). Malformed filters return `400` with `scimType: invalidFilter`. ([#4])
@@ -110,4 +115,5 @@ First tagged release. A self-contained, embeddable authentication library for Go
 
 [0.1.1]: https://github.com/alex-savin/go-auth-x/releases/tag/v0.1.1
 [0.1.0]: https://github.com/alex-savin/go-auth-x/releases/tag/v0.1.0
+[#3]: https://github.com/alex-savin/go-auth-x/issues/3
 [#4]: https://github.com/alex-savin/go-auth-x/issues/4

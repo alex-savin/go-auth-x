@@ -46,9 +46,10 @@ func (a *Authenticator) routes(mux *http.ServeMux) {
 		mux.HandleFunc("POST /auth/api/account/password", a.wrap(a.AccountSetPassword))
 		mux.HandleFunc("DELETE /auth/api/passkeys/{id}", a.wrap(a.PasskeyRemove))
 	}
-	if a.socialConfigured("google") || a.socialConfigured("github") {
+	if a.socialConfigured("google") || a.socialConfigured("github") || a.socialConfigured("facebook") || a.socialConfigured("apple") {
 		mux.HandleFunc("GET /auth/social/{provider}/login", a.wrap(a.SocialLogin))
 		mux.HandleFunc("GET /auth/social/{provider}/callback", a.wrap(a.SocialCallback))
+		mux.HandleFunc("POST /auth/social/{provider}/callback", a.wrap(a.SocialCallback)) // Apple posts its callback (form_post)
 	}
 	if a.DirectoryEnabled() {
 		a.adminRoutes(mux)

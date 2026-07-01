@@ -37,10 +37,20 @@ type Config struct {
 	PublicPath func(path string) bool
 	// Social login (OAuth). Each provider turns on only when its client id + secret are set.
 	// Callback URLs are AppURL + /auth/social/{google,github}/callback (register them upstream).
-	GoogleClientID     string // GOOGLE_CLIENT_ID
-	GoogleClientSecret string // GOOGLE_CLIENT_SECRET
-	GitHubClientID     string // GITHUB_CLIENT_ID
-	GitHubClientSecret string // GITHUB_CLIENT_SECRET
+	GoogleClientID       string // GOOGLE_CLIENT_ID
+	GoogleClientSecret   string // GOOGLE_CLIENT_SECRET
+	GitHubClientID       string // GITHUB_CLIENT_ID
+	GitHubClientSecret   string // GITHUB_CLIENT_SECRET
+	FacebookClientID     string // FACEBOOK_CLIENT_ID
+	FacebookClientSecret string // FACEBOOK_CLIENT_SECRET
+	// Sign in with Apple. The "client secret" is an ES256 JWT the library signs from your private
+	// key, so Apple needs four values: the Services ID (client id), your Team ID, the Key ID, and the
+	// .p8 EC private key (PEM; literal or with \n-escaped newlines). Apple posts its callback
+	// (form_post), so its flow cookie is set SameSite=None — HTTPS is required.
+	AppleClientID   string // APPLE_CLIENT_ID (Services ID)
+	AppleTeamID     string // APPLE_TEAM_ID
+	AppleKeyID      string // APPLE_KEY_ID
+	ApplePrivateKey string // APPLE_PRIVATE_KEY (.p8 PEM)
 }
 
 // ConfigFromEnv loads the OIDC configuration from the environment.
@@ -62,6 +72,14 @@ func ConfigFromEnv() Config {
 		GoogleClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
 		GitHubClientID:     os.Getenv("GITHUB_CLIENT_ID"),
 		GitHubClientSecret: os.Getenv("GITHUB_CLIENT_SECRET"),
+
+		FacebookClientID:     os.Getenv("FACEBOOK_CLIENT_ID"),
+		FacebookClientSecret: os.Getenv("FACEBOOK_CLIENT_SECRET"),
+
+		AppleClientID:   os.Getenv("APPLE_CLIENT_ID"),
+		AppleTeamID:     os.Getenv("APPLE_TEAM_ID"),
+		AppleKeyID:      os.Getenv("APPLE_KEY_ID"),
+		ApplePrivateKey: os.Getenv("APPLE_PRIVATE_KEY"),
 	}
 }
 

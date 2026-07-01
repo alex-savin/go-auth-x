@@ -2,6 +2,9 @@ package authx
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -10,6 +13,7 @@ import (
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
+	"golang.org/x/oauth2/facebook"
 	"golang.org/x/oauth2/github"
 )
 
@@ -34,6 +38,14 @@ func (a *Authenticator) enableSocial(ctx context.Context) {
 			Scopes: []string{"read:user", "user:email"},
 		}
 	}
+	if a.cfg.FacebookClientID != "" && a.cfg.FacebookClientSecret != "" {
+		a.facebookOAuth = &oauth2.Config{
+			ClientID: a.cfg.FacebookClientID, ClientSecret: a.cfg.FacebookClientSecret,
+			Endpoint: facebook.Endpoint, RedirectURL: a.socialRedirect("facebook"),
+			Scopes: []string{"email", "public_profile"},
+		}
+	}
+	a.enableApple(ctx) // Sign in with Apple (OIDC; secret is a signed JWT — see social_apple.go)
 }
 
 func (a *Authenticator) socialRedirect(provider string) string {
@@ -48,6 +60,10 @@ func (a *Authenticator) socialOAuth(provider string) *oauth2.Config {
 		return a.googleOAuth
 	case "github":
 		return a.githubOAuth
+	case "facebook":
+		return a.facebookOAuth
+	case "apple":
+		return a.appleOAuth
 	}
 	return nil
 }
@@ -67,10 +83,18 @@ func (a *Authenticator) SocialLogin(c *reqCtx) {
 		c.JSON(http.StatusInternalServerError, H{"error": "login init failed"})
 		return
 	}
-	a.setCookie(c, flowCookie, flow, int(flowTTL/time.Second))
+	if provider == "apple" {
+		a.setFlowCookieCrossSite(c, flow) // Apple posts its callback cross-site; a Lax cookie wouldn't be sent
+	} else {
+		a.setCookie(c, flowCookie, flow, int(flowTTL/time.Second))
+	}
 	opts := []oauth2.AuthCodeOption{oauth2.S256ChallengeOption(verifier)}
-	if provider == "google" {
+	switch provider {
+	case "google", "apple": // OIDC providers — bind the id_token to our nonce
 		opts = append(opts, oidc.Nonce(nonce))
+	}
+	if provider == "apple" {
+		opts = append(opts, oauth2.SetAuthURLParam("response_mode", "form_post"))
 	}
 	c.Redirect(http.StatusFound, oc.AuthCodeURL(state, opts...))
 }
@@ -92,15 +116,21 @@ func (a *Authenticator) SocialCallback(c *reqCtx) {
 		return
 	}
 	a.clearCookie(c, flowCookie)
-	if errMsg := c.Query("error"); errMsg != "" {
+	// FormValue reads the query (GET providers) OR the posted form (Apple's form_post).
+	if errMsg := c.Request.FormValue("error"); errMsg != "" {
 		c.JSON(http.StatusUnauthorized, H{"error": "identity provider: " + errMsg})
 		return
 	}
-	if !ctEqual(c.Query("state"), fc.State) {
+	if !ctEqual(c.Request.FormValue("state"), fc.State) {
 		c.JSON(http.StatusBadRequest, H{"error": "state mismatch"})
 		return
 	}
-	tok, err := oc.Exchange(ctx, c.Query("code"), oauth2.VerifierOption(fc.Verifier))
+	xc, xerr := a.exchangeConfig(provider, oc) // Apple needs a freshly-signed client-secret JWT
+	if xerr != nil {
+		c.JSON(http.StatusInternalServerError, H{"error": "provider secret unavailable"})
+		return
+	}
+	tok, err := xc.Exchange(ctx, c.Request.FormValue("code"), oauth2.VerifierOption(fc.Verifier))
 	if err != nil {
 		c.JSON(http.StatusBadGateway, H{"error": "token exchange failed"})
 		return
@@ -136,6 +166,18 @@ func (a *Authenticator) SocialCallback(c *reqCtx) {
 		subject, email, name = idt.Subject, cl.Email, cl.Name
 	case "github":
 		subject, email, name, err = a.githubIdentity(ctx, oc, tok)
+		if err != nil {
+			c.JSON(http.StatusForbidden, H{"error": err.Error()})
+			return
+		}
+	case "facebook":
+		subject, email, name, err = a.facebookIdentity(ctx, oc, tok)
+		if err != nil {
+			c.JSON(http.StatusForbidden, H{"error": err.Error()})
+			return
+		}
+	case "apple":
+		subject, email, name, err = a.appleIdentity(ctx, tok, fc.Nonce, c.Request.FormValue("user"))
 		if err != nil {
 			c.JSON(http.StatusForbidden, H{"error": err.Error()})
 			return
@@ -233,6 +275,53 @@ func (a *Authenticator) githubIdentity(ctx context.Context, oc *oauth2.Config, t
 		}
 	}
 	return "", "", "", errors.New("your GitHub account has no primary, verified email")
+}
+
+// facebookIdentity fetches the Facebook user id (stable subject), name, and email via the Graph API.
+// Facebook verifies account emails, so a returned email is treated as verified. An appsecret_proof
+// (HMAC of the token with the app secret) binds the call to our app, per Facebook's guidance.
+func (a *Authenticator) facebookIdentity(ctx context.Context, oc *oauth2.Config, tok *oauth2.Token) (subject, email, name string, err error) {
+	proof := hmacSHA256Hex(oc.ClientSecret, tok.AccessToken)
+	client := oc.Client(ctx, tok)
+	var me struct {
+		ID    string `json:"id"`
+		Name  string `json:"name"`
+		Email string `json:"email"`
+	}
+	url := "https://graph.facebook.com/v19.0/me?fields=id,name,email&appsecret_proof=" + proof
+	if err = getJSONPlain(ctx, client, url, &me); err != nil {
+		return "", "", "", errors.New("could not read your Facebook profile")
+	}
+	if me.ID == "" {
+		return "", "", "", errors.New("could not read your Facebook profile")
+	}
+	if me.Email == "" {
+		return "", "", "", errors.New("your Facebook account has no email — grant email access when signing in")
+	}
+	return me.ID, me.Email, me.Name, nil
+}
+
+func hmacSHA256Hex(key, msg string) string {
+	m := hmac.New(sha256.New, []byte(key))
+	m.Write([]byte(msg))
+	return hex.EncodeToString(m.Sum(nil))
+}
+
+// getJSONPlain is getJSON without GitHub's Accept header (for non-GitHub providers).
+func getJSONPlain(ctx context.Context, client *http.Client, url string, dest any) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return err
+	}
+	res, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		return errors.New("provider returned " + res.Status)
+	}
+	return json.NewDecoder(res.Body).Decode(dest)
 }
 
 func getJSON(ctx context.Context, client *http.Client, url string, dest any) error {

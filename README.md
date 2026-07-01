@@ -69,7 +69,7 @@ IdP hand-off, no "double login page."
 - ✉️ **Email magic-links** — passwordless sign-in + email verification + password reset, all via
   single-use, hashed-at-rest tokens.
 - 🌐 **OIDC client** — Authorization Code + PKCE; consume any OIDC provider (Keycloak, Auth0, …).
-- 👥 **Social login** — Google (OIDC) and GitHub (REST), verified-email only.
+- 👥 **Social login** — Google & Apple (OIDC), GitHub & Facebook (REST/Graph), verified-email only.
 
 **Session & transport**
 - 🍪 **BFF sessions** — one HMAC-signed (HS256) HttpOnly cookie; the SPA never handles tokens.
@@ -252,6 +252,8 @@ provider activates when its client id + secret are present.
 | `OIDC_ASSUME_VERIFIED` | `OIDCAssumeVerified` | Trust the issuer's email when the id_token omits `email_verified` (single trusted IdP only). Default off → require the claim. |
 | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | `GoogleClientID` / `…Secret` | Enables Google login. |
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | `GitHubClientID` / `…Secret` | Enables GitHub login. |
+| `FACEBOOK_CLIENT_ID` / `FACEBOOK_CLIENT_SECRET` | `FacebookClientID` / `…Secret` | Enables Facebook login. |
+| `APPLE_CLIENT_ID` `APPLE_TEAM_ID` `APPLE_KEY_ID` `APPLE_PRIVATE_KEY` | `AppleClientID` / `…TeamID` / `…KeyID` / `…PrivateKey` | Sign in with Apple (Services ID, Team ID, Key ID, `.p8` PEM). Requires HTTPS. |
 | `TRUSTED_PROXIES` | — (`authx.TrustedProxies()`) | CSV of proxy CIDRs; default = private ranges + loopback. |
 | `WEBAUTHN_RPID` / `WEBAUTHN_RP_NAME` | — | Override the passkey relying-party id/name (default: app host). |
 | `SMTP_HOST` `SMTP_PORT` `SMTP_USER` `SMTP_PASS` `SMTP_FROM` | — (`mailer.FromEnv()`) | STARTTLS sender. |
@@ -285,11 +287,18 @@ the email verified). Same machinery powers email verification and password reset
 verifies the id_token, enforces `OIDC_ALLOWED_GROUPS`, and funnels into `completeLogin`. `state`/`nonce`
 are compared in constant time (OAuth 2.0 Security BCP / RFC 9700).
 
-### Social (Google & GitHub)
-`GET /auth/social/{google,github}/login`. Google uses OIDC (verified-email id_token + nonce); GitHub uses
-REST (`/user` + `/user/emails`, primary+verified required). Identities key on **(provider, subject)**; a
-new identity links to a **verified-email** user, **reclaims** an unverified squatter, or creates one
-(see [account-linking invariant](#account-linking-invariant)).
+### Social (Google, GitHub, Facebook, Apple)
+`GET /auth/social/{google,github,facebook,apple}/login`. **Google** & **Apple** use OIDC (verified-email
+id_token + nonce); **GitHub** uses REST (`/user` + `/user/emails`, primary+verified); **Facebook** uses
+the Graph API (`/me`, with an `appsecret_proof`). Identities key on **(provider, subject)**; a new
+identity links to a **verified-email** user, **reclaims** an unverified squatter, or creates one (see
+[account-linking invariant](#account-linking-invariant)).
+
+**Sign in with Apple** needs four env values (`APPLE_CLIENT_ID` = Services ID, `APPLE_TEAM_ID`,
+`APPLE_KEY_ID`, `APPLE_PRIVATE_KEY` = the `.p8` PEM) — the library signs Apple's ES256 client-secret JWT
+for you and regenerates it per exchange. Because Apple returns its callback via **`form_post`** (a
+cross-site POST), the login flow cookie is set `SameSite=None`, so **Apple requires HTTPS** and the name
+is delivered only on the user's first authorization.
 
 ---
 

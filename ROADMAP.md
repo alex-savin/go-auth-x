@@ -51,9 +51,10 @@ primary keys and converts (`FormatUint`/`ParseUint`) at its own boundary — **n
 Verified safe: the IDs are never used arithmetically, ordered, or compared, and the session is keyed by
 `Sub` (a string), not the numeric ID. Removes the `uuid ↔ uint` adapter friction for non-`uint` apps.
 
-### Social providers — [#3](https://github.com/alex-savin/go-auth-x/issues/3)
+### Social providers — [#3](https://github.com/alex-savin/go-auth-x/issues/3) · ✅ landed on `main` (unreleased)
 
-- **Apple** (Sign in with Apple — ES256 client-secret JWT) and **Facebook** login.
+- **Apple** (Sign in with Apple — ES256 client-secret JWT, form_post callback) and **Facebook** (Graph
+  API + appsecret_proof) login. Done — ships in v0.2.0.
 
 ### SCIM — [#4](https://github.com/alex-savin/go-auth-x/issues/4) · ✅ landed on `main` (unreleased)
 

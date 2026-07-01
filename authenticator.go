@@ -2,6 +2,7 @@ package authx
 
 import (
 	"context"
+	"crypto/ecdsa"
 	"errors"
 	"fmt"
 
@@ -57,8 +58,9 @@ type Authenticator struct {
 	// wauthn is the WebAuthn relying-party instance for passkeys; nil until configured.
 	wauthn *webauthn.WebAuthn
 	// Social login OAuth (nil until the provider's client id + secret are set).
-	googleOAuth, githubOAuth *oauth2.Config
-	googleVerifier           *oidc.IDTokenVerifier
+	googleOAuth, githubOAuth, facebookOAuth, appleOAuth *oauth2.Config
+	googleVerifier, appleVerifier                       *oidc.IDTokenVerifier
+	appleKey                                            *ecdsa.PrivateKey // parsed .p8, signs Apple's client-secret JWT
 	// dir backs groups / API keys / admin REST (optional; nil = those features off).
 	dir DirectoryStore
 }
