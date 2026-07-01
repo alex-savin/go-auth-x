@@ -1,67 +1,46 @@
 # go-auth-x roadmap
 
 Direction and planned work for the library. Authoritative usage/feature docs live in the
-[README](./README.md); this file tracks what's shipped and what's next, and is updated as items land.
+[README](./README.md); this file tracks what's shipped and what's next.
 
 ## Shipped
 
-- **Zero-framework core** — pure `net/http`, no Gin/router dependency.
-- **Auth methods** — password (bcrypt 12), passkey/WebAuthn (discoverable + QR/FIDO2 hybrid + clone
-  detection), email magic-link, OIDC (Auth Code + PKCE/S256 + `state` + `nonce`), social
-  (Google, GitHub).
-- **Stores** — GORM reference store + a zero-dependency in-memory store; SMTP mailer.
-- **Directory layer** — groups + per-group access control, API keys with **deny-by-default scopes**,
-  admin REST API.
-- **Enterprise** — LDAP sync (+ deprovision-by-absence); SCIM 2.0 (PUT, `eq`/`co`/`sw`/`pr` filters,
-  `/Bulk`).
-- **Hardening** — the safe account-linking rule + **squatter-reclaim**; `email_verified`-gated OIDC
-  linking; configurable public paths (`Config.PublicPath`); pluggable rate-limit backends
-  (`SetRateLimiters`).
+### v0.2.0
+
+- **Two-factor auth (2FA)** — TOTP + single-use recovery codes (RFC 4226/6238, **stdlib, no
+  dependency**), login enforcement via a signed `2fa_pending` cookie, **passkey as a second factor**,
+  and **step-up / re-auth** (`RequireStepUpHTTP`) for sensitive actions. ([#1])
+- **Social login: Apple + Facebook** — Sign in with Apple (ES256 client-secret JWT, `form_post`) and
+  Facebook (Graph API + `appsecret_proof`), alongside Google + GitHub. ([#3])
+- **SCIM 2.0** — full filter grammar (`eq`/`ne`/`co`/`sw`/`ew`/`gt`/`ge`/`lt`/`le`/`pr` with
+  `and`/`or`/`not`, parens, valuePath), sorting, strong ETags, `Location`/`meta.location`,
+  `uniqueness` scimType, PATCH validation, `/Bulk`. ([#4])
+- **RFC-compliance hardening** — token-audience segregation (closed a 2FA-bypass), WebAuthn
+  UV=Required, LDAP StartTLS `ServerName` + no cleartext bind, OIDC `azp`, Bearer
+  `401 + WWW-Authenticate`, fail-closed `randToken`, and more (see CHANGELOG).
+
+### v0.1.x
+
+- Zero-framework core (pure `net/http`); password, passkey/WebAuthn (+ QR), magic-link, OIDC, Google +
+  GitHub social; GORM + in-memory stores; SMTP mailer; groups + per-group access control; API keys with
+  deny-by-default scopes + admin REST API; LDAP sync; SCIM 2.0 (PUT + basic filters + `/Bulk`); the safe
+  account-linking + squatter-reclaim rule; `SESSION_SECRET` ≥ 32-byte enforcement.
 
 ## Planned
 
-Tracked in the **[v0.2.0 milestone](https://github.com/alex-savin/go-auth-x/milestone/1)**.
-
-### Two-factor authentication (2FA / MFA) — TOTP + recovery codes — [#1](https://github.com/alex-savin/go-auth-x/issues/1) · ✅ core landed on `main` (unreleased)
-
-Core TOTP + recovery codes + login enforcement shipped (stdlib, no dependency). Still open as
-follow-ons: passkey-as-second-factor and step-up / re-auth for sensitive actions.
-
-The library has several *single*-factor login methods today but **no second-factor step** — there's no
-flow that authenticates with one factor and then requires another. Add genuine two-step verification:
-
-- **TOTP (authenticator app)** — an enroll/confirm flow (RFC 6238, via `github.com/pquerna/otp`):
-  generate a secret + `otpauth://` URI for a QR, verify a code to enable. The secret is encrypted at
-  rest in a new credential side-table, reached through new `CredentialStore` methods
-  (`SetTOTPSecret` / `TOTPSecret` / disable).
-- **Recovery codes** — a set of single-use, sha256-at-rest codes (reusing the existing single-use
-  token infrastructure) so a user who loses their authenticator can still sign in.
-- **Login enforcement** — when 2FA is enabled, `completeLogin` issues a short-lived signed
-  **`2fa_pending`** flow cookie (the same pattern as the WebAuthn challenge cookie) **instead of** the
-  full session, and requires `POST /auth/2fa/verify` (a TOTP code or a recovery code) before the real
-  session is minted.
-- **Passkey as a second factor** *(optional)* — let a registered passkey satisfy the second step, not
-  only act as a primary method. (A passkey is already phishing-resistant and combines possession + user
-  verification in one step, so this is mainly for password-primary accounts.)
-- **Step-up / re-auth** for sensitive actions (e.g. changing the password, revoking sessions) is a
-  natural follow-on once the `2fa_pending` machinery exists.
-
-### Opaque entity IDs (uuid-friendly stores) — [#2](https://github.com/alex-savin/go-auth-x/issues/2) · breaking
+### Opaque entity IDs (uuid-friendly stores) — [#2](https://github.com/alex-savin/go-auth-x/issues/2) · breaking · deferred
 
 Make the public user/group/API-key ID type an opaque `string` across the store interfaces so
-uuid/ULID/KSUID consumers pass their IDs straight through. The reference GORM store keeps its `uint`
-primary keys and converts (`FormatUint`/`ParseUint`) at its own boundary — **no database migration**.
-Verified safe: the IDs are never used arithmetically, ordered, or compared, and the session is keyed by
-`Sub` (a string), not the numeric ID. Removes the `uuid ↔ uint` adapter friction for non-`uint` apps.
+uuid/ULID/KSUID consumers pass their IDs straight through (the reference GORM store keeps its `uint`
+PKs and converts at its boundary — no DB migration). Verified safe (the IDs are never used
+arithmetically). **Deferred past v0.2.0** — no current consumer needs it, and it's cheapest to land as
+a pre-v1.0 breaking change if/when a uuid-keyed consumer adopts the library or the API is frozen for 1.0.
 
-### Social providers — [#3](https://github.com/alex-savin/go-auth-x/issues/3) · ✅ landed on `main` (unreleased)
+### Also on the list
 
-- **Apple** (Sign in with Apple — ES256 client-secret JWT, form_post callback) and **Facebook** (Graph
-  API + appsecret_proof) login. Done — ships in v0.2.0.
-
-### SCIM — [#4](https://github.com/alex-savin/go-auth-x/issues/4) · ✅ landed on `main` (unreleased)
-
-- AND/OR-composed filters, sorting, and ETags. Done — ships in v0.2.0.
+- **More social providers** as needed.
+- **SCIM** — AND/OR-composed **filter** support is done; remaining niceties: pagination (`startIndex`/`count`),
+  richer `/Schemas` documents, `meta.created`/`lastModified`.
 
 ---
 
