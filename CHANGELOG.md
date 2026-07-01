@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **RFC-compliance audit fixes.** Token audiences segregate session / oauth-flow / 2fa-pending /
+  webauthn cookies (a 2fa-pending token can no longer be replayed as a session — closes a 2FA bypass;
+  RFC 7519). WebAuthn now **requires** user verification (RFC/WebAuthn L2). `randToken` fails closed on
+  a `crypto/rand` error instead of emitting a guessable state/CSRF/API-key token (RFC 6749 §10.10).
+  TOTP validation is past-leaning (fixes a ~90s window + a replay-guard lockout; RFC 6238) and
+  `/auth/2fa/verify` is rate-limited (RFC 4226 §7.3). LDAP StartTLS sets `ServerName` and refuses a
+  cleartext bind (RFC 4513). OIDC validates `azp` (Core §3.1.3.7). The admin Bearer guard returns
+  `401 + WWW-Authenticate` / `403 insufficient_scope` per RFC 6750 §3.
+
 ### Added
 
 - **Two-factor auth (2FA): TOTP + recovery codes** — a genuine second factor, **no third-party

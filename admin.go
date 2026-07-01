@@ -95,17 +95,27 @@ func bearerToken(h string) string {
 // API key carrying the 'admin' scope. The owner mints the first admin key via an owner session.
 func (a *Authenticator) adminGuard(c *reqCtx) bool {
 	if key := bearerToken(c.GetHeader("Authorization")); key != "" {
-		if info, ok := a.ValidateAPIKey(key); ok && KeyHasScope(info, "admin") {
-			return true
+		info, ok := a.ValidateAPIKey(key)
+		if !ok {
+			// RFC 6750 §3.1: an invalid/expired token is 401 invalid_token with a challenge.
+			c.w.Header().Set("WWW-Authenticate", `Bearer realm="auth", error="invalid_token"`)
+			c.JSON(http.StatusUnauthorized, H{"error": "API key is invalid or expired"})
+			return false
 		}
-		c.JSON(http.StatusForbidden, H{"error": "API key is invalid or lacks the 'admin' scope"})
-		return false
+		if !KeyHasScope(info, "admin") {
+			// A valid key that merely lacks the scope is 403 insufficient_scope (RFC 6750 §3.1).
+			c.JSON(http.StatusForbidden, H{"error": "insufficient_scope: the 'admin' scope is required"})
+			return false
+		}
+		return true
 	}
 	if sc := a.sessionOf(c); sc != nil && a.cfg.OwnerEmail != "" &&
 		strings.EqualFold(strings.TrimSpace(sc.Email), a.cfg.OwnerEmail) {
 		return true
 	}
-	c.JSON(http.StatusForbidden, H{"error": "owner session or API key with 'admin' scope required"})
+	// No credentials presented → challenge for a Bearer token (RFC 6750 §3).
+	c.w.Header().Set("WWW-Authenticate", `Bearer realm="auth"`)
+	c.JSON(http.StatusUnauthorized, H{"error": "owner session or API key with 'admin' scope required"})
 	return false
 }
 
