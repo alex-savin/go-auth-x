@@ -144,18 +144,20 @@ func (s *linkFakeStore) SetEmailVerified(userID uint, verified bool) error {
 }
 
 // Unused CredentialStore methods (present to satisfy the interface).
-func (s *linkFakeStore) EnsureWebauthnHandle(uint) ([]byte, error)        { return nil, ErrNoUser }
-func (s *linkFakeStore) UserByWebauthnHandle([]byte) (*AuthUser, error)   { return nil, ErrNoUser }
-func (s *linkFakeStore) Passkeys(uint) ([]Passkey, error)                 { return nil, nil }
-func (s *linkFakeStore) AddPasskey(uint, Passkey) error                   { return nil }
-func (s *linkFakeStore) TouchPasskey([]byte, uint32) error                { return nil }
-func (s *linkFakeStore) RemovePasskey(uint, uint) error                   { return nil }
-func (s *linkFakeStore) PasswordHash(uint) (string, string, error)        { return "", "", ErrNoCredential }
-func (s *linkFakeStore) SetPasswordHash(uint, string, string) error       { return nil }
+func (s *linkFakeStore) EnsureWebauthnHandle(uint) ([]byte, error)      { return nil, ErrNoUser }
+func (s *linkFakeStore) UserByWebauthnHandle([]byte) (*AuthUser, error) { return nil, ErrNoUser }
+func (s *linkFakeStore) Passkeys(uint) ([]Passkey, error)               { return nil, nil }
+func (s *linkFakeStore) AddPasskey(uint, Passkey) error                 { return nil }
+func (s *linkFakeStore) TouchPasskey([]byte, uint32) error              { return nil }
+func (s *linkFakeStore) RemovePasskey(uint, uint) error                 { return nil }
+func (s *linkFakeStore) PasswordHash(uint) (string, string, error)      { return "", "", ErrNoCredential }
+func (s *linkFakeStore) SetPasswordHash(uint, string, string) error     { return nil }
 func (s *linkFakeStore) CreateToken(string, uint, string, []byte, time.Time) error {
 	return nil
 }
-func (s *linkFakeStore) ConsumeToken(string, []byte) (*TokenClaim, error)               { return nil, ErrTokenInvalid }
+func (s *linkFakeStore) ConsumeToken(string, []byte) (*TokenClaim, error) {
+	return nil, ErrTokenInvalid
+}
 func (s *linkFakeStore) RecordAudit(uint, string, string, string, string, bool, string) {}
 func (s *linkFakeStore) RecentFailures(string, time.Time) (int, error)                  { return 0, nil }
 
@@ -279,24 +281,24 @@ func (d *reclaimDir) UpsertExternalUser(sub, email, name string, emailVerified b
 }
 
 // The remaining DirectoryStore methods are unused here.
-func (d *reclaimDir) CreateGroup(string, string) (*Group, error)   { return nil, nil }
-func (d *reclaimDir) Groups() ([]Group, error)                     { return nil, nil }
-func (d *reclaimDir) GroupByName(string) (*Group, error)           { return nil, ErrNoGroup }
-func (d *reclaimDir) DeleteGroup(uint) error                       { return nil }
-func (d *reclaimDir) AddUserToGroup(uint, uint) error              { return nil }
-func (d *reclaimDir) RemoveUserFromGroup(uint, uint) error         { return nil }
-func (d *reclaimDir) UserGroups(uint) ([]Group, error)             { return nil, nil }
-func (d *reclaimDir) GroupMembers(uint) ([]AuthUser, error)        { return nil, nil }
-func (d *reclaimDir) ListUsers() ([]AuthUser, error)               { return nil, nil }
-func (d *reclaimDir) UserByID(uint) (*AuthUser, error)             { return nil, ErrNoUser }
-func (d *reclaimDir) SetUserDisabled(uint, bool) error             { return nil }
+func (d *reclaimDir) CreateGroup(string, string) (*Group, error) { return nil, nil }
+func (d *reclaimDir) Groups() ([]Group, error)                   { return nil, nil }
+func (d *reclaimDir) GroupByName(string) (*Group, error)         { return nil, ErrNoGroup }
+func (d *reclaimDir) DeleteGroup(uint) error                     { return nil }
+func (d *reclaimDir) AddUserToGroup(uint, uint) error            { return nil }
+func (d *reclaimDir) RemoveUserFromGroup(uint, uint) error       { return nil }
+func (d *reclaimDir) UserGroups(uint) ([]Group, error)           { return nil, nil }
+func (d *reclaimDir) GroupMembers(uint) ([]AuthUser, error)      { return nil, nil }
+func (d *reclaimDir) ListUsers() ([]AuthUser, error)             { return nil, nil }
+func (d *reclaimDir) UserByID(uint) (*AuthUser, error)           { return nil, ErrNoUser }
+func (d *reclaimDir) SetUserDisabled(uint, bool) error           { return nil }
 func (d *reclaimDir) CreateAPIKey(string, []string, []string, string, []byte, *time.Time) (*APIKeyInfo, error) {
 	return nil, nil
 }
 func (d *reclaimDir) APIKeyByHash([]byte) (*APIKeyInfo, error) { return nil, ErrNoCredential }
-func (d *reclaimDir) ListAPIKeys() ([]APIKeyInfo, error)      { return nil, nil }
-func (d *reclaimDir) RevokeAPIKey(uint) error                 { return nil }
-func (d *reclaimDir) TouchAPIKey(uint) error                  { return nil }
+func (d *reclaimDir) ListAPIKeys() ([]APIKeyInfo, error)       { return nil, nil }
+func (d *reclaimDir) RevokeAPIKey(uint) error                  { return nil }
+func (d *reclaimDir) TouchAPIKey(uint) error                   { return nil }
 
 var _ DirectoryStore = (*reclaimDir)(nil)
 

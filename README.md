@@ -5,6 +5,7 @@ Go web apps. Embed multi-method auth directly in your service with **no separate
 to run**: one signed, HttpOnly session cookie; the browser never sees a token.
 
 [![Go Reference](https://img.shields.io/badge/go-reference-blue)](https://pkg.go.dev/github.com/alex-savin/go-auth-x)
+[![Go Report Card](https://goreportcard.com/badge/github.com/alex-savin/go-auth-x)](https://goreportcard.com/report/github.com/alex-savin/go-auth-x)
 [![Release](https://img.shields.io/github/v/release/alex-savin/go-auth-x)](https://github.com/alex-savin/go-auth-x/releases)
 [![Go 1.26+](https://img.shields.io/badge/go-1.26%2B-00ADD8)](https://go.dev/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
