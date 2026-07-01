@@ -14,6 +14,7 @@ type Group struct {
 	Name        string    `json:"name"`
 	Description string    `json:"description"`
 	CreatedAt   time.Time `json:"createdAt"`
+	UpdatedAt   time.Time `json:"updatedAt,omitempty"` // for SCIM meta.lastModified; zero if the store doesn't track it
 }
 
 // APIKeyInfo is the non-secret metadata of an API key. The raw key is shown ONCE at creation; only

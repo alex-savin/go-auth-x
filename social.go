@@ -45,7 +45,9 @@ func (a *Authenticator) enableSocial(ctx context.Context) {
 			Scopes: []string{"email", "public_profile"},
 		}
 	}
-	a.enableApple(ctx) // Sign in with Apple (OIDC; secret is a signed JWT — see social_apple.go)
+	a.enableApple(ctx)      // Sign in with Apple (OIDC; secret is a signed JWT — see social_apple.go)
+	a.enableDiscord()       // Discord (OAuth2 + REST — see social_oidc.go)
+	a.enableOIDCSocial(ctx) // Microsoft/Entra + any Config.SocialOIDC (generic OIDC — see social_oidc.go)
 }
 
 func (a *Authenticator) socialRedirect(provider string) string {
@@ -64,6 +66,11 @@ func (a *Authenticator) socialOAuth(provider string) *oauth2.Config {
 		return a.facebookOAuth
 	case "apple":
 		return a.appleOAuth
+	case "discord":
+		return a.discordOAuth
+	}
+	if p := a.oidcSocial[provider]; p != nil {
+		return p.oauth
 	}
 	return nil
 }
@@ -89,9 +96,8 @@ func (a *Authenticator) SocialLogin(c *reqCtx) {
 		a.setCookie(c, flowCookie, flow, int(flowTTL/time.Second))
 	}
 	opts := []oauth2.AuthCodeOption{oauth2.S256ChallengeOption(verifier)}
-	switch provider {
-	case "google", "apple": // OIDC providers — bind the id_token to our nonce
-		opts = append(opts, oidc.Nonce(nonce))
+	if provider == "google" || provider == "apple" || a.oidcSocial[provider] != nil {
+		opts = append(opts, oidc.Nonce(nonce)) // OIDC providers — bind the id_token to our nonce
 	}
 	if provider == "apple" {
 		opts = append(opts, oauth2.SetAuthURLParam("response_mode", "form_post"))
@@ -185,6 +191,23 @@ func (a *Authenticator) SocialCallback(c *reqCtx) {
 		subject, email, name, err = a.appleIdentity(ctx, tok, fc.Nonce, c.Request.FormValue("user"))
 		if err != nil {
 			c.JSON(http.StatusForbidden, H{"error": err.Error()})
+			return
+		}
+	case "discord":
+		subject, email, name, err = a.discordIdentity(ctx, oc, tok)
+		if err != nil {
+			c.JSON(http.StatusForbidden, H{"error": err.Error()})
+			return
+		}
+	default: // a generic OIDC provider (Microsoft/Entra or a Config.SocialOIDC entry)
+		p := a.oidcSocial[provider]
+		if p == nil {
+			c.JSON(http.StatusNotFound, H{"error": "provider not enabled"})
+			return
+		}
+		subject, email, name, err = oidcSocialIdentity(ctx, p.verifier, p.clientID, tok, fc.Nonce, p.assumeVerified)
+		if err != nil {
+			c.JSON(http.StatusUnauthorized, H{"error": err.Error()})
 			return
 		}
 	}

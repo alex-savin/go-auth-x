@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Social login: Microsoft/Entra, Discord, and any OIDC provider.** Sign in with Microsoft
+  (Entra ID / Azure AD — work, school, and personal accounts; tenant-scoped or `common`) and Discord
+  (OAuth2 + a verified-email check). A new `Config.SocialOIDC` registers *any* standards-compliant
+  OIDC identity provider (GitLab, Okta, Auth0, Keycloak, …) as a social login at
+  `/auth/social/<name>/{login,callback}`, reusing Google's PKCE + nonce + `azp` + `email_verified`
+  path. `GET /auth/config` now reports every enabled provider in a `socialProviders` array. New env:
+  `MICROSOFT_CLIENT_ID`/`MICROSOFT_CLIENT_SECRET`, `MICROSOFT_TENANT`, `DISCORD_CLIENT_ID`/`DISCORD_CLIENT_SECRET`.
+- **SCIM: pagination** — `startIndex` / `count` on the Users and Groups list endpoints
+  (RFC 7644 §3.4.2.4), with accurate `totalResults` / `startIndex` / `itemsPerPage` in the ListResponse
+  (`count=0` is a valid count-only query).
+- **SCIM: resource timestamps** — `meta.created` / `meta.lastModified` on Users and Groups (surfaced
+  from the store; omitted when unavailable).
+- **SCIM: full schema documents** — `GET /Schemas` now returns a ListResponse of complete User +
+  Group schema definitions (attributes, types, mutability, uniqueness), plus `GET /Schemas/{id}`
+  (RFC 7643 §7 / RFC 7644 §4).
+
 ## [0.2.0] — 2026-06-30
 
 ### Security

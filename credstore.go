@@ -25,6 +25,10 @@ type AuthUser struct {
 	Name          string
 	EmailVerified bool
 	Disabled      bool
+	// Timestamps for SCIM meta.created / meta.lastModified. Best-effort — a store that doesn't
+	// track them leaves them zero and SCIM omits the field.
+	CreatedAt time.Time
+	UpdatedAt time.Time
 }
 
 // TokenClaim is what a redeemed single-use token resolves to.

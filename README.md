@@ -71,7 +71,8 @@ IdP hand-off, no "double login page."
 - ✉️ **Email magic-links** — passwordless sign-in + email verification + password reset, all via
   single-use, hashed-at-rest tokens.
 - 🌐 **OIDC client** — Authorization Code + PKCE; consume any OIDC provider (Keycloak, Auth0, …).
-- 👥 **Social login** — Google & Apple (OIDC), GitHub & Facebook (REST/Graph), verified-email only.
+- 👥 **Social login** — Google, Apple & Microsoft/Entra (OIDC), GitHub, Facebook & Discord (REST/Graph),
+  plus **any OIDC provider** via `Config.SocialOIDC`; verified-email only.
 - 🔐 **Two-factor (2FA)** — TOTP authenticator apps + single-use recovery codes; **stdlib, no dependency**.
 
 **Session & transport**
@@ -258,6 +259,9 @@ provider activates when its client id + secret are present.
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | `GitHubClientID` / `…Secret` | Enables GitHub login. |
 | `FACEBOOK_CLIENT_ID` / `FACEBOOK_CLIENT_SECRET` | `FacebookClientID` / `…Secret` | Enables Facebook login. |
 | `APPLE_CLIENT_ID` `APPLE_TEAM_ID` `APPLE_KEY_ID` `APPLE_PRIVATE_KEY` | `AppleClientID` / `…TeamID` / `…KeyID` / `…PrivateKey` | Sign in with Apple (Services ID, Team ID, Key ID, `.p8` PEM). Requires HTTPS. |
+| `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET` / `MICROSOFT_TENANT` | `MicrosoftClientID` / `…Secret` / `…Tenant` | Microsoft / Entra ID login. Tenant defaults to `common`; set a directory ID to restrict to one org. |
+| `DISCORD_CLIENT_ID` / `DISCORD_CLIENT_SECRET` | `DiscordClientID` / `…Secret` | Enables Discord login (verified email required). |
+| — (programmatic) | `SocialOIDC []SocialOIDCProvider` | Register any OIDC IdP (GitLab, Okta, Auth0, Keycloak, …) as a social login. |
 | `TRUSTED_PROXIES` | — (`authx.TrustedProxies()`) | CSV of proxy CIDRs; default = private ranges + loopback. |
 | `WEBAUTHN_RPID` / `WEBAUTHN_RP_NAME` | — | Override the passkey relying-party id/name (default: app host). |
 | `SMTP_HOST` `SMTP_PORT` `SMTP_USER` `SMTP_PASS` `SMTP_FROM` | — (`mailer.FromEnv()`) | STARTTLS sender. |
@@ -291,12 +295,27 @@ the email verified). Same machinery powers email verification and password reset
 verifies the id_token, enforces `OIDC_ALLOWED_GROUPS`, and funnels into `completeLogin`. `state`/`nonce`
 are compared in constant time (OAuth 2.0 Security BCP / RFC 9700).
 
-### Social (Google, GitHub, Facebook, Apple)
-`GET /auth/social/{google,github,facebook,apple}/login`. **Google** & **Apple** use OIDC (verified-email
-id_token + nonce); **GitHub** uses REST (`/user` + `/user/emails`, primary+verified); **Facebook** uses
-the Graph API (`/me`, with an `appsecret_proof`). Identities key on **(provider, subject)**; a new
-identity links to a **verified-email** user, **reclaims** an unverified squatter, or creates one (see
+### Social (Google, GitHub, Facebook, Apple, Microsoft, Discord + any OIDC)
+`GET /auth/social/{provider}/login`. **Google**, **Apple** & **Microsoft/Entra** use OIDC
+(verified-email id_token + nonce + `azp`); **GitHub** uses REST (`/user` + `/user/emails`,
+primary+verified); **Facebook** uses the Graph API (`/me`, with an `appsecret_proof`); **Discord**
+uses REST (`/users/@me`, verified email). Identities key on **(provider, subject)**; a new identity
+links to a **verified-email** user, **reclaims** an unverified squatter, or creates one (see
 [account-linking invariant](#account-linking-invariant)).
+
+**Any OIDC provider** — register one programmatically and it mounts at `/auth/social/<name>/…`:
+
+```go
+cfg.SocialOIDC = []authx.SocialOIDCProvider{{
+    Name: "gitlab", Issuer: "https://gitlab.com",
+    ClientID: id, ClientSecret: secret, // Scopes default to openid, email, profile
+}}
+```
+
+This covers GitLab, Okta, Auth0, Keycloak, and the like with the same PKCE + nonce + `azp` +
+`email_verified` path as Google. Set `AssumeVerified` per provider (or `MICROSOFT_STRICT_EMAIL_VERIFIED`
+for Microsoft) to control whether a token that omits `email_verified` is trusted. `GET /auth/config`
+lists every enabled provider in `socialProviders` so the SPA can render the right buttons.
 
 **Sign in with Apple** needs four env values (`APPLE_CLIENT_ID` = Services ID, `APPLE_TEAM_ID`,
 `APPLE_KEY_ID`, `APPLE_PRIVATE_KEY` = the `.p8` PEM) — the library signs Apple's ES256 client-secret JWT
@@ -342,7 +361,7 @@ Mounted under `/auth` by `Handler()`:
 | GET | `/auth/email/login` · `/auth/email/verify` | redeem magic-link / verify email | token |
 | POST | `/auth/webauthn/login/begin` · `/auth/webauthn/login/finish` | passkey sign-in (discoverable / QR) | public |
 | POST | `/auth/webauthn/register/begin` · `/auth/webauthn/register/finish` | enroll a passkey | session |
-| GET / POST | `/auth/social/{provider}/login` · `/auth/social/{provider}/callback` | Google / GitHub / Facebook / Apple | public |
+| GET / POST | `/auth/social/{provider}/login` · `/auth/social/{provider}/callback` | Google / GitHub / Facebook / Apple / Microsoft / Discord / any OIDC | public |
 | POST | `/auth/2fa/totp/begin` · `/auth/2fa/totp/confirm` · `/auth/2fa/disable` | enroll / confirm / disable TOTP | session |
 | POST · GET | `/auth/2fa/verify` · `/auth/2fa/pending` | finish a 2FA-challenged login / poll state | 2fa-pending cookie |
 | POST | `/auth/2fa/webauthn/begin` · `/auth/2fa/webauthn/finish` | passkey as the second factor | 2fa-pending cookie |
@@ -405,8 +424,9 @@ A mountable provisioning server so an upstream IdP (Okta, Entra/Azure AD, JumpCl
 deprovision Users + Groups. Supports create / read / list / **PATCH deprovision (`active=false`)** /
 **PUT replace** / delete, a **`/Bulk`** endpoint, **filters** (`eq`/`ne`/`co`/`sw`/`ew`/`gt`/`ge`/`lt`/`le`/`pr`
 with **`and`/`or`/`not`** + parens + **valuePath** `emails[type eq "work"]`), **sorting**
-(`sortBy`/`sortOrder`), and **ETags** (`If-Match` / `If-None-Match`), plus `ServiceProviderConfig` /
-`ResourceTypes` / `Schemas`. Bearer-auth via `ValidateAPIKey`.
+(`sortBy`/`sortOrder`), **pagination** (`startIndex`/`count`), and **ETags** (`If-Match` / `If-None-Match`).
+Resources carry `meta.created`/`meta.lastModified`, and discovery is complete: `ServiceProviderConfig` /
+`ResourceTypes` / full **`/Schemas`** documents (+ `/Schemas/{id}`). Bearer-auth via `ValidateAPIKey`.
 
 ```go
 mux.Handle("/scim/v2/", http.StripPrefix("/scim/v2",

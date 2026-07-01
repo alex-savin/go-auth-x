@@ -17,7 +17,7 @@ func (s *Store) CreateGroup(name, description string) (*authx.Group, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.groupSeq++
-	g := &authx.Group{ID: s.groupSeq, Name: strings.TrimSpace(name), Description: description, CreatedAt: time.Now()}
+	g := &authx.Group{ID: s.groupSeq, Name: strings.TrimSpace(name), Description: description, CreatedAt: time.Now(), UpdatedAt: time.Now()}
 	s.groups[g.ID] = g
 	cp := *g
 	return &cp, nil

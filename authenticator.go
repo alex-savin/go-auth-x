@@ -58,9 +58,12 @@ type Authenticator struct {
 	// wauthn is the WebAuthn relying-party instance for passkeys; nil until configured.
 	wauthn *webauthn.WebAuthn
 	// Social login OAuth (nil until the provider's client id + secret are set).
-	googleOAuth, githubOAuth, facebookOAuth, appleOAuth *oauth2.Config
-	googleVerifier, appleVerifier                       *oidc.IDTokenVerifier
-	appleKey                                            *ecdsa.PrivateKey // parsed .p8, signs Apple's client-secret JWT
+	googleOAuth, githubOAuth, facebookOAuth, appleOAuth, discordOAuth *oauth2.Config
+	googleVerifier, appleVerifier                                     *oidc.IDTokenVerifier
+	appleKey                                                          *ecdsa.PrivateKey // parsed .p8, signs Apple's client-secret JWT
+	// oidcSocial holds generic OIDC social providers (Microsoft/Entra + any Config.SocialOIDC),
+	// keyed by URL slug. Each is verified like Google (id_token + nonce + azp). Nil = none.
+	oidcSocial map[string]*oidcProvider
 	// dir backs groups / API keys / admin REST (optional; nil = those features off).
 	dir DirectoryStore
 	// twoFactor backs optional TOTP 2FA + recovery codes (nil = 2FA off).

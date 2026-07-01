@@ -51,6 +51,38 @@ type Config struct {
 	AppleTeamID     string // APPLE_TEAM_ID
 	AppleKeyID      string // APPLE_KEY_ID
 	ApplePrivateKey string // APPLE_PRIVATE_KEY (.p8 PEM)
+
+	// Microsoft / Entra ID (OIDC). Tenant defaults to "common" (any work/school or personal
+	// Microsoft account); set a directory (tenant) ID to restrict to one organization. Entra
+	// tokens rarely carry email_verified, so the token email is trusted by default (the tenant
+	// owns the address); set MicrosoftStrictEmailVerified to require an explicit email_verified.
+	MicrosoftClientID            string // MICROSOFT_CLIENT_ID
+	MicrosoftClientSecret        string // MICROSOFT_CLIENT_SECRET
+	MicrosoftTenant              string // MICROSOFT_TENANT (default "common")
+	MicrosoftStrictEmailVerified bool   // MICROSOFT_STRICT_EMAIL_VERIFIED
+
+	// Discord (OAuth2 + REST; requires a verified email).
+	DiscordClientID     string // DISCORD_CLIENT_ID
+	DiscordClientSecret string // DISCORD_CLIENT_SECRET
+
+	// SocialOIDC registers arbitrary standards-compliant OIDC identity providers as social logins
+	// (GitLab, Okta, Auth0, Keycloak, …), each mounted at /auth/social/<Name>/{login,callback}.
+	// Programmatic only (set on the Config) — there is no env form.
+	SocialOIDC []SocialOIDCProvider
+}
+
+// SocialOIDCProvider registers any OIDC-compliant identity provider as a social login. Discovery
+// uses <Issuer>/.well-known/openid-configuration; sign-in follows the same Authorization Code +
+// PKCE + nonce + azp + email_verified path as Google.
+type SocialOIDCProvider struct {
+	Name         string   // URL slug (lowercased), e.g. "gitlab", "okta", "auth0"
+	Issuer       string   // OIDC issuer URL
+	ClientID     string   // OAuth client id
+	ClientSecret string   // OAuth client secret (confidential client)
+	Scopes       []string // optional; defaults to openid, email, profile
+	// AssumeVerified trusts the token's email when the provider omits email_verified (e.g. a
+	// tenant that owns its addresses). Off by default — an absent/false email_verified is refused.
+	AssumeVerified bool
 }
 
 // ConfigFromEnv loads the OIDC configuration from the environment.
@@ -80,6 +112,14 @@ func ConfigFromEnv() Config {
 		AppleTeamID:     os.Getenv("APPLE_TEAM_ID"),
 		AppleKeyID:      os.Getenv("APPLE_KEY_ID"),
 		ApplePrivateKey: os.Getenv("APPLE_PRIVATE_KEY"),
+
+		MicrosoftClientID:            os.Getenv("MICROSOFT_CLIENT_ID"),
+		MicrosoftClientSecret:        os.Getenv("MICROSOFT_CLIENT_SECRET"),
+		MicrosoftTenant:              os.Getenv("MICROSOFT_TENANT"),
+		MicrosoftStrictEmailVerified: os.Getenv("MICROSOFT_STRICT_EMAIL_VERIFIED") == "true",
+
+		DiscordClientID:     os.Getenv("DISCORD_CLIENT_ID"),
+		DiscordClientSecret: os.Getenv("DISCORD_CLIENT_SECRET"),
 	}
 }
 

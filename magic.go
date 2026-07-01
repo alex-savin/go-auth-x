@@ -15,12 +15,18 @@ func (a *Authenticator) AuthConfig(c *reqCtx) {
 		"oidc":       a.Enabled(),
 		"signupOpen": a.LocalEnabled(),
 		"methods": H{
-			"password": a.LocalEnabled(),
-			"email":    emailOn,
-			"passkey":  a.LocalEnabled() && a.wauthn != nil,
-			"google":   a.socialConfigured("google"),
-			"github":   a.socialConfigured("github"),
+			"password":  a.LocalEnabled(),
+			"email":     emailOn,
+			"passkey":   a.LocalEnabled() && a.wauthn != nil,
+			"google":    a.socialConfigured("google"),
+			"github":    a.socialConfigured("github"),
+			"facebook":  a.socialConfigured("facebook"),
+			"apple":     a.socialConfigured("apple"),
+			"microsoft": a.socialConfigured("microsoft"),
+			"discord":   a.socialConfigured("discord"),
 		},
+		// Every enabled social provider by slug (built-ins + generic OIDC), for rendering buttons.
+		"socialProviders": a.enabledSocialProviders(),
 	})
 }
 

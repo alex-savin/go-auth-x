@@ -21,6 +21,7 @@ type Group struct {
 	Name        string `gorm:"uniqueIndex"`
 	Description string
 	CreatedAt   time.Time
+	UpdatedAt   time.Time // gorm auto-updates on save; surfaced as SCIM meta.lastModified
 }
 
 func (Group) TableName() string { return "authx_groups" }
@@ -53,7 +54,7 @@ func (s *Store) migrateDirectory() error {
 }
 
 func toGroup(g *Group) authx.Group {
-	return authx.Group{ID: g.ID, Name: g.Name, Description: g.Description, CreatedAt: g.CreatedAt}
+	return authx.Group{ID: g.ID, Name: g.Name, Description: g.Description, CreatedAt: g.CreatedAt, UpdatedAt: g.UpdatedAt}
 }
 
 func csvSplit(s string) []string {

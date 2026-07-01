@@ -31,6 +31,7 @@ type User struct {
 	WebauthnHandle []byte    `gorm:""`
 	Disabled       bool      `gorm:""`
 	CreatedAt      time.Time `gorm:""`
+	UpdatedAt      time.Time `gorm:""` // gorm auto-updates on save; surfaced as SCIM meta.lastModified
 	LastLoginAt    time.Time `gorm:""`
 }
 
@@ -142,7 +143,7 @@ func newPrincipalID() string {
 }
 
 func toAuthUser(u *User) *authx.AuthUser {
-	return &authx.AuthUser{ID: u.ID, Sub: u.Sub, Email: u.Email, Name: u.Name, EmailVerified: u.EmailVerified, Disabled: u.Disabled}
+	return &authx.AuthUser{ID: u.ID, Sub: u.Sub, Email: u.Email, Name: u.Name, EmailVerified: u.EmailVerified, Disabled: u.Disabled, CreatedAt: u.CreatedAt, UpdatedAt: u.UpdatedAt}
 }
 
 func (s *Store) UserByEmail(email string) (*authx.AuthUser, error) {

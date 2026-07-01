@@ -17,6 +17,7 @@ import (
 	"net/http/httptest"
 	"strconv"
 	"strings"
+	"time"
 
 	authx "github.com/alex-savin/go-auth-x"
 )
@@ -67,6 +68,7 @@ func (s *Server) routes() *http.ServeMux {
 	mux.HandleFunc("GET /ServiceProviderConfig", s.serviceProviderConfig)
 	mux.HandleFunc("GET /ResourceTypes", s.resourceTypes)
 	mux.HandleFunc("GET /Schemas", s.schemasEndpoint)
+	mux.HandleFunc("GET /Schemas/{id}", s.schemaByID)
 	mux.HandleFunc("GET /Users", s.listUsers)
 	mux.HandleFunc("POST /Users", s.createUser)
 	mux.HandleFunc("GET /Users/{id}", s.getUser)
@@ -109,8 +111,26 @@ type scimEmail struct {
 
 type scimMeta struct {
 	ResourceType string `json:"resourceType"`
+	Created      string `json:"created,omitempty"`      // RFC3339; omitted if the store has no timestamp
+	LastModified string `json:"lastModified,omitempty"` // RFC3339
 	Location     string `json:"location,omitempty"`
 	Version      string `json:"version,omitempty"` // strong ETag
+}
+
+// scimTime formats a timestamp as SCIM/RFC3339 (UTC); a zero time yields "" (omitted via omitempty).
+func scimTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.RFC3339)
+}
+
+// lastModified is UpdatedAt when set, else the creation time (a never-updated resource).
+func lastModified(created, updated time.Time) time.Time {
+	if updated.IsZero() {
+		return created
+	}
+	return updated
 }
 
 type scimUser struct {
@@ -161,12 +181,50 @@ func scimErrorType(w http.ResponseWriter, code int, scimType, detail string) {
 	writeSCIM(w, code, map[string]any{"schemas": []string{schemaErr}, "scimType": scimType, "status": strconv.Itoa(code), "detail": detail})
 }
 
-// listEnvelope wraps resources in a SCIM ListResponse.
-func listEnvelope[T any](resources []T) map[string]any {
+// listEnvelope wraps a page of resources in a SCIM ListResponse (RFC 7644 §3.4.2). totalResults is
+// the full match count (before paging); startIndex is the 1-based index of the first returned item.
+func listEnvelope[T any](resources []T, totalResults, startIndex int) map[string]any {
 	return map[string]any{
-		"schemas": []string{schemaList}, "totalResults": len(resources),
-		"startIndex": 1, "itemsPerPage": len(resources), "Resources": resources,
+		"schemas": []string{schemaList}, "totalResults": totalResults,
+		"startIndex": startIndex, "itemsPerPage": len(resources), "Resources": resources,
 	}
+}
+
+// parsePaging reads SCIM startIndex/count (RFC 7644 §3.4.2.4). startIndex is 1-based (min 1,
+// default 1). An absent count → -1 (return all remaining); a present count is clamped to ≥0
+// (count=0 is a valid "how many match?" query that returns totalResults with an empty page).
+func parsePaging(startIndexRaw, countRaw string) (startIndex, count int) {
+	startIndex = 1
+	if n, err := strconv.Atoi(startIndexRaw); err == nil && n > 1 {
+		startIndex = n
+	}
+	count = -1
+	if countRaw != "" {
+		if n, err := strconv.Atoi(countRaw); err == nil {
+			if n < 0 {
+				n = 0
+			}
+			count = n
+		}
+	}
+	return
+}
+
+// paginate applies startIndex/count to a filtered+sorted slice, returning the page and the
+// effective 1-based start index. count < 0 returns all remaining from startIndex.
+func paginate[T any](all []T, startIndex, count int) ([]T, int) {
+	if startIndex < 1 {
+		startIndex = 1
+	}
+	lo := startIndex - 1
+	if lo > len(all) {
+		lo = len(all)
+	}
+	rest := all[lo:]
+	if count < 0 || count > len(rest) {
+		return rest, startIndex
+	}
+	return rest[:count], startIndex
 }
 
 func (s *Server) toSCIMUser(u *authx.AuthUser) scimUser {
@@ -175,7 +233,11 @@ func (s *Server) toSCIMUser(u *authx.AuthUser) scimUser {
 		Schemas: []string{schemaUser}, ID: id, UserName: u.Email,
 		Name:   &scimName{Formatted: u.Name},
 		Emails: []scimEmail{{Value: u.Email, Primary: true}},
-		Active: !u.Disabled, Meta: scimMeta{ResourceType: "User", Location: s.loc("Users", id), Version: userVersion(u)},
+		Active: !u.Disabled, Meta: scimMeta{
+			ResourceType: "User", Created: scimTime(u.CreatedAt),
+			LastModified: scimTime(lastModified(u.CreatedAt, u.UpdatedAt)),
+			Location:     s.loc("Users", id), Version: userVersion(u),
+		},
 	}
 }
 
@@ -185,7 +247,11 @@ func (s *Server) toSCIMGroup(g authx.Group, members []authx.AuthUser) scimGroup 
 	for _, m := range members {
 		ms = append(ms, scimMember{Value: strconv.FormatUint(uint64(m.ID), 10), Display: m.Email})
 	}
-	return scimGroup{Schemas: []string{schemaGroup}, ID: id, DisplayName: g.Name, Members: ms, Meta: scimMeta{ResourceType: "Group", Location: s.loc("Groups", id), Version: groupVersion(g, members)}}
+	return scimGroup{Schemas: []string{schemaGroup}, ID: id, DisplayName: g.Name, Members: ms, Meta: scimMeta{
+		ResourceType: "Group", Created: scimTime(g.CreatedAt),
+		LastModified: scimTime(lastModified(g.CreatedAt, g.UpdatedAt)),
+		Location:     s.loc("Groups", id), Version: groupVersion(g, members),
+	}}
 }
 
 func pathID(r *http.Request) uint {
@@ -219,11 +285,14 @@ func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
 		users = filtered
 	}
 	sortUsers(users, q.Get("sortBy"), q.Get("sortOrder"))
-	resources := make([]scimUser, 0, len(users))
-	for i := range users {
-		resources = append(resources, s.toSCIMUser(&users[i]))
+	total := len(users)
+	si, cnt := parsePaging(q.Get("startIndex"), q.Get("count"))
+	pageUsers, start := paginate(users, si, cnt)
+	resources := make([]scimUser, 0, len(pageUsers))
+	for i := range pageUsers {
+		resources = append(resources, s.toSCIMUser(&pageUsers[i]))
 	}
-	writeSCIM(w, http.StatusOK, listEnvelope(resources))
+	writeSCIM(w, http.StatusOK, listEnvelope(resources, total, start))
 }
 
 func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
@@ -396,12 +465,15 @@ func (s *Server) listGroups(w http.ResponseWriter, r *http.Request) {
 		gs = filtered
 	}
 	sortGroups(gs, q.Get("sortBy"), q.Get("sortOrder"))
-	resources := make([]scimGroup, 0, len(gs))
-	for _, g := range gs {
+	total := len(gs)
+	si, cnt := parsePaging(q.Get("startIndex"), q.Get("count"))
+	pageGroups, start := paginate(gs, si, cnt)
+	resources := make([]scimGroup, 0, len(pageGroups))
+	for _, g := range pageGroups {
 		members, _ := s.dir.GroupMembers(g.ID)
 		resources = append(resources, s.toSCIMGroup(g, members))
 	}
-	writeSCIM(w, http.StatusOK, listEnvelope(resources))
+	writeSCIM(w, http.StatusOK, listEnvelope(resources, total, start))
 }
 
 func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
@@ -628,8 +700,77 @@ func (s *Server) resourceTypes(w http.ResponseWriter, _ *http.Request) {
 	})
 }
 
+// schemasEndpoint returns the supported resource schemas as a SCIM ListResponse (RFC 7644 §4).
 func (s *Server) schemasEndpoint(w http.ResponseWriter, _ *http.Request) {
-	writeSCIM(w, http.StatusOK, []map[string]any{{"id": schemaUser, "name": "User"}, {"id": schemaGroup, "name": "Group"}})
+	writeSCIM(w, http.StatusOK, listEnvelope(schemaDocs(), len(schemaDocs()), 1))
+}
+
+// schemaByID serves a single schema document by URN (RFC 7644 §4), 404 if unknown.
+func (s *Server) schemaByID(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	for _, doc := range schemaDocs() {
+		if doc["id"] == id {
+			writeSCIM(w, http.StatusOK, doc)
+			return
+		}
+	}
+	scimError(w, http.StatusNotFound, "no such schema: "+id)
+}
+
+// scimAttr builds one attribute descriptor for a schema document (RFC 7643 §7).
+func scimAttr(name, typ string, multi, required, caseExact bool, mutability, returned, uniqueness string) map[string]any {
+	return map[string]any{
+		"name": name, "type": typ, "multiValued": multi, "required": required,
+		"caseExact": caseExact, "mutability": mutability, "returned": returned, "uniqueness": uniqueness,
+	}
+}
+
+// schemaDocs returns the full User + Group core schema documents this server actually supports.
+func schemaDocs() []map[string]any {
+	userAttrs := []map[string]any{
+		scimAttr("userName", "string", false, true, false, "readWrite", "default", "server"),
+		{
+			"name": "name", "type": "complex", "multiValued": false, "required": false,
+			"mutability": "readWrite", "returned": "default", "uniqueness": "none",
+			"subAttributes": []map[string]any{
+				scimAttr("formatted", "string", false, false, false, "readWrite", "default", "none"),
+			},
+		},
+		{
+			"name": "emails", "type": "complex", "multiValued": true, "required": false,
+			"mutability": "readWrite", "returned": "default", "uniqueness": "none",
+			"subAttributes": []map[string]any{
+				scimAttr("value", "string", false, false, false, "readWrite", "default", "none"),
+				scimAttr("primary", "boolean", false, false, false, "readWrite", "default", "none"),
+			},
+		},
+		scimAttr("active", "boolean", false, false, false, "readWrite", "default", "none"),
+	}
+	groupAttrs := []map[string]any{
+		scimAttr("displayName", "string", false, true, false, "readWrite", "default", "none"),
+		{
+			"name": "members", "type": "complex", "multiValued": true, "required": false,
+			"mutability": "readWrite", "returned": "default", "uniqueness": "none",
+			"subAttributes": []map[string]any{
+				scimAttr("value", "string", false, false, false, "immutable", "default", "none"),
+				scimAttr("display", "string", false, false, false, "immutable", "default", "none"),
+			},
+		},
+	}
+	return []map[string]any{
+		{
+			"schemas": []string{"urn:ietf:params:scim:schemas:core:2.0:Schema"},
+			"id":      schemaUser, "name": "User", "description": "User Account",
+			"attributes": userAttrs,
+			"meta":       map[string]any{"resourceType": "Schema", "location": "/Schemas/" + schemaUser},
+		},
+		{
+			"schemas": []string{"urn:ietf:params:scim:schemas:core:2.0:Schema"},
+			"id":      schemaGroup, "name": "Group", "description": "Group",
+			"attributes": groupAttrs,
+			"meta":       map[string]any{"resourceType": "Schema", "location": "/Schemas/" + schemaGroup},
+		},
+	}
 }
 
 // --- patch / member-value parsers ---

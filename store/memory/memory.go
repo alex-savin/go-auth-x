@@ -16,13 +16,14 @@ import (
 )
 
 type user struct {
-	id             uint
-	sub            string
-	email, name    string
-	emailVerified  bool
-	disabled       bool
-	webauthnHandle []byte
-	lastLoginAt    time.Time
+	id                   uint
+	sub                  string
+	email, name          string
+	emailVerified        bool
+	disabled             bool
+	webauthnHandle       []byte
+	lastLoginAt          time.Time
+	createdAt, updatedAt time.Time
 }
 
 type passkey struct {
@@ -102,7 +103,7 @@ func randID() string {
 }
 
 func view(u *user) *authx.AuthUser {
-	return &authx.AuthUser{ID: u.id, Sub: u.sub, Email: u.email, Name: u.name, EmailVerified: u.emailVerified, Disabled: u.disabled}
+	return &authx.AuthUser{ID: u.id, Sub: u.sub, Email: u.email, Name: u.name, EmailVerified: u.emailVerified, Disabled: u.disabled, CreatedAt: u.createdAt, UpdatedAt: u.updatedAt}
 }
 
 func (s *Store) findByEmail(email string) *user {
@@ -149,7 +150,8 @@ func (s *Store) CreateLocalUser(email, name string) (*authx.AuthUser, error) {
 		return nil, authx.ErrEmailConflict
 	}
 	s.seq++
-	u := &user{id: s.seq, sub: "local:" + randID(), email: norm(email), name: name}
+	now := time.Now()
+	u := &user{id: s.seq, sub: "local:" + randID(), email: norm(email), name: name, createdAt: now, updatedAt: now}
 	s.users[u.id] = u
 	return view(u), nil
 }
@@ -159,6 +161,7 @@ func (s *Store) SetEmailVerified(userID uint, verified bool) error {
 	defer s.mu.Unlock()
 	if u := s.users[userID]; u != nil {
 		u.emailVerified = verified
+		u.updatedAt = time.Now()
 	}
 	return nil
 }
@@ -349,7 +352,7 @@ func (s *Store) UpsertUserOnLogin(sub, email, name string, emailVerified bool) (
 		s.deleteUserCascadeLocked(existing.id)
 	}
 	s.seq++
-	u := &user{id: s.seq, sub: sub, email: email, name: name, emailVerified: emailVerified, lastLoginAt: time.Now()}
+	u := &user{id: s.seq, sub: sub, email: email, name: name, emailVerified: emailVerified, lastLoginAt: time.Now(), createdAt: time.Now(), updatedAt: time.Now()}
 	s.users[u.id] = u
 	return view(u), nil
 }

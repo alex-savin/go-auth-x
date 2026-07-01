@@ -5,6 +5,14 @@ Direction and planned work for the library. Authoritative usage/feature docs liv
 
 ## Shipped
 
+### Unreleased
+
+- **Social login: Microsoft/Entra + Discord + any OIDC provider** — Microsoft (Entra ID / Azure AD)
+  and Discord as named providers, plus a generic `Config.SocialOIDC` registration for any OIDC IdP
+  (GitLab, Okta, Auth0, Keycloak, …). `GET /auth/config` reports enabled providers in `socialProviders`.
+- **SCIM niceties** — `startIndex`/`count` pagination, `meta.created`/`meta.lastModified`, and full
+  `/Schemas` documents + `GET /Schemas/{id}`.
+
 ### v0.2.0
 
 - **Two-factor auth (2FA)** — TOTP + single-use recovery codes (RFC 4226/6238, **stdlib, no
@@ -38,9 +46,10 @@ a pre-v1.0 breaking change if/when a uuid-keyed consumer adopts the library or t
 
 ### Also on the list
 
-- **More social providers** as needed.
-- **SCIM** — AND/OR-composed **filter** support is done; remaining niceties: pagination (`startIndex`/`count`),
-  richer `/Schemas` documents, `meta.created`/`lastModified`.
+- **More named social providers** as demand warrants — the generic `Config.SocialOIDC` registration
+  already covers any OIDC IdP; named presets (like Microsoft) are added for convenience/quirks.
+- **SCIM** — remaining depth: PATCH on complex multi-valued sub-attributes, `/Me`, and richer
+  `$ref` handling. Core filters, sorting, ETags, pagination, timestamps, and schemas are done.
 
 ---
 
