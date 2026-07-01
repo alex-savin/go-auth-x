@@ -28,6 +28,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instead of the session, and `POST /auth/2fa/verify` (a TOTP or recovery code) finishes it. Replay
   is rejected via a stored last-used time-step; recovery codes are sha256-at-rest + single-use. Wire
   the optional `TwoFactorStore` (reference impls in gormstore + memory) with `SetTwoFactorStore`. ([#1])
+- **Passkey as a second factor** — a login halted for 2FA can complete the second step with a
+  registered passkey (`POST /auth/2fa/webauthn/begin` + `/finish`, a non-discoverable assertion) as an
+  alternative to a TOTP/recovery code. ([#1])
+- **Step-up / re-authentication** — `RequireStepUpHTTP(maxAge)` middleware + `StepUpFresh` accessor
+  gate sensitive routes on a recent re-auth; `POST /auth/reauth` (password or a 2FA code) sets a
+  short-lived signed step-up cookie bound to the session subject. ([#1])
 - **Social login: Apple + Facebook.** Sign in with Apple (OIDC — the library signs the ES256
   client-secret JWT from your `.p8` and handles Apple's `form_post` callback via a `SameSite=None`
   flow cookie) and Facebook (Graph API `/me` with an `appsecret_proof`). Both follow the same

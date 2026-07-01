@@ -108,6 +108,23 @@ func (a *Authenticator) mintPending(id Identity, role string, remember bool) (st
 	})
 }
 
+// completePendingLogin mints the real session from a validated 2fa-pending identity and clears the
+// pending cookie — the shared final step for both the TOTP/recovery and passkey second factors.
+func (a *Authenticator) completePendingLogin(c *reqCtx, pc *pendingClaims) error {
+	a.clearCookie(c, twoFactorPendingCookie)
+	ttl := sessionTTL
+	if pc.Remember {
+		ttl = rememberTTL
+	}
+	session, err := mintSession(a.cfg.SessionSecret, pc.Subject, pc.Email, pc.Name, pc.Role, "", pc.Groups, time.Now(), ttl)
+	if err != nil {
+		return err
+	}
+	a.setCookie(c, sessionCookie, session, int(ttl/time.Second))
+	a.issueCSRF(c)
+	return nil
+}
+
 func (a *Authenticator) parsePending(token string) (*pendingClaims, error) {
 	if token == "" {
 		return nil, errors.New("no 2fa-pending cookie")

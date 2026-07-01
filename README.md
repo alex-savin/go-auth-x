@@ -316,7 +316,13 @@ HMAC-SHA1 / 6 digits / 30s, ±1-step skew), verified against the published RFC v
   social/magic-link — poll `GET /auth/2fa/pending`). `POST /auth/2fa/verify` with a TOTP **or** a
   recovery code finishes the login.
 - **Security** — codes are constant-time compared; a used time-step is remembered to reject **replay**;
-  recovery codes are **sha256-at-rest + single-use**; `POST /auth/2fa/disable` requires a current code.
+  recovery codes are **sha256-at-rest + single-use**; `POST /auth/2fa/disable` requires a current code;
+  `/auth/2fa/verify` is rate-limited.
+- **Passkey as a second factor** — a 2FA-halted login can instead complete the second step with a
+  registered passkey (`POST /auth/2fa/webauthn/begin` + `/finish`).
+- **Step-up / re-auth** — wrap sensitive routes with `authn.RequireStepUpHTTP(maxAge)`; a stale/absent
+  step-up returns `403 {"error":"reauth_required"}`, and `POST /auth/reauth` (password **or** a 2FA
+  code) sets a short-lived step-up cookie so the action can proceed.
 
 ---
 

@@ -24,6 +24,8 @@ var csrfExempt = map[string]bool{
 	"/auth/webauthn/login/begin":   true, // discoverable login — no session yet
 	"/auth/webauthn/login/finish":  true,
 	"/auth/2fa/verify":             true, // pre-session (mid-login); gated by the code + signed pending cookie
+	"/auth/2fa/webauthn/begin":     true, // pre-session; gated by the signed pending cookie
+	"/auth/2fa/webauthn/finish":    true, // pre-session; gated by the pending cookie + passkey assertion
 }
 
 // issueCSRF sets a fresh non-HttpOnly CSRF cookie that the SPA reads and echoes back in the

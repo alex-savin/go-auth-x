@@ -154,18 +154,10 @@ func (a *Authenticator) TwoFactorVerify(c *reqCtx) {
 		c.JSON(http.StatusUnauthorized, H{"error": "that code is not valid"})
 		return
 	}
-	a.clearCookie(c, twoFactorPendingCookie)
-	ttl := sessionTTL
-	if pc.Remember {
-		ttl = rememberTTL
-	}
-	session, serr := mintSession(a.cfg.SessionSecret, pc.Subject, pc.Email, pc.Name, pc.Role, "", pc.Groups, time.Now(), ttl)
-	if serr != nil {
+	if err := a.completePendingLogin(c, pc); err != nil {
 		c.JSON(http.StatusInternalServerError, H{"error": "sign-in failed"})
 		return
 	}
-	a.setCookie(c, sessionCookie, session, int(ttl/time.Second))
-	a.issueCSRF(c)
 	a.creds.RecordAudit(u.ID, u.Email, c.ClientIP(), "2fa", "verify", true, "")
 	c.JSON(http.StatusOK, H{"ok": true})
 }
