@@ -2,7 +2,7 @@
 // an upstream IdP (Okta, Entra/Azure AD, JumpCloud) can push and deprovision users and groups. It
 // implements create / read / list / PATCH / PUT / delete, deprovision via PATCH active=false,
 // filtered list (eq/ne/co/sw/ew/pr with and/or/not/parens composition), sorting (sortBy/sortOrder),
-// weak ETags with If-Match / If-None-Match, the /Bulk endpoint, bearer-token auth, and the discovery
+// ETags with If-Match / If-None-Match, the /Bulk endpoint, bearer-token auth, and the discovery
 // endpoints. Filtering covers eq/ne/co/sw/ew/gt/ge/lt/le/pr with and/or/not composition, parentheses,
 // and valuePath (emails[type eq "work"]). Mount it with StripPrefix:
 //
@@ -12,6 +12,7 @@ package scim
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -31,9 +32,23 @@ const (
 
 // Server is a SCIM 2.0 endpoint set backed by a directory.
 type Server struct {
-	dir  authx.DirectoryStore
-	auth func(token string) bool // validates the bearer token (e.g. authn.ValidateAPIKey)
-	mux  *http.ServeMux          // the (unauthenticated) route table; /Bulk dispatches sub-requests here
+	dir     authx.DirectoryStore
+	auth    func(token string) bool // validates the bearer token (e.g. authn.ValidateAPIKey)
+	mux     *http.ServeMux          // the (unauthenticated) route table; /Bulk dispatches sub-requests here
+	baseURL string                  // externally-visible SCIM root, for Location / meta.location
+}
+
+// SetBaseURL sets the externally-visible SCIM root (e.g. "https://app.example.com/scim/v2") used to
+// build the resource Location header + meta.location (RFC 7644 §3.1/§3.3). Optional — when unset,
+// those fields are omitted.
+func (s *Server) SetBaseURL(u string) { s.baseURL = strings.TrimRight(u, "/") }
+
+// loc builds a resource URL, or "" when no base URL is configured.
+func (s *Server) loc(kind, id string) string {
+	if s.baseURL == "" {
+		return ""
+	}
+	return s.baseURL + "/" + kind + "/" + id
 }
 
 // NewServer builds a SCIM server. auth validates the bearer token on every request; pass
@@ -95,7 +110,7 @@ type scimEmail struct {
 type scimMeta struct {
 	ResourceType string `json:"resourceType"`
 	Location     string `json:"location,omitempty"`
-	Version      string `json:"version,omitempty"` // weak ETag
+	Version      string `json:"version,omitempty"` // strong ETag
 }
 
 type scimUser struct {
@@ -154,21 +169,23 @@ func listEnvelope[T any](resources []T) map[string]any {
 	}
 }
 
-func toSCIMUser(u *authx.AuthUser) scimUser {
+func (s *Server) toSCIMUser(u *authx.AuthUser) scimUser {
+	id := strconv.FormatUint(uint64(u.ID), 10)
 	return scimUser{
-		Schemas: []string{schemaUser}, ID: strconv.FormatUint(uint64(u.ID), 10), UserName: u.Email,
+		Schemas: []string{schemaUser}, ID: id, UserName: u.Email,
 		Name:   &scimName{Formatted: u.Name},
 		Emails: []scimEmail{{Value: u.Email, Primary: true}},
-		Active: !u.Disabled, Meta: scimMeta{ResourceType: "User", Version: userVersion(u)},
+		Active: !u.Disabled, Meta: scimMeta{ResourceType: "User", Location: s.loc("Users", id), Version: userVersion(u)},
 	}
 }
 
-func toSCIMGroup(g authx.Group, members []authx.AuthUser) scimGroup {
+func (s *Server) toSCIMGroup(g authx.Group, members []authx.AuthUser) scimGroup {
+	id := strconv.FormatUint(uint64(g.ID), 10)
 	ms := make([]scimMember, 0, len(members))
 	for _, m := range members {
 		ms = append(ms, scimMember{Value: strconv.FormatUint(uint64(m.ID), 10), Display: m.Email})
 	}
-	return scimGroup{Schemas: []string{schemaGroup}, ID: strconv.FormatUint(uint64(g.ID), 10), DisplayName: g.Name, Members: ms, Meta: scimMeta{ResourceType: "Group", Version: groupVersion(g, members)}}
+	return scimGroup{Schemas: []string{schemaGroup}, ID: id, DisplayName: g.Name, Members: ms, Meta: scimMeta{ResourceType: "Group", Location: s.loc("Groups", id), Version: groupVersion(g, members)}}
 }
 
 func pathID(r *http.Request) uint {
@@ -204,7 +221,7 @@ func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
 	sortUsers(users, q.Get("sortBy"), q.Get("sortOrder"))
 	resources := make([]scimUser, 0, len(users))
 	for i := range users {
-		resources = append(resources, toSCIMUser(&users[i]))
+		resources = append(resources, s.toSCIMUser(&users[i]))
 	}
 	writeSCIM(w, http.StatusOK, listEnvelope(resources))
 }
@@ -225,14 +242,22 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 	}
 	u, err := s.dir.UpsertExternalUser("scim:"+in.UserName, email, name, true)
 	if err != nil {
-		scimError(w, http.StatusConflict, err.Error())
+		if errors.Is(err, authx.ErrEmailConflict) {
+			scimErrorType(w, http.StatusConflict, "uniqueness", "a user with this email already exists")
+		} else {
+			scimError(w, http.StatusInternalServerError, err.Error())
+		}
 		return
 	}
 	if in.Active != !u.Disabled {
 		_ = s.dir.SetUserDisabled(u.ID, !in.Active)
 		u.Disabled = !in.Active
 	}
-	writeResource(w, http.StatusCreated, toSCIMUser(u), userVersion(u))
+	res := s.toSCIMUser(u)
+	if res.Meta.Location != "" {
+		w.Header().Set("Location", res.Meta.Location) // RFC 7644 §3.3
+	}
+	writeResource(w, http.StatusCreated, res, userVersion(u))
 }
 
 func (s *Server) getUser(w http.ResponseWriter, r *http.Request) {
@@ -247,7 +272,24 @@ func (s *Server) getUser(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
-	writeResource(w, http.StatusOK, toSCIMUser(u), v)
+	writeResource(w, http.StatusOK, s.toSCIMUser(u), v)
+}
+
+// validatePatchOps enforces the RFC 7644 §3.5.2 op grammar: op ∈ add|remove|replace, and a `remove`
+// MUST target a path. Returns a scimType + detail (ok=false) on the first violation.
+func validatePatchOps(p patchOp) (scimType, detail string, ok bool) {
+	for _, op := range p.Operations {
+		switch strings.ToLower(op.Op) {
+		case "add", "replace":
+		case "remove":
+			if strings.TrimSpace(op.Path) == "" {
+				return "noTarget", "a 'remove' operation requires a path", false
+			}
+		default:
+			return "invalidValue", "unsupported PATCH op: " + op.Op, false
+		}
+	}
+	return "", "", true
 }
 
 // patchUser handles the deprovision/reactivate flow (replace active=true/false).
@@ -267,13 +309,17 @@ func (s *Server) patchUser(w http.ResponseWriter, r *http.Request) {
 		scimError(w, http.StatusBadRequest, "invalid PatchOp")
 		return
 	}
+	if st, detail, ok := validatePatchOps(p); !ok {
+		scimErrorType(w, http.StatusBadRequest, st, detail)
+		return
+	}
 	for _, op := range p.Operations {
 		if active, ok := activeFromOp(op.Path, op.Value); ok {
 			_ = s.dir.SetUserDisabled(id, !active)
 		}
 	}
 	u, _ := s.dir.UserByID(id)
-	writeResource(w, http.StatusOK, toSCIMUser(u), userVersion(u))
+	writeResource(w, http.StatusOK, s.toSCIMUser(u), userVersion(u))
 }
 
 // putUser replaces a user (name + active; email/userName too). The Sub is preserved.
@@ -306,7 +352,7 @@ func (s *Server) putUser(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = s.dir.SetUserDisabled(cur.ID, !in.Active)
 	u, _ := s.dir.UserByID(cur.ID)
-	writeResource(w, http.StatusOK, toSCIMUser(u), userVersion(u))
+	writeResource(w, http.StatusOK, s.toSCIMUser(u), userVersion(u))
 }
 
 func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
@@ -353,7 +399,7 @@ func (s *Server) listGroups(w http.ResponseWriter, r *http.Request) {
 	resources := make([]scimGroup, 0, len(gs))
 	for _, g := range gs {
 		members, _ := s.dir.GroupMembers(g.ID)
-		resources = append(resources, toSCIMGroup(g, members))
+		resources = append(resources, s.toSCIMGroup(g, members))
 	}
 	writeSCIM(w, http.StatusOK, listEnvelope(resources))
 }
@@ -369,7 +415,7 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
 		g, err = s.dir.CreateGroup(in.DisplayName, "provisioned via SCIM")
 	}
 	if err != nil {
-		scimError(w, http.StatusConflict, err.Error())
+		scimError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	for _, m := range in.Members {
@@ -378,7 +424,11 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	members, _ := s.dir.GroupMembers(g.ID)
-	writeResource(w, http.StatusCreated, toSCIMGroup(*g, members), groupVersion(*g, members))
+	res := s.toSCIMGroup(*g, members)
+	if res.Meta.Location != "" {
+		w.Header().Set("Location", res.Meta.Location) // RFC 7644 §3.3
+	}
+	writeResource(w, http.StatusCreated, res, groupVersion(*g, members))
 }
 
 // groupByID finds a group + its members by id (the DirectoryStore has no GroupByID lookup).
@@ -405,7 +455,7 @@ func (s *Server) getGroup(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotModified)
 		return
 	}
-	writeResource(w, http.StatusOK, toSCIMGroup(g, members), v)
+	writeResource(w, http.StatusOK, s.toSCIMGroup(g, members), v)
 }
 
 // putGroup replaces a group's membership with the provided set (the canonical Okta/Azure group
@@ -442,7 +492,7 @@ func (s *Server) putGroup(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		g, members = authx.Group{ID: id, Name: in.DisplayName}, nil
 	}
-	writeResource(w, http.StatusOK, toSCIMGroup(g, members), groupVersion(g, members))
+	writeResource(w, http.StatusOK, s.toSCIMGroup(g, members), groupVersion(g, members))
 }
 
 // patchGroup handles membership add/remove operations.
@@ -457,6 +507,10 @@ func (s *Server) patchGroup(w http.ResponseWriter, r *http.Request) {
 	var p patchOp
 	if json.NewDecoder(r.Body).Decode(&p) != nil {
 		scimError(w, http.StatusBadRequest, "invalid PatchOp")
+		return
+	}
+	if st, detail, ok := validatePatchOps(p); !ok {
+		scimErrorType(w, http.StatusBadRequest, st, detail)
 		return
 	}
 	for _, op := range p.Operations {
@@ -476,7 +530,7 @@ func (s *Server) patchGroup(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		g, members = authx.Group{ID: id}, nil
 	}
-	writeResource(w, http.StatusOK, toSCIMGroup(g, members), groupVersion(g, members))
+	writeResource(w, http.StatusOK, s.toSCIMGroup(g, members), groupVersion(g, members))
 }
 
 func (s *Server) deleteGroup(w http.ResponseWriter, r *http.Request) {

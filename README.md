@@ -393,7 +393,7 @@ A mountable provisioning server so an upstream IdP (Okta, Entra/Azure AD, JumpCl
 deprovision Users + Groups. Supports create / read / list / **PATCH deprovision (`active=false`)** /
 **PUT replace** / delete, a **`/Bulk`** endpoint, **filters** (`eq`/`ne`/`co`/`sw`/`ew`/`gt`/`ge`/`lt`/`le`/`pr`
 with **`and`/`or`/`not`** + parens + **valuePath** `emails[type eq "work"]`), **sorting**
-(`sortBy`/`sortOrder`), and **weak ETags** (`If-Match` / `If-None-Match`), plus `ServiceProviderConfig` /
+(`sortBy`/`sortOrder`), and **ETags** (`If-Match` / `If-None-Match`), plus `ServiceProviderConfig` /
 `ResourceTypes` / `Schemas`. Bearer-auth via `ValidateAPIKey`.
 
 ```go

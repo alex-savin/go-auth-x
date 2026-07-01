@@ -10,17 +10,18 @@ import (
 	authx "github.com/alex-savin/go-auth-x"
 )
 
-// SCIM ETags (RFC 7644 §3.14). We emit WEAK ETags derived from a resource's content fingerprint —
-// the directory doesn't store a monotonic version, so the ETag changes whenever the representation
-// changes. Enough for optimistic concurrency (If-Match on writes) and caching (If-None-Match on GET).
+// SCIM ETags (RFC 7644 §3.14). We emit STRONG ETags: the tag is a sha256 over the resource's stable
+// STATE fields (not the wire bytes), so identical state → identical tag regardless of serialization —
+// a valid strong validator. Strong tags let If-Match (RFC 9110 §13.1.1, strong comparison) work
+// correctly for optimistic concurrency, and satisfy If-None-Match (weak comparison) for caching.
 
-func weakETag(parts ...string) string {
+func resourceETag(parts ...string) string {
 	h := sha256.Sum256([]byte(strings.Join(parts, "\x00")))
-	return `W/"` + hex.EncodeToString(h[:8]) + `"`
+	return `"` + hex.EncodeToString(h[:8]) + `"`
 }
 
 func userVersion(u *authx.AuthUser) string {
-	return weakETag("user", toID(u.ID), u.Email, u.Name, strconv.FormatBool(!u.Disabled))
+	return resourceETag("user", toID(u.ID), u.Email, u.Name, strconv.FormatBool(!u.Disabled))
 }
 
 func groupVersion(g authx.Group, members []authx.AuthUser) string {
@@ -28,7 +29,7 @@ func groupVersion(g authx.Group, members []authx.AuthUser) string {
 	for _, m := range members {
 		parts = append(parts, toID(m.ID))
 	}
-	return weakETag(parts...)
+	return resourceETag(parts...)
 }
 
 // writeResource writes a single resource with its ETag header.

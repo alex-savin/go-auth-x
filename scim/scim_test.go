@@ -272,6 +272,46 @@ func TestSCIMFilterOperatorsAndValuePath(t *testing.T) {
 	}
 }
 
+func TestSCIMProtocolConformance(t *testing.T) {
+	dir := memory.New()
+	srv := NewServer(dir, func(tok string) bool { return tok == "secret" })
+	srv.SetBaseURL("https://app.example.com/scim/v2")
+	h := http.StripPrefix("/scim/v2", srv.Handler())
+	do := func(method, path, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer secret")
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		return w
+	}
+	// Create → Location header + meta.location (RFC 7644 §3.3), and a STRONG ETag (no W/).
+	w := do(http.MethodPost, "/scim/v2/Users", `{"userName":"loc@x.com","active":true}`)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("create: %d %s", w.Code, w.Body.String())
+	}
+	loc := w.Header().Get("Location")
+	if !strings.HasPrefix(loc, "https://app.example.com/scim/v2/Users/") {
+		t.Fatalf("Location header wrong: %q", loc)
+	}
+	var created scimUser
+	_ = json.Unmarshal(w.Body.Bytes(), &created)
+	if created.Meta.Location != loc {
+		t.Fatalf("meta.location %q != Location header %q", created.Meta.Location, loc)
+	}
+	if strings.HasPrefix(created.Meta.Version, "W/") || created.Meta.Version == "" {
+		t.Fatalf("ETag should be a strong tag (no W/), got %q", created.Meta.Version)
+	}
+	// PATCH `remove` with no path → 400 noTarget (RFC 7644 §3.5.2.2).
+	if pw := do(http.MethodPatch, "/scim/v2/Users/"+created.ID, `{"Operations":[{"op":"remove"}]}`); pw.Code != http.StatusBadRequest ||
+		!strings.Contains(pw.Body.String(), "noTarget") {
+		t.Fatalf("PATCH remove w/o path: want 400 noTarget, got %d %s", pw.Code, pw.Body.String())
+	}
+	// Unknown PATCH op verb → 400.
+	if uw := do(http.MethodPatch, "/scim/v2/Users/"+created.ID, `{"Operations":[{"op":"frobnicate","path":"active"}]}`); uw.Code != http.StatusBadRequest {
+		t.Fatalf("unknown PATCH op: want 400, got %d", uw.Code)
+	}
+}
+
 func TestSCIMETags(t *testing.T) {
 	dir := memory.New()
 	srv := NewServer(dir, func(tok string) bool { return tok == "secret" })
