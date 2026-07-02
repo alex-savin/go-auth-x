@@ -35,15 +35,25 @@ type TwoFactorStore interface {
 	SetTOTPSecret(userID uint, secret string) error // (re)enroll: store secret, Enabled=false, LastStep=0
 	EnableTOTP(userID uint) error                   // confirm enrollment
 	DisableTOTP(userID uint) error                  // remove TOTP + all recovery codes
-	SetTOTPLastStep(userID uint, step uint64) error // replay guard, set after a successful verify
+	SetTOTPLastStep(userID uint, step uint64) error // set the enrollment step (no concurrency concern)
+	// ClaimTOTPStep atomically records a just-verified time-step ONLY if it advances past LastStep,
+	// returning true iff it did. This is the replay guard for login verification: the compare and the
+	// write must be one atomic step so two concurrent requests can't both accept the same code.
+	ClaimTOTPStep(userID uint, step uint64) (bool, error)
 
 	ReplaceRecoveryCodes(userID uint, hashes [][]byte) error    // set at enrollment (replaces any existing)
 	ConsumeRecoveryCode(userID uint, hash []byte) (bool, error) // true if it existed and was removed
 	RecoveryCodesRemaining(userID uint) (int, error)
 }
 
-// SetTwoFactorStore enables optional TOTP two-factor auth + recovery codes.
-func (a *Authenticator) SetTwoFactorStore(s TwoFactorStore) { a.twoFactor = s }
+// SetTwoFactorStore enables optional TOTP two-factor auth + recovery codes. It also installs the
+// default rate limiters if none exist yet: the 2FA verify / reauth endpoints throttle a brute-forceable
+// 6-digit code space, and those guards would silently no-op in an OIDC/social-only deployment that
+// never called SetLocalEnabled. No-op if the consumer already supplied limiters via SetRateLimiters.
+func (a *Authenticator) SetTwoFactorStore(s TwoFactorStore) {
+	a.twoFactor = s
+	a.enableLimiters()
+}
 
 // TwoFactorEnabled reports whether 2FA is wired at all (a store is set).
 func (a *Authenticator) TwoFactorEnabled() bool { return a != nil && a.twoFactor != nil }
@@ -63,7 +73,7 @@ func (a *Authenticator) userHasTOTP(userID uint) bool {
 // hashes for storage.
 func newRecoveryCodes(n int) (codes []string, hashes [][]byte, err error) {
 	for i := 0; i < n; i++ {
-		buf := make([]byte, 5) // 10 hex chars
+		buf := make([]byte, 10) // 20 hex chars = 80 bits — not brute-forceable even under lax throttling
 		if _, err = rand.Read(buf); err != nil {
 			return nil, nil, err
 		}

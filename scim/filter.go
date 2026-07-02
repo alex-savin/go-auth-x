@@ -179,8 +179,14 @@ func tokenize(s string) ([]token, error) {
 			var b strings.Builder
 			j := i + 1
 			for j < n && s[j] != '"' {
-				if s[j] == '\\' && j+1 < n { // \" and \\ escapes
-					j++
+				if s[j] == '\\' && j+1 < n {
+					// Only \" and \\ are escapes (RFC 7644 §3.4.2.2 / JSON). Any other backslash is
+					// literal — keep it, rather than silently swallowing it and mangling the value.
+					if nc := s[j+1]; nc == '"' || nc == '\\' {
+						b.WriteByte(nc)
+						j += 2
+						continue
+					}
 				}
 				b.WriteByte(s[j])
 				j++
@@ -204,9 +210,14 @@ func tokenize(s string) ([]token, error) {
 
 // --- recursive-descent parser: or < and < not < primary ---
 
+// maxFilterDepth bounds nesting (parens / not / valuePath) so a pathologically nested filter can't
+// overflow the stack (DoS). Every nested group re-enters parseOr, which enforces this.
+const maxFilterDepth = 40
+
 type parser struct {
-	toks []token
-	pos  int
+	toks  []token
+	pos   int
+	depth int
 }
 
 func (p *parser) peek() token { return p.toks[p.pos] }
@@ -233,6 +244,11 @@ func compileFilter(s string) (pred, error) {
 }
 
 func (p *parser) parseOr() (pred, error) {
+	p.depth++
+	if p.depth > maxFilterDepth {
+		return nil, fmt.Errorf("filter nested too deeply")
+	}
+	defer func() { p.depth-- }()
 	left, err := p.parseAnd()
 	if err != nil {
 		return nil, err
@@ -363,7 +379,7 @@ func matchAttr(have string, present bool, op, want string) bool {
 	case "eq":
 		return present && h == w
 	case "ne":
-		return !(present && h == w)
+		return present && h != w // an absent attribute doesn't satisfy `ne` (consistent with eq/co/…)
 	case "co":
 		return present && strings.Contains(h, w)
 	case "sw":

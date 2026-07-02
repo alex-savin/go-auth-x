@@ -155,6 +155,14 @@ func (a *Authenticator) Callback(c *reqCtx) {
 		return
 	}
 
+	// Trust the token's email only when the issuer proved it (email_verified), or OIDC_ASSUME_VERIFIED
+	// is set for a single trusted issuer. Without this an IdP that permits unverified email claims
+	// could hand an attacker a session under a victim's address (matches the social login gate).
+	if claims.Email != "" && !(claims.EmailVerified || a.cfg.OIDCAssumeVerified) {
+		c.JSON(http.StatusUnauthorized, H{"error": "your email is not verified with this provider"})
+		return
+	}
+
 	if !a.groupAllowed(claims.Groups) {
 		c.JSON(http.StatusForbidden, H{"error": "your account is not in an allowed group"})
 		return
@@ -188,6 +196,7 @@ func (a *Authenticator) Callback(c *reqCtx) {
 		return
 	}
 	a.setCookie(c, sessionCookie, session, int(sessionTTL/time.Second))
+	a.issueCSRF(c) // parity with the in-app login funnel — the SPA needs a CSRF cookie for its first POST
 	c.Redirect(http.StatusFound, fc.Next)
 }
 
@@ -279,9 +288,13 @@ func randToken() string {
 }
 
 // sanitizeNext keeps the post-login redirect to a local path (prevents open-redirect
-// to an attacker host); defaults to the dashboard root.
+// to an attacker host); defaults to the dashboard root. It rejects scheme-relative targets:
+// "//evil.com" AND "/\evil.com" (browsers treat a backslash as a slash, so "/\" is scheme-relative).
 func sanitizeNext(next string) string {
-	if next == "" || !strings.HasPrefix(next, "/") || strings.HasPrefix(next, "//") {
+	if next == "" || !strings.HasPrefix(next, "/") {
+		return "/"
+	}
+	if len(next) > 1 && (next[1] == '/' || next[1] == '\\') {
 		return "/"
 	}
 	return next

@@ -1,8 +1,8 @@
-// Package auth adds optional OIDC authorization in front of the
-// whole service. It runs a backend-for-frontend Authorization Code + PKCE flow and
-// issues a signed HttpOnly session cookie — the SPA never handles tokens. Auth is
-// opt-in: with no OIDC_ISSUER/OIDC_CLIENT_ID configured everything no-ops and the
-// service behaves as before (open), so the demo and tests are unaffected.
+// Package authx is a self-contained authentication library for Go web apps: passwords, passkeys
+// (WebAuthn), email magic-links, OIDC, social login, and 2FA behind one signed HttpOnly session
+// cookie — the SPA never handles tokens. It runs a backend-for-frontend Authorization Code + PKCE
+// flow and is opt-in: with no OIDC_ISSUER/OIDC_CLIENT_ID and no local methods enabled everything
+// no-ops and the service behaves as before (open), so the demo and tests are unaffected.
 package authx
 
 import (
@@ -26,6 +26,9 @@ type Config struct {
 	// OwnerEmail (OWNER_EMAIL) is exempt from hard per-account lockout so the operator can't
 	// be locked out mid-migration (recovery via email link stays open regardless).
 	OwnerEmail string
+	// BrandName (BRAND_NAME) labels the auth emails and is the default WebAuthn relying-party
+	// display name. Falls back to "go-auth-x" when unset.
+	BrandName string
 	// OIDCAssumeVerified (OIDC_ASSUME_VERIFIED) trusts the issuer's email as verified even when the
 	// id_token omits an email_verified claim. Leave false (default) to require the claim — the
 	// correct posture for multi-IdP setups; set true only for a single, fully-trusted issuer that
@@ -36,7 +39,9 @@ type Config struct {
 	// pages. nil = the built-in reference defaults (/login, /register, /welcome, …).
 	PublicPath func(path string) bool
 	// Social login (OAuth). Each provider turns on only when its client id + secret are set.
-	// Callback URLs are AppURL + /auth/social/{google,github}/callback (register them upstream).
+	// Callback URLs are AppURL + /auth/social/<provider>/callback — one per enabled provider
+	// (google, github, facebook, apple, microsoft, discord, and any SocialOIDC slug) — register
+	// each upstream.
 	GoogleClientID       string // GOOGLE_CLIENT_ID
 	GoogleClientSecret   string // GOOGLE_CLIENT_SECRET
 	GitHubClientID       string // GITHUB_CLIENT_ID
@@ -97,6 +102,7 @@ func ConfigFromEnv() Config {
 		CookieSecure:  os.Getenv("COOKIE_SECURE") == "true",
 		AppURL:        strings.TrimRight(os.Getenv("APP_URL"), "/"),
 		OwnerEmail:    strings.ToLower(strings.TrimSpace(os.Getenv("OWNER_EMAIL"))),
+		BrandName:     strings.TrimSpace(os.Getenv("BRAND_NAME")),
 
 		OIDCAssumeVerified: os.Getenv("OIDC_ASSUME_VERIFIED") == "true",
 

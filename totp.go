@@ -16,8 +16,8 @@ import (
 // TOTP (RFC 6238) over HOTP (RFC 4226), implemented with the standard library ONLY — no third-party
 // dependency. (API shape inspired by github.com/Ja7ad/otp; the algorithm is ~60 lines and provable
 // against the published RFC test vectors, so a security library is better off owning it.) Defaults
-// match what authenticator apps expect: HMAC-SHA1, 6 digits, a 30-second period, and a ±1-step skew
-// window for clock drift. The library returns the otpauth:// URI + base32 secret and lets the
+// match what authenticator apps expect: HMAC-SHA1, 6 digits, a 30-second period, and a past-leaning
+// skew window (current + previous step) for clock drift. The library returns the otpauth:// URI + base32 secret and lets the
 // frontend render the QR — no server-side image/barcode dependency.
 
 const (
@@ -49,8 +49,9 @@ func hotp(secret []byte, counter uint64) string {
 	return fmt.Sprintf("%06d", code)
 }
 
-// totpValidate reports whether code is valid for the base32 secret at time t, within a ±1-step skew
-// window. It returns the matched step so the caller can reject replays (a step already consumed).
+// totpValidate reports whether code is valid for the base32 secret at time t, within a past-leaning
+// skew window (current + previous step; see below). It returns the matched step so the caller can
+// reject replays (a step already consumed).
 // The compare is constant-time.
 func totpValidate(secretB32, code string, t time.Time) (step uint64, ok bool) {
 	code = strings.TrimSpace(code)

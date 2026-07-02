@@ -35,23 +35,44 @@ func newRateLimiter(limit int, window time.Duration) *rateLimiter {
 }
 
 // enableLimiters lazily installs the per-IP and per-account limiters and starts a GC ticker.
-// Called when in-app auth is turned on. A no-op if the consumer already supplied limiters via
+// Called when in-app auth or 2FA is turned on. A no-op if the consumer already supplied limiters via
 // SetRateLimiters (they own their backend's expiry, so no GC ticker is started).
 func (a *Authenticator) enableLimiters() {
 	if a.ipLimiter != nil {
 		return
 	}
-	ip := newRateLimiter(20, 5*time.Minute)    // total auth attempts per IP
-	acct := newRateLimiter(10, 15*time.Minute) // request-mail attempts per account
+	// Per-IP budget across all auth attempts from one address; per-account budget for the
+	// account-scoped gates (magic-link / verify / reset requests, and 2FA/reauth guessing).
+	ip := newRateLimiter(20, 5*time.Minute)
+	acct := newRateLimiter(10, 15*time.Minute)
 	a.ipLimiter, a.acctLimiter = ip, acct
+	a.limiterStop = make(chan struct{})
+	stop := a.limiterStop
 	go func() {
 		t := time.NewTicker(10 * time.Minute)
 		defer t.Stop()
-		for range t.C {
-			ip.gc()
-			acct.gc()
+		for {
+			select {
+			case <-t.C:
+				ip.gc()
+				acct.gc()
+			case <-stop:
+				return
+			}
 		}
 	}()
+}
+
+// Close stops the background rate-limiter GC goroutine started for the built-in in-memory limiters.
+// Optional: call it when discarding an Authenticator in a long-lived process (e.g. tests spinning up
+// many instances) to avoid leaking the ticker goroutine. Safe to call once; a no-op if no built-in
+// limiters were installed.
+func (a *Authenticator) Close() error {
+	if a != nil && a.limiterStop != nil {
+		close(a.limiterStop)
+		a.limiterStop = nil
+	}
+	return nil
 }
 
 // Allow records an attempt for key and reports whether it is within the limit.

@@ -55,6 +55,9 @@ type Authenticator struct {
 	// RateLimiter so consumers can swap in a shared-store backend via SetRateLimiters.
 	ipLimiter   RateLimiter
 	acctLimiter RateLimiter
+	// limiterStop signals the built-in limiters' GC goroutine to exit (see Close); nil unless the
+	// in-memory defaults were installed.
+	limiterStop chan struct{}
 	// wauthn is the WebAuthn relying-party instance for passkeys; nil until configured.
 	wauthn *webauthn.WebAuthn
 	// Social login OAuth (nil until the provider's client id + secret are set).

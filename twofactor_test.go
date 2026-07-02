@@ -22,6 +22,16 @@ func (f *fakeTOTP) SetTOTPSecret(_ uint, s string) error   { f.info = &TOTPInfo{
 func (f *fakeTOTP) EnableTOTP(uint) error                  { f.info.Enabled = true; return nil }
 func (f *fakeTOTP) DisableTOTP(uint) error                 { f.info, f.recov = nil, nil; return nil }
 func (f *fakeTOTP) SetTOTPLastStep(_ uint, s uint64) error { f.info.LastStep = s; return nil }
+func (f *fakeTOTP) ClaimTOTPStep(_ uint, s uint64) (bool, error) {
+	if f.info == nil {
+		return false, ErrNoCredential
+	}
+	if s <= f.info.LastStep {
+		return false, nil
+	}
+	f.info.LastStep = s
+	return true, nil
+}
 func (f *fakeTOTP) ReplaceRecoveryCodes(_ uint, hs [][]byte) error {
 	f.recov = map[string]bool{}
 	for _, h := range hs {

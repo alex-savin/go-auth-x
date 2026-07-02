@@ -56,21 +56,30 @@ func (a *Authenticator) EmailRequest(c *reqCtx) {
 		c.JSON(http.StatusOK, generic)
 		return
 	}
-	if u, err := a.creds.UserByEmail(email); err == nil && !u.Disabled {
-		raw, hash := newToken()
-		if a.creds.CreateToken(purposeMagicLogin, u.ID, email, hash, time.Now().Add(ttlMagicLogin)) == nil {
-			link := a.baseURL() + "/auth/email/login?token=" + raw
-			if n := sanitizeNext(body.Next); n != "/" {
-				link += "&next=" + url.QueryEscape(n)
-			}
-			if body.Remember {
-				link += "&remember=true"
-			}
-			_ = a.sendAuthEmail(email, "Your sign-in link", "Sign in",
-				"Click below to sign in. This link is valid for 15 minutes and can be used once.",
-				"Sign in", link, "If you didn't request this, you can ignore this email.")
+	// Look up + mint + send OFF the request path so the response time is identical whether or not an
+	// account exists (the DB/token/SMTP work would otherwise be an account-enumeration timing oracle).
+	remember := body.Remember
+	next := sanitizeNext(body.Next)
+	go func() {
+		u, err := a.creds.UserByEmail(email)
+		if err != nil || u.Disabled {
+			return
 		}
-	}
+		raw, hash := newToken()
+		if a.creds.CreateToken(purposeMagicLogin, u.ID, email, hash, time.Now().Add(ttlMagicLogin)) != nil {
+			return
+		}
+		link := a.baseURL() + "/auth/email/login?token=" + raw
+		if next != "/" {
+			link += "&next=" + url.QueryEscape(next)
+		}
+		if remember {
+			link += "&remember=true"
+		}
+		_ = a.sendAuthEmail(email, "Your sign-in link", "Sign in",
+			"Click below to sign in. This link is valid for 15 minutes and can be used once.",
+			"Sign in", link, "If you didn't request this, you can ignore this email.")
+	}()
 	c.JSON(http.StatusOK, generic)
 }
 

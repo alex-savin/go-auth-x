@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **Session signing fails closed on a weak/absent `SESSION_SECRET`.** `signJWT` now refuses to sign
+  any cookie when the secret is shorter than 32 bytes, closing a hole where local-only auth with an
+  unset `SESSION_SECRET` would silently mint cookies signed with an empty (publicly known) HMAC key.
+  `SetLocalEnabled` logs a clear warning in that case. JWT parsing also pins `HS256` via
+  `WithValidMethods` (defense-in-depth alongside the existing keyfunc check).
+- **Account-linking gate enforced on the primary OIDC callback.** The OIDC callback now rejects a
+  token whose email isn't verified (unless `OIDC_ASSUME_VERIFIED`), matching the social path; and both
+  reference stores now require the *incoming* login to prove the email before rebinding an existing
+  verified/bootstrap row to a new subject — preventing takeover of a verified account by an unproven
+  login. The gormstore reclaim (delete squatter + create clean user) is now a single transaction.
+- **Sign in with Apple no longer blocked by CSRF.** Social provider callbacks
+  (`/auth/social/*/callback`, incl. Apple's cross-site `form_post`) are exempt from the double-submit
+  CSRF check (they're protected by the OAuth `state` parameter).
+- **2FA brute-force throttling in OIDC/social-only deployments.** Rate limiters are now installed when
+  a `TwoFactorStore` is wired (not only via `SetLocalEnabled`); `POST /auth/reauth` and
+  `POST /auth/2fa/disable` are rate-limited like `/auth/2fa/verify`.
+- **TOTP replay guard is atomic.** A new `TwoFactorStore.ClaimTOTPStep` records a just-used time-step
+  only if it advances, in one atomic store operation (no check-then-write TOCTOU). WebAuthn sign-count
+  updates are monotonic (never regress under concurrency). *(Interface change: custom `TwoFactorStore`
+  implementations must add `ClaimTOTPStep`.)*
+- **`AssumeVerified` only fills in an absent `email_verified`** — an explicit `email_verified:false`
+  is always honored.
+- **Recovery codes** widened to 80 bits of entropy.
+- **Request bodies are size-capped** (JSON handlers and SCIM, incl. `/Bulk`) to prevent
+  memory-exhaustion; SCIM filter parsing is depth-bounded against stack-overflow DoS.
+- **Open-redirect hardening** — the post-login `next` now rejects backslash scheme-relative targets
+  (`/\evil.com`).
+- **SCIM create without `active` no longer disables the account** (RFC 7644 default is true); SCIM/admin
+  error responses no longer leak internal error strings; SCIM `If-Match` uses strong comparison;
+  duplicate group create returns 409; PATCH group `replace`/valuePath-`remove` handled correctly.
+- **LDAP** sync uses paged searches (works past the server size limit), honors `InsecureTLS` for
+  `ldaps://`, and normalizes DNs when matching group members.
+- **Email/SMTP** — CTA URLs are HTML-escaped in emails; SMTP headers are sanitized against CRLF
+  injection; magic-link / reset sends run off the request path to remove an account-enumeration timing
+  oracle.
+
+### Added
+
+- `Config.BrandName` / `BRAND_NAME` — product name for auth emails and the default WebAuthn RP display
+  name (replaces the hardcoded app name).
+- Transparent bcrypt rehash-on-login: a stored hash below the current cost is upgraded on successful
+  sign-in.
+- `Authenticator.Close()` stops the built-in rate-limiter GC goroutine.
+
 ## [0.3.0] — 2026-07-01
 
 ### Added

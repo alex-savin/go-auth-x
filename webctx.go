@@ -2,11 +2,14 @@ package authx
 
 import (
 	"encoding/json"
-	"fmt"
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 )
+
+// maxRequestBody caps JSON request bodies so an unbounded payload can't exhaust memory.
+const maxRequestBody = 1 << 20 // 1 MiB
 
 // H is a generic JSON object for handler responses (mirrors gin.H, minus the framework).
 type H = map[string]any
@@ -29,12 +32,7 @@ func (a *Authenticator) wrap(h func(*reqCtx)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) { h(a.newCtx(w, r)) }
 }
 
-func (c *reqCtx) JSON(code int, obj any)                { writeJSON(c.w, code, obj) }
-func (c *reqCtx) AbortWithStatusJSON(code int, obj any) { writeJSON(c.w, code, obj) }
-func (c *reqCtx) String(code int, format string, a ...any) {
-	c.w.WriteHeader(code)
-	fmt.Fprintf(c.w, format, a...)
-}
+func (c *reqCtx) JSON(code int, obj any)    { writeJSON(c.w, code, obj) }
 func (c *reqCtx) Query(k string) string     { return c.Request.URL.Query().Get(k) }
 func (c *reqCtx) Param(k string) string     { return c.Request.PathValue(k) }
 func (c *reqCtx) GetHeader(k string) string { return c.Request.Header.Get(k) }
@@ -45,7 +43,9 @@ func (c *reqCtx) Cookie(name string) (string, error) {
 	}
 	return ck.Value, nil
 }
-func (c *reqCtx) ShouldBindJSON(v any) error    { return json.NewDecoder(c.Request.Body).Decode(v) }
+func (c *reqCtx) ShouldBindJSON(v any) error {
+	return json.NewDecoder(http.MaxBytesReader(c.w, c.Request.Body, maxRequestBody)).Decode(v)
+}
 func (c *reqCtx) Redirect(code int, url string) { http.Redirect(c.w, c.Request, url, code) }
 func (c *reqCtx) ClientIP() string              { return c.a.clientIP(c.Request) }
 
@@ -70,20 +70,42 @@ func (a *Authenticator) clientIP(r *http.Request) string {
 	return host
 }
 
+// trustedProxyNets caches the parsed trusted-proxy ranges. TrustedProxies() reads the env and parses
+// CIDRs on every call; trustedProxy is on the per-request client-IP path, so parse once.
+var (
+	trustedProxyOnce  sync.Once
+	trustedProxyNets  []*net.IPNet
+	trustedProxyExact []net.IP
+)
+
+func loadTrustedProxies() {
+	for _, cidr := range TrustedProxies() {
+		if !strings.Contains(cidr, "/") {
+			if ip := net.ParseIP(cidr); ip != nil {
+				trustedProxyExact = append(trustedProxyExact, ip)
+			}
+			continue
+		}
+		if _, n, err := net.ParseCIDR(cidr); err == nil {
+			trustedProxyNets = append(trustedProxyNets, n)
+		}
+	}
+}
+
 // trustedProxy reports whether ip falls within the configured trusted-proxy ranges.
 func trustedProxy(ip string) bool {
 	parsed := net.ParseIP(ip)
 	if parsed == nil {
 		return false
 	}
-	for _, cidr := range TrustedProxies() {
-		if !strings.Contains(cidr, "/") {
-			if parsed.Equal(net.ParseIP(cidr)) {
-				return true
-			}
-			continue
+	trustedProxyOnce.Do(loadTrustedProxies)
+	for _, exact := range trustedProxyExact {
+		if parsed.Equal(exact) {
+			return true
 		}
-		if _, n, err := net.ParseCIDR(cidr); err == nil && n.Contains(parsed) {
+	}
+	for _, n := range trustedProxyNets {
+		if n.Contains(parsed) {
 			return true
 		}
 	}

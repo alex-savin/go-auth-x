@@ -65,6 +65,10 @@ func (c *Config) withDefaults() {
 	}
 }
 
+// ldapPageSize bounds each LDAP page so the sync works against directories larger than the server's
+// max result-size limit (Active Directory defaults to 1000) instead of failing/truncating.
+const ldapPageSize = 500
+
 // Syncer pulls from LDAP into a directory.
 type Syncer struct {
 	cfg Config
@@ -97,7 +101,13 @@ func (s *Syncer) dial() (*ldap.Conn, error) {
 	if s.cfg.BindPassword != "" && !s.cfg.StartTLS && !ldaps {
 		return nil, errors.New("ldap: refusing to send a bind password over cleartext — enable StartTLS or use ldaps://")
 	}
-	conn, err := ldap.DialURL(s.cfg.URL)
+	var opts []ldap.DialOpt
+	if ldaps {
+		// For ldaps:// the TLS handshake happens in DialURL, so InsecureTLS/ServerName must be passed
+		// here — otherwise InsecureTLS is silently ignored and a self-signed dev cert fails.
+		opts = append(opts, ldap.DialWithTLSConfig(&tls.Config{ServerName: u.Hostname(), InsecureSkipVerify: s.cfg.InsecureTLS}))
+	}
+	conn, err := ldap.DialURL(s.cfg.URL, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -130,9 +140,9 @@ func (s *Syncer) Sync() (*Result, error) {
 	userByDN := map[string]uint{}  // DN -> userID (for member=DN groups)
 	userByUID := map[string]uint{} // uid -> userID (for memberUid groups)
 
-	users, err := conn.Search(ldap.NewSearchRequest(
+	users, err := conn.SearchWithPaging(ldap.NewSearchRequest(
 		s.cfg.UserBaseDN, ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 0, false,
-		s.cfg.UserFilter, []string{s.cfg.AttrUID, s.cfg.AttrEmail, s.cfg.AttrName}, nil))
+		s.cfg.UserFilter, []string{s.cfg.AttrUID, s.cfg.AttrEmail, s.cfg.AttrName}, nil), ldapPageSize)
 	if err != nil {
 		return nil, fmt.Errorf("ldap user search: %w", err)
 	}
@@ -148,16 +158,16 @@ func (s *Syncer) Sync() (*Result, error) {
 			res.Errors = append(res.Errors, fmt.Sprintf("user %s: %v", uid, uerr))
 			continue
 		}
-		userByDN[strings.ToLower(e.DN)] = au.ID
+		userByDN[normalizeDN(e.DN)] = au.ID
 		userByUID[uid] = au.ID
 		seen["ldap:"+uid] = true
 		res.Users++
 	}
 
 	if s.cfg.GroupBaseDN != "" {
-		groups, gerr := conn.Search(ldap.NewSearchRequest(
+		groups, gerr := conn.SearchWithPaging(ldap.NewSearchRequest(
 			s.cfg.GroupBaseDN, ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 0, false,
-			s.cfg.GroupFilter, []string{s.cfg.AttrGroupName, s.cfg.AttrGroupMember}, nil))
+			s.cfg.GroupFilter, []string{s.cfg.AttrGroupName, s.cfg.AttrGroupMember}, nil), ldapPageSize)
 		if gerr != nil {
 			return res, fmt.Errorf("ldap group search: %w", gerr)
 		}
@@ -177,9 +187,11 @@ func (s *Syncer) Sync() (*Result, error) {
 				if !ok {
 					continue
 				}
-				if err := s.dir.AddUserToGroup(uid, g.ID); err == nil {
-					res.Memberships++
+				if err := s.dir.AddUserToGroup(uid, g.ID); err != nil {
+					res.Errors = append(res.Errors, fmt.Sprintf("group %s member %s: %v", name, m, err))
+					continue
 				}
+				res.Memberships++
 			}
 		}
 	}
@@ -197,9 +209,11 @@ func (s *Syncer) Sync() (*Result, error) {
 		} else {
 			for _, u := range all {
 				if strings.HasPrefix(u.Sub, "ldap:") && !seen[u.Sub] && !u.Disabled {
-					if err := s.dir.SetUserDisabled(u.ID, true); err == nil {
-						res.Deprovisioned++
+					if err := s.dir.SetUserDisabled(u.ID, true); err != nil {
+						res.Errors = append(res.Errors, fmt.Sprintf("deprovision %s: %v", u.Sub, err))
+						continue
 					}
+					res.Deprovisioned++
 				}
 			}
 		}
@@ -212,20 +226,39 @@ func (s *Syncer) getOrCreateGroup(name string) (*authx.Group, error) {
 	if err == nil {
 		return g, nil
 	}
-	if err == authx.ErrNoGroup {
+	if errors.Is(err, authx.ErrNoGroup) {
 		return s.dir.CreateGroup(name, "synced from LDAP")
 	}
 	return nil, err
 }
 
 // resolveMember maps an LDAP group member value (a full DN, or a bare uid for posixGroup) to a user.
+// DNs are normalized before comparison so incidental formatting differences (spacing/case) between a
+// member= value and the entry's DN don't silently drop members.
 func resolveMember(member string, byDN, byUID map[string]uint) (uint, bool) {
 	if strings.Contains(member, "=") { // looks like a DN
-		if id, ok := byDN[strings.ToLower(member)]; ok {
+		if id, ok := byDN[normalizeDN(member)]; ok {
 			return id, true
 		}
 		return 0, false
 	}
 	id, ok := byUID[member]
 	return id, ok
+}
+
+// normalizeDN parses a DN and rebuilds a canonical, lower-cased "attr=value,attr=value" form so two
+// DNs that differ only in spacing or attribute case compare equal. Falls back to a trimmed
+// lower-case of the raw string when the DN can't be parsed.
+func normalizeDN(dn string) string {
+	parsed, err := ldap.ParseDN(dn)
+	if err != nil {
+		return strings.ToLower(strings.TrimSpace(dn))
+	}
+	parts := make([]string, 0, len(parsed.RDNs))
+	for _, rdn := range parsed.RDNs {
+		for _, av := range rdn.Attributes {
+			parts = append(parts, strings.ToLower(av.Type)+"="+strings.ToLower(strings.TrimSpace(av.Value)))
+		}
+	}
+	return strings.Join(parts, ",")
 }

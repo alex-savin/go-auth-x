@@ -2,6 +2,7 @@ package gormstore
 
 import (
 	"encoding/hex"
+	"errors"
 
 	authx "github.com/alex-savin/go-auth-x"
 	"gorm.io/gorm"
@@ -38,7 +39,7 @@ func (s *Store) migrateTwoFactor() error {
 func (s *Store) TOTP(userID uint) (*authx.TOTPInfo, error) {
 	var t TOTPCredential
 	if err := s.db.First(&t, "user_id = ?", userID).Error; err != nil {
-		if err == gorm.ErrRecordNotFound {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, authx.ErrNoCredential
 		}
 		return nil, err
@@ -69,6 +70,19 @@ func (s *Store) DisableTOTP(userID uint) error {
 
 func (s *Store) SetTOTPLastStep(userID uint, step uint64) error {
 	return s.db.Model(&TOTPCredential{}).Where("user_id = ?", userID).Update("last_step", step).Error
+}
+
+// ClaimTOTPStep atomically advances last_step to step only if it is newer, via a single conditional
+// UPDATE (WHERE last_step < step). RowsAffected==1 means this request won the step — the DB serializes
+// concurrent claims, so a replayed code can't be accepted twice.
+func (s *Store) ClaimTOTPStep(userID uint, step uint64) (bool, error) {
+	res := s.db.Model(&TOTPCredential{}).
+		Where("user_id = ? AND last_step < ?", userID, step).
+		Update("last_step", step)
+	if res.Error != nil {
+		return false, res.Error
+	}
+	return res.RowsAffected == 1, nil
 }
 
 func (s *Store) ReplaceRecoveryCodes(userID uint, hashes [][]byte) error {
