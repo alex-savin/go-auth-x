@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.1] — 2026-07-02
+
+### Fixed
+
+- **`/auth/me` reports auth as enabled and reads the session in local-only mode.** The `Me` handler
+  branched on the OIDC-only `Enabled()` predicate, so a deployment with local methods on but OIDC off
+  (`SetLocalEnabled`, no issuer) reported `authEnabled:false` and never parsed the session cookie —
+  frontends could not render the signed-in state or a logout control despite an active gated session.
+  `Me` now treats local-enabled as auth-enabled and parses the session in that mode.
+
 ## [0.4.0] — 2026-07-02
 
 ### Security
@@ -209,6 +219,7 @@ First tagged release. A self-contained, embeddable authentication library for Go
 - **Trusted-proxy client-IP** — `X-Forwarded-For` honored only when the direct peer is a
   trusted proxy (`TRUSTED_PROXIES`, or private-range default), so the client IP can't be spoofed.
 
+[0.4.1]: https://github.com/alex-savin/go-auth-x/releases/tag/v0.4.1
 [0.4.0]: https://github.com/alex-savin/go-auth-x/releases/tag/v0.4.0
 [0.3.0]: https://github.com/alex-savin/go-auth-x/releases/tag/v0.3.0
 [0.2.0]: https://github.com/alex-savin/go-auth-x/releases/tag/v0.2.0

@@ -5,6 +5,12 @@ Direction and planned work for the library. Authoritative usage/feature docs liv
 
 ## Shipped
 
+### v0.4.1
+
+- **`/auth/me` local-only fix** — the `Me` handler branched on the OIDC-only `Enabled()` predicate, so
+  a local-methods-on / OIDC-off deployment reported `authEnabled:false` and never parsed the session;
+  it now treats local-enabled as auth-enabled and reads the session in that mode.
+
 ### v0.4.0
 
 - **Security hardening pass** (from a full audit) — fail-closed session signing on a weak/absent

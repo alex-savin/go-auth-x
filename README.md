@@ -536,7 +536,9 @@ go-auth-x/
 
 See **[ROADMAP.md](./ROADMAP.md)** for the full list and **[CHANGELOG.md](./CHANGELOG.md)** for details.
 
-- **v0.4.0** (latest): a **security-hardening pass** from a full audit — fail-closed session signing,
+- **v0.4.1** (latest): **`/auth/me` fix** — reports `authEnabled` and reads the session in local-only
+  mode (local methods on, OIDC off), so frontends render the signed-in state and logout control.
+- **v0.4.0**: a **security-hardening pass** from a full audit — fail-closed session signing,
   the account-linking invariant enforced on the OIDC callback, Apple `form_post` CSRF fix, 2FA/reauth
   throttling, an atomic TOTP replay guard, request body-size + SCIM filter-depth limits, plus LDAP
   paging, email/SMTP hardening, `Config.BrandName`, and bcrypt rehash-on-login. **Breaking:**
