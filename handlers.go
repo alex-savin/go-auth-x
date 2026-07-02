@@ -242,8 +242,10 @@ func (a *Authenticator) postLogoutURL() string {
 }
 
 // Me reports auth status + the current identity for the SPA. Always 200.
+// authEnabled follows enforcing() — true when ANY auth method gates requests (OIDC OR in-app
+// local auth) — so a password/passkey-only deployment still reports signed-in state.
 func (a *Authenticator) Me(c *reqCtx) {
-	if !a.Enabled() {
+	if !a.enforcing() {
 		c.JSON(http.StatusOK, H{"authEnabled": false, "authenticated": false})
 		return
 	}
