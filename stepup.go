@@ -77,6 +77,16 @@ func (a *Authenticator) ReAuth(c *reqCtx) {
 		c.JSON(http.StatusUnauthorized, H{"error": "unauthenticated"})
 		return
 	}
+	// Throttle: reauth verifies a password OR the same brute-forceable 6-digit TOTP code space that
+	// /2fa/verify guards, so a session that hasn't proven the second factor must not hammer it.
+	if a.ipLimiter != nil && !a.ipLimiter.Allow("reauth:"+c.ClientIP()) {
+		c.JSON(http.StatusTooManyRequests, H{"error": "too many attempts — wait and try again"})
+		return
+	}
+	if a.acctLimiter != nil && !a.acctLimiter.Allow("reauth:"+au.Sub) {
+		c.JSON(http.StatusTooManyRequests, H{"error": "too many attempts — wait and try again"})
+		return
+	}
 	var body struct{ Password, Code string }
 	_ = c.ShouldBindJSON(&body)
 

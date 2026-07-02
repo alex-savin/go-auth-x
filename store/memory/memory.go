@@ -22,7 +22,6 @@ type user struct {
 	emailVerified        bool
 	disabled             bool
 	webauthnHandle       []byte
-	lastLoginAt          time.Time
 	createdAt, updatedAt time.Time
 }
 
@@ -219,7 +218,9 @@ func (s *Store) TouchPasskey(credentialID []byte, signCount uint32) error {
 	defer s.mu.Unlock()
 	for _, pk := range s.passkeys {
 		if string(pk.p.CredentialID) == string(credentialID) {
-			pk.p.SignCount = signCount
+			if signCount > pk.p.SignCount { // sign counts are monotonic — never let a stale/replayed assertion regress it
+				pk.p.SignCount = signCount
+			}
 			pk.p.LastUsedAt = time.Now()
 		}
 	}
@@ -330,15 +331,29 @@ func (s *Store) UpsertUserOnLogin(sub, email, name string, emailVerified bool) (
 	defer s.mu.Unlock()
 	email = norm(email)
 	if u := s.findBySub(sub); u != nil {
-		u.email, u.name, u.lastLoginAt = email, name, time.Now()
+		// Uphold the one-user-per-email invariant gormstore enforces with a unique index: refuse to
+		// move this row onto an email another row already owns.
+		if email != u.email {
+			if other := s.findByEmail(email); other != nil && other.id != u.id {
+				return nil, authx.ErrEmailConflict
+			}
+		}
+		u.email, u.name = email, name
 		if emailVerified {
 			u.emailVerified = true
 		}
 		return view(u), nil
 	}
 	if existing := s.findByEmail(email); existing != nil {
-		if strings.HasPrefix(existing.sub, "bootstrap:") || existing.emailVerified {
-			existing.sub, existing.name, existing.lastLoginAt = sub, name, time.Now()
+		bootstrap := strings.HasPrefix(existing.sub, "bootstrap:")
+		if bootstrap || existing.emailVerified {
+			// Rebind a verified row to a new subject only when THIS login proved the email; an
+			// unproven login must not seize a verified account. Bootstrap rows are operator-seeded
+			// and safe to claim on first login. (Mirrors gormstore.)
+			if !bootstrap && !emailVerified {
+				return nil, authx.ErrEmailConflict
+			}
+			existing.sub, existing.name = sub, name
 			if emailVerified {
 				existing.emailVerified = true
 			}
@@ -352,7 +367,7 @@ func (s *Store) UpsertUserOnLogin(sub, email, name string, emailVerified bool) (
 		s.deleteUserCascadeLocked(existing.id)
 	}
 	s.seq++
-	u := &user{id: s.seq, sub: sub, email: email, name: name, emailVerified: emailVerified, lastLoginAt: time.Now(), createdAt: time.Now(), updatedAt: time.Now()}
+	u := &user{id: s.seq, sub: sub, email: email, name: name, emailVerified: emailVerified, createdAt: time.Now(), updatedAt: time.Now()}
 	s.users[u.id] = u
 	return view(u), nil
 }
@@ -362,6 +377,8 @@ func (s *Store) deleteUserCascadeLocked(id uint) {
 	delete(s.users, id)
 	delete(s.passwords, id)
 	delete(s.memberships, id)
+	delete(s.totp, id)
+	delete(s.recovery, id)
 	for pkid, pk := range s.passkeys {
 		if pk.userID == id {
 			delete(s.passkeys, pkid)

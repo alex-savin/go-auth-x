@@ -91,8 +91,18 @@ func (s *Sender) Send(to, subject, htmlBody, textBody string) error {
 	return c.Quit()
 }
 
+// sanitizeHeader strips CR/LF (and anything after) so a caller-supplied To/Subject/From value can't
+// inject extra SMTP headers or a body (header/SMTP injection).
+func sanitizeHeader(v string) string {
+	if i := strings.IndexAny(v, "\r\n"); i >= 0 {
+		v = v[:i]
+	}
+	return v
+}
+
 // buildMIME assembles a multipart/alternative (text + html) message.
 func buildMIME(from, to, subject, text, html string) []byte {
+	from, to, subject = sanitizeHeader(from), sanitizeHeader(to), sanitizeHeader(subject)
 	boundary := fmt.Sprintf("sweep-%d", time.Now().UnixNano())
 	var b strings.Builder
 	b.WriteString("From: " + from + "\r\n")

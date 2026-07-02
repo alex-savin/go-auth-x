@@ -1,6 +1,7 @@
 package authx
 
 import (
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
@@ -10,11 +11,19 @@ import (
 // --- access control: groups (the per-group analog of an IdP's per-client access, for a BFF) ---
 
 // RequireGroupsHTTP is net/http middleware permitting only principals (a session user gated by
-// GateHTTP, OR an API key) in at least one of the named groups. Empty names = any authenticated
-// principal.
+// GateHTTP, OR a valid API key) in at least one of the named groups. Empty names = any AUTHENTICATED
+// principal (a session or a valid key) — NOT anonymous access; an unauthenticated request is refused.
 func (a *Authenticator) RequireGroupsHTTP(groups ...string) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if len(groups) == 0 {
+				if !a.authenticated(r) {
+					writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: authentication required"})
+					return
+				}
+				next.ServeHTTP(w, r)
+				return
+			}
 			if !hasAnyGroup(a.requestGroups(r), groups) {
 				writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: requires group membership"})
 				return
@@ -22,6 +31,19 @@ func (a *Authenticator) RequireGroupsHTTP(groups ...string) func(http.Handler) h
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// authenticated reports whether the request carries a principal: a session attached by GateHTTP, or a
+// valid API-key Bearer token.
+func (a *Authenticator) authenticated(r *http.Request) bool {
+	if _, _, ok := SessionFromRequest(r); ok {
+		return true
+	}
+	if key := bearerToken(r.Header.Get("Authorization")); key != "" {
+		_, ok := a.ValidateAPIKey(key)
+		return ok
+	}
+	return false
 }
 
 // GroupsFromRequest returns the groups of the session attached by GateHTTP.
@@ -94,28 +116,35 @@ func bearerToken(h string) string {
 // adminGuard permits the instance owner (OWNER_EMAIL session, resolved from the cookie) or a valid
 // API key carrying the 'admin' scope. The owner mints the first admin key via an owner session.
 func (a *Authenticator) adminGuard(c *reqCtx) bool {
+	// An admin-scoped API key OR an owner session grants access. Check BOTH before failing, so a valid
+	// owner session isn't rejected merely because a stray/invalid Bearer header is also present.
+	keyPresent, keyValidNoScope := false, false
 	if key := bearerToken(c.GetHeader("Authorization")); key != "" {
-		info, ok := a.ValidateAPIKey(key)
-		if !ok {
-			// RFC 6750 §3.1: an invalid/expired token is 401 invalid_token with a challenge.
-			c.w.Header().Set("WWW-Authenticate", `Bearer realm="auth", error="invalid_token"`)
-			c.JSON(http.StatusUnauthorized, H{"error": "API key is invalid or expired"})
-			return false
+		keyPresent = true
+		if info, ok := a.ValidateAPIKey(key); ok {
+			if KeyHasScope(info, "admin") {
+				return true
+			}
+			keyValidNoScope = true
 		}
-		if !KeyHasScope(info, "admin") {
-			// A valid key that merely lacks the scope is 403 insufficient_scope (RFC 6750 §3.1).
-			c.JSON(http.StatusForbidden, H{"error": "insufficient_scope: the 'admin' scope is required"})
-			return false
-		}
-		return true
 	}
 	if sc := a.sessionOf(c); sc != nil && a.cfg.OwnerEmail != "" &&
 		strings.EqualFold(strings.TrimSpace(sc.Email), a.cfg.OwnerEmail) {
 		return true
 	}
-	// No credentials presented → challenge for a Bearer token (RFC 6750 §3).
-	c.w.Header().Set("WWW-Authenticate", `Bearer realm="auth"`)
-	c.JSON(http.StatusUnauthorized, H{"error": "owner session or API key with 'admin' scope required"})
+	switch {
+	case keyValidNoScope:
+		// A valid key that merely lacks the scope is 403 insufficient_scope (RFC 6750 §3.1).
+		c.JSON(http.StatusForbidden, H{"error": "insufficient_scope: the 'admin' scope is required"})
+	case keyPresent:
+		// RFC 6750 §3.1: an invalid/expired token is 401 invalid_token with a challenge.
+		c.w.Header().Set("WWW-Authenticate", `Bearer realm="auth", error="invalid_token"`)
+		c.JSON(http.StatusUnauthorized, H{"error": "API key is invalid or expired"})
+	default:
+		// No credentials presented → challenge for a Bearer token (RFC 6750 §3).
+		c.w.Header().Set("WWW-Authenticate", `Bearer realm="auth"`)
+		c.JSON(http.StatusUnauthorized, H{"error": "owner session or API key with 'admin' scope required"})
+	}
 	return false
 }
 
@@ -135,9 +164,24 @@ func (a *Authenticator) adminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /auth/admin/apikeys/{id}", a.wrap(a.adminRevokeKey))
 }
 
-func paramUint(c *reqCtx, name string) uint {
-	n, _ := strconv.ParseUint(c.Param(name), 10, 64)
-	return uint(n)
+// paramUint parses a positive uint path parameter; on a missing/malformed/zero value it writes a 400
+// and returns ok=false so the caller stops (rather than silently coercing to id 0).
+func paramUint(c *reqCtx, name string) (uint, bool) {
+	n, err := strconv.ParseUint(c.Param(name), 10, 64)
+	if err != nil || n == 0 {
+		c.JSON(http.StatusBadRequest, H{"error": "invalid " + name})
+		return 0, false
+	}
+	return uint(n), true
+}
+
+// adminFail logs the internal error (for the operator) and returns a generic message to the client,
+// so store internals (SQL text, driver errors) never leak over the admin API.
+func (a *Authenticator) adminFail(c *reqCtx, code int, msg string, err error) {
+	if err != nil {
+		log.Printf("authx admin: %s: %v", msg, err)
+	}
+	c.JSON(code, H{"error": msg})
 }
 
 func (a *Authenticator) adminListGroups(c *reqCtx) {
@@ -146,7 +190,7 @@ func (a *Authenticator) adminListGroups(c *reqCtx) {
 	}
 	gs, err := a.dir.Groups()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, H{"error": err.Error()})
+		a.adminFail(c, http.StatusInternalServerError, "could not list groups", err)
 		return
 	}
 	c.JSON(http.StatusOK, H{"groups": gs})
@@ -164,9 +208,14 @@ func (a *Authenticator) adminCreateGroup(c *reqCtx) {
 		c.JSON(http.StatusBadRequest, H{"error": "name required"})
 		return
 	}
+	// A duplicate name is a client-side conflict (409); anything else from the store is a 500.
+	if existing, gerr := a.dir.GroupByName(strings.TrimSpace(body.Name)); gerr == nil && existing != nil {
+		c.JSON(http.StatusConflict, H{"error": "a group with that name already exists"})
+		return
+	}
 	g, err := a.dir.CreateGroup(body.Name, body.Description)
 	if err != nil {
-		c.JSON(http.StatusConflict, H{"error": err.Error()})
+		a.adminFail(c, http.StatusInternalServerError, "could not create group", err)
 		return
 	}
 	c.JSON(http.StatusOK, g)
@@ -176,8 +225,12 @@ func (a *Authenticator) adminDeleteGroup(c *reqCtx) {
 	if !a.adminGuard(c) {
 		return
 	}
-	if err := a.dir.DeleteGroup(paramUint(c, "id")); err != nil {
-		c.JSON(http.StatusInternalServerError, H{"error": err.Error()})
+	id, ok := paramUint(c, "id")
+	if !ok {
+		return
+	}
+	if err := a.dir.DeleteGroup(id); err != nil {
+		a.adminFail(c, http.StatusInternalServerError, "could not delete group", err)
 		return
 	}
 	c.JSON(http.StatusOK, H{"ok": true})
@@ -187,8 +240,13 @@ func (a *Authenticator) adminAddMember(c *reqCtx) {
 	if !a.adminGuard(c) {
 		return
 	}
-	if err := a.dir.AddUserToGroup(paramUint(c, "userId"), paramUint(c, "id")); err != nil {
-		c.JSON(http.StatusInternalServerError, H{"error": err.Error()})
+	uid, ok := paramUint(c, "userId")
+	gid, ok2 := paramUint(c, "id")
+	if !ok || !ok2 {
+		return
+	}
+	if err := a.dir.AddUserToGroup(uid, gid); err != nil {
+		a.adminFail(c, http.StatusInternalServerError, "could not add member", err)
 		return
 	}
 	c.JSON(http.StatusOK, H{"ok": true})
@@ -198,8 +256,13 @@ func (a *Authenticator) adminRemoveMember(c *reqCtx) {
 	if !a.adminGuard(c) {
 		return
 	}
-	if err := a.dir.RemoveUserFromGroup(paramUint(c, "userId"), paramUint(c, "id")); err != nil {
-		c.JSON(http.StatusInternalServerError, H{"error": err.Error()})
+	uid, ok := paramUint(c, "userId")
+	gid, ok2 := paramUint(c, "id")
+	if !ok || !ok2 {
+		return
+	}
+	if err := a.dir.RemoveUserFromGroup(uid, gid); err != nil {
+		a.adminFail(c, http.StatusInternalServerError, "could not remove member", err)
 		return
 	}
 	c.JSON(http.StatusOK, H{"ok": true})
@@ -209,9 +272,13 @@ func (a *Authenticator) adminGroupMembers(c *reqCtx) {
 	if !a.adminGuard(c) {
 		return
 	}
-	members, err := a.dir.GroupMembers(paramUint(c, "id"))
+	id, ok := paramUint(c, "id")
+	if !ok {
+		return
+	}
+	members, err := a.dir.GroupMembers(id)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, H{"error": err.Error()})
+		a.adminFail(c, http.StatusInternalServerError, "could not list members", err)
 		return
 	}
 	c.JSON(http.StatusOK, H{"members": members})
@@ -223,7 +290,7 @@ func (a *Authenticator) adminListUsers(c *reqCtx) {
 	}
 	users, err := a.dir.ListUsers()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, H{"error": err.Error()})
+		a.adminFail(c, http.StatusInternalServerError, "could not list users", err)
 		return
 	}
 	c.JSON(http.StatusOK, H{"users": users})
@@ -233,12 +300,16 @@ func (a *Authenticator) adminSetDisabled(c *reqCtx) {
 	if !a.adminGuard(c) {
 		return
 	}
+	id, ok := paramUint(c, "id")
+	if !ok {
+		return
+	}
 	var body struct {
 		Disabled bool `json:"disabled"`
 	}
 	_ = c.ShouldBindJSON(&body)
-	if err := a.dir.SetUserDisabled(paramUint(c, "id"), body.Disabled); err != nil {
-		c.JSON(http.StatusInternalServerError, H{"error": err.Error()})
+	if err := a.dir.SetUserDisabled(id, body.Disabled); err != nil {
+		a.adminFail(c, http.StatusInternalServerError, "could not update user", err)
 		return
 	}
 	c.JSON(http.StatusOK, H{"ok": true, "disabled": body.Disabled})
@@ -250,7 +321,7 @@ func (a *Authenticator) adminListKeys(c *reqCtx) {
 	}
 	keys, err := a.dir.ListAPIKeys()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, H{"error": err.Error()})
+		a.adminFail(c, http.StatusInternalServerError, "could not list API keys", err)
 		return
 	}
 	c.JSON(http.StatusOK, H{"apiKeys": keys})
@@ -263,7 +334,7 @@ func (a *Authenticator) adminCreateKey(c *reqCtx) {
 	var body struct {
 		Name      string   `json:"name"`
 		Groups    []string `json:"groups"`
-		Scopes    []string `json:"scopes"`    // optional; empty = unrestricted (e.g. ["admin"], ["scim"])
+		Scopes    []string `json:"scopes"`    // deny-by-default: empty grants NOTHING; e.g. ["admin"], ["scim"], ["*"]
 		ExpiresAt *string  `json:"expiresAt"` // optional RFC3339
 	}
 	if err := c.ShouldBindJSON(&body); err != nil || strings.TrimSpace(body.Name) == "" {
@@ -282,7 +353,7 @@ func (a *Authenticator) adminCreateKey(c *reqCtx) {
 	raw, prefix, hash := generateAPIKey()
 	info, err := a.dir.CreateAPIKey(body.Name, body.Groups, body.Scopes, prefix, hash, expires)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, H{"error": err.Error()})
+		a.adminFail(c, http.StatusInternalServerError, "could not create API key", err)
 		return
 	}
 	// The raw key is returned ONCE here and never again.
@@ -293,8 +364,12 @@ func (a *Authenticator) adminRevokeKey(c *reqCtx) {
 	if !a.adminGuard(c) {
 		return
 	}
-	if err := a.dir.RevokeAPIKey(paramUint(c, "id")); err != nil {
-		c.JSON(http.StatusInternalServerError, H{"error": err.Error()})
+	id, ok := paramUint(c, "id")
+	if !ok {
+		return
+	}
+	if err := a.dir.RevokeAPIKey(id); err != nil {
+		a.adminFail(c, http.StatusInternalServerError, "could not revoke API key", err)
 		return
 	}
 	c.JSON(http.StatusOK, H{"ok": true})

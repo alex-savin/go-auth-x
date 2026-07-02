@@ -29,10 +29,10 @@ func (a *Authenticator) Handler() http.Handler {
 	return a.CSRFHTTP(mux)
 }
 
-// GateHTTP is net/http middleware that enforces a valid session (mirrors Middleware): public
-// paths pass; missing/invalid sessions get a 401 JSON for /api and /ws, else a redirect to the
-// branded landing. On success it stashes the session in the request context (see
-// SessionFromRequest) and ensures a CSRF cookie. No-op when auth isn't enforced.
+// GateHTTP is net/http middleware that enforces a valid session: public paths pass; missing/invalid
+// sessions get a 401 JSON for /api and /ws, else a redirect to the branded landing. A valid API-key
+// Bearer is also admitted (for RequireGroupsHTTP downstream). On success it stashes the session in the
+// request context (see SessionFromRequest) and ensures a CSRF cookie. No-op when auth isn't enforced.
 func (a *Authenticator) GateHTTP(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !a.enforcing() {
@@ -46,10 +46,19 @@ func (a *Authenticator) GateHTTP(next http.Handler) http.Handler {
 		}
 		sc, err := parseSession(a.cfg.SessionSecret, cookieValue(r, sessionCookie))
 		if err != nil {
-			if strings.HasPrefix(p, "/api") || strings.HasPrefix(p, "/ws") {
+			// API-key (Bearer) principals authenticate without a session cookie — let them through so
+			// RequireGroupsHTTP can authorize by the key's groups (CSRFHTTP already skips Bearer).
+			if key := bearerToken(r.Header.Get("Authorization")); key != "" {
+				if _, ok := a.ValidateAPIKey(key); ok {
+					next.ServeHTTP(w, r)
+					return
+				}
+			}
+			if p == "/api" || p == "/ws" || strings.HasPrefix(p, "/api/") || strings.HasPrefix(p, "/ws/") {
 				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthenticated"})
 			} else {
-				http.Redirect(w, r, "/welcome?next="+url.QueryEscape(p), http.StatusFound)
+				// Preserve the full target (path + query) so the post-login redirect lands correctly.
+				http.Redirect(w, r, "/welcome?next="+url.QueryEscape(r.URL.RequestURI()), http.StatusFound)
 			}
 			return
 		}
@@ -59,7 +68,7 @@ func (a *Authenticator) GateHTTP(next http.Handler) http.Handler {
 }
 
 // CSRFHTTP is net/http middleware that enforces the double-submit CSRF token on state-changing
-// /api and /auth requests (mirrors CSRFMiddleware), skipping the unauthenticated entry points.
+// /api and /auth requests, skipping the unauthenticated entry points and social callbacks.
 func (a *Authenticator) CSRFHTTP(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !a.enforcing() {
@@ -72,7 +81,7 @@ func (a *Authenticator) CSRFHTTP(next http.Handler) http.Handler {
 			return
 		}
 		p := r.URL.Path
-		if (!strings.HasPrefix(p, "/api/") && !strings.HasPrefix(p, "/auth/")) || csrfExempt[p] {
+		if (!strings.HasPrefix(p, "/api/") && !strings.HasPrefix(p, "/auth/")) || csrfExempt[p] || isSocialCallback(p) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -120,10 +129,7 @@ func (a *Authenticator) ensureCSRFHTTP(w http.ResponseWriter, r *http.Request) {
 	if cookieValue(r, csrfCookie) != "" {
 		return
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name: csrfCookie, Value: randToken(), Path: "/", MaxAge: int(sessionTTL.Seconds()),
-		Secure: a.cookieSecureHTTP(r), HttpOnly: false, SameSite: http.SameSiteLaxMode,
-	})
+	a.writeCSRFCookie(w, r)
 }
 
 func (a *Authenticator) csrfValidHTTP(r *http.Request) bool {

@@ -51,6 +51,22 @@ func (s *Store) SetTOTPLastStep(userID uint, step uint64) error {
 	return nil
 }
 
+// ClaimTOTPStep atomically advances lastStep to step iff step is newer, under the store lock, so the
+// replay check and the write are one operation (no TOCTOU).
+func (s *Store) ClaimTOTPStep(userID uint, step uint64) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	r := s.totp[userID]
+	if r == nil {
+		return false, authx.ErrNoCredential
+	}
+	if step <= r.lastStep {
+		return false, nil
+	}
+	r.lastStep = step
+	return true, nil
+}
+
 func (s *Store) ReplaceRecoveryCodes(userID uint, hashes [][]byte) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

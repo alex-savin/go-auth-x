@@ -241,8 +241,13 @@ func (s *Store) AddPasskey(userID uint, p authx.Passkey) error {
 }
 
 func (s *Store) TouchPasskey(credentialID []byte, signCount uint32) error {
+	// One atomic UPDATE: always refresh last-used, but advance the sign count only forward (it's
+	// monotonic per WebAuthn) so a stale/replayed assertion can't regress it under concurrency.
 	return s.db.Model(&WebauthnCredential{}).Where("credential_id = ?", credentialID).
-		Updates(map[string]any{"sign_count": signCount, "last_used_at": time.Now()}).Error
+		Updates(map[string]any{
+			"sign_count":   gorm.Expr("CASE WHEN sign_count < ? THEN ? ELSE sign_count END", signCount, signCount),
+			"last_used_at": time.Now(),
+		}).Error
 }
 
 func (s *Store) RemovePasskey(userID, id uint) error {
@@ -369,7 +374,15 @@ func (s *Store) UpsertUserOnLogin(sub, email, name string, emailVerified bool) (
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		var existing User
 		if e2 := s.db.Where("email = ?", email).First(&existing).Error; e2 == nil {
-			if strings.HasPrefix(existing.Sub, "bootstrap:") || existing.EmailVerified {
+			bootstrap := strings.HasPrefix(existing.Sub, "bootstrap:")
+			if bootstrap || existing.EmailVerified {
+				// Rebinding an existing (verified) row to a NEW subject is safe only when THIS login
+				// proved the email — otherwise an unproven login (e.g. an IdP that permits unverified
+				// email claims) could seize a verified account. Bootstrap placeholders are
+				// operator-seeded and safe to claim on first login regardless.
+				if !bootstrap && !emailVerified {
+					return nil, authx.ErrEmailConflict
+				}
 				existing.Sub, existing.Name, existing.LastLoginAt = sub, name, time.Now()
 				if emailVerified {
 					existing.EmailVerified = true
@@ -386,9 +399,18 @@ func (s *Store) UpsertUserOnLogin(sub, email, name string, emailVerified bool) (
 			if !emailVerified {
 				return nil, authx.ErrEmailConflict
 			}
-			if derr := s.deleteUserCascade(existing.ID); derr != nil {
-				return nil, derr
+			// Reclaim atomically: delete the squatter AND create the clean user in one transaction,
+			// so a crash between the two can't leave the email owned by nobody (and thus unusable).
+			u = User{Sub: sub, Email: email, Name: name, EmailVerified: emailVerified, CreatedAt: time.Now(), LastLoginAt: time.Now()}
+			if err := s.db.Transaction(func(tx *gorm.DB) error {
+				if derr := cascadeDeletes(tx, existing.ID); derr != nil {
+					return derr
+				}
+				return tx.Create(&u).Error
+			}); err != nil {
+				return nil, err
 			}
+			return toAuthUser(&u), nil
 		}
 		u = User{Sub: sub, Email: email, Name: name, EmailVerified: emailVerified, CreatedAt: time.Now(), LastLoginAt: time.Now()}
 		if err := s.db.Create(&u).Error; err != nil {
@@ -414,12 +436,16 @@ func (s *Store) UpsertUserOnLogin(sub, email, name string, emailVerified bool) (
 // LoginAudit rows are deliberately NOT deleted — the forensic trail is kept, and orphaned audit
 // rows grant no access (they can't resolve to a login).
 func (s *Store) deleteUserCascade(id uint) error {
-	return s.db.Transaction(func(tx *gorm.DB) error {
-		for _, m := range []any{&PasswordCredential{}, &WebauthnCredential{}, &OAuthIdentity{}, &AuthToken{}, &GroupMembership{}} {
-			if err := tx.Where("user_id = ?", id).Delete(m).Error; err != nil {
-				return err
-			}
+	return s.db.Transaction(func(tx *gorm.DB) error { return cascadeDeletes(tx, id) })
+}
+
+// cascadeDeletes removes a user + everything keyed to it on the given tx handle (no transaction of
+// its own, so a caller can compose it with a create for an atomic reclaim).
+func cascadeDeletes(tx *gorm.DB, id uint) error {
+	for _, m := range []any{&PasswordCredential{}, &WebauthnCredential{}, &OAuthIdentity{}, &AuthToken{}, &GroupMembership{}, &TOTPCredential{}, &RecoveryCode{}} {
+		if err := tx.Where("user_id = ?", id).Delete(m).Error; err != nil {
+			return err
 		}
-		return tx.Delete(&User{}, id).Error
-	})
+	}
+	return tx.Delete(&User{}, id).Error
 }

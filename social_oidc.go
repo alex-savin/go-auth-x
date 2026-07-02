@@ -100,7 +100,9 @@ func oidcSocialIdentity(ctx context.Context, verifier *oidc.IDTokenVerifier, cli
 	}
 	email = cl.Email
 	verified := cl.EmailVerified != nil && *cl.EmailVerified
-	if !verified && assumeVerified {
+	// assumeVerified only fills in for an ABSENT claim (the pointer is nil); an explicit
+	// email_verified:false is always honored — a provider that says "not verified" is never trusted.
+	if cl.EmailVerified == nil && assumeVerified {
 		if email == "" && strings.Contains(cl.PreferredUsername, "@") {
 			email = cl.PreferredUsername // Entra puts the UPN (an email) here when email is absent
 		}

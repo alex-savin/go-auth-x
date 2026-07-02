@@ -67,6 +67,10 @@ func (a *Authenticator) TwoFactorWebauthnFinish(c *reqCtx) {
 		c.JSON(http.StatusUnauthorized, H{"error": "your login session expired — sign in again"})
 		return
 	}
+	if u.Disabled { // parity with the primary passkey login: a disabled user can't complete 2FA
+		c.JSON(http.StatusForbidden, H{"error": "this account has been disabled"})
+		return
+	}
 	sd, err := a.getWauthnFlow(c)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, H{"error": "verification expired — try again"})

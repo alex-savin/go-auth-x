@@ -92,6 +92,11 @@ func (a *Authenticator) TOTPDisable(c *reqCtx) {
 		c.JSON(http.StatusUnauthorized, H{"error": "unauthenticated"})
 		return
 	}
+	// Throttle: disabling verifies the same brute-forceable 6-digit code space as /2fa/verify.
+	if a.ipLimiter != nil && !a.ipLimiter.Allow("2fa:"+c.ClientIP()) {
+		c.JSON(http.StatusTooManyRequests, H{"error": "too many attempts — wait and try again"})
+		return
+	}
 	var body struct{ Code string }
 	_ = c.ShouldBindJSON(&body)
 	info, ierr := a.twoFactor.TOTP(au.ID)
@@ -139,6 +144,10 @@ func (a *Authenticator) TwoFactorVerify(c *reqCtx) {
 		c.JSON(http.StatusUnauthorized, H{"error": "sign in again"})
 		return
 	}
+	if u.Disabled { // a user disabled between the first and second factor must not complete the login
+		c.JSON(http.StatusForbidden, H{"error": "this account has been disabled"})
+		return
+	}
 	var body struct{ Code string }
 	if c.ShouldBindJSON(&body) != nil {
 		c.JSON(http.StatusBadRequest, H{"error": "invalid request"})
@@ -170,15 +179,13 @@ func (a *Authenticator) TwoFactorPending(c *reqCtx) {
 	c.JSON(http.StatusOK, H{"pending": err == nil})
 }
 
-// verifySecondFactor accepts a valid TOTP code (guarding replay via LastStep) OR a single-use
-// recovery code.
+// verifySecondFactor accepts a valid TOTP code (guarding replay atomically via ClaimTOTPStep) OR a
+// single-use recovery code. The replay check + last-step write are one atomic store operation so
+// concurrent requests can't both accept the same code (TOCTOU); a store error fails closed.
 func (a *Authenticator) verifySecondFactor(userID uint, info *TOTPInfo, code string) bool {
 	if step, ok := totpValidate(info.Secret, code, time.Now()); ok {
-		if step <= info.LastStep { // this step was already consumed — reject replay
-			return false
-		}
-		_ = a.twoFactor.SetTOTPLastStep(userID, step)
-		return true
+		claimed, err := a.twoFactor.ClaimTOTPStep(userID, step)
+		return err == nil && claimed
 	}
 	used, _ := a.twoFactor.ConsumeRecoveryCode(userID, recoveryHash(code))
 	return used

@@ -44,7 +44,15 @@ type flowClaims struct {
 	jwt.RegisteredClaims
 }
 
+// minSessionSecret is the floor for the HMAC key that signs every cookie. jwt's HS256 SignedString
+// accepts an empty/short key without error, so without this guard a misconfigured deployment (local
+// auth with SESSION_SECRET unset) would silently mint cookies forgeable by anyone. Fail closed.
+const minSessionSecret = 32
+
 func signJWT(secret []byte, claims jwt.Claims) (string, error) {
+	if len(secret) < minSessionSecret {
+		return "", errors.New("authx: refusing to sign a cookie — SESSION_SECRET must be at least 32 bytes")
+	}
 	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString(secret)
 }
 
@@ -57,7 +65,7 @@ func parseJWT(secret []byte, token string, dest jwt.Claims, audience string) err
 			return nil, errors.New("unexpected signing method")
 		}
 		return secret, nil
-	}, jwt.WithAudience(audience), jwt.WithExpirationRequired())
+	}, jwt.WithValidMethods([]string{"HS256"}), jwt.WithAudience(audience), jwt.WithExpirationRequired())
 	return err
 }
 

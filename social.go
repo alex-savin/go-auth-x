@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"strconv"
 	"time"
@@ -114,6 +115,10 @@ func (a *Authenticator) SocialCallback(c *reqCtx) {
 		c.JSON(http.StatusNotFound, H{"error": "provider not enabled"})
 		return
 	}
+	if a.creds == nil { // social login links/creates local users; without a credential store it can't proceed
+		c.JSON(http.StatusInternalServerError, H{"error": "sign-in unavailable"})
+		return
+	}
 	ctx := c.Request.Context()
 	flowTok, _ := c.Cookie(flowCookie)
 	fc, err := parseFlow(a.cfg.SessionSecret, flowTok)
@@ -207,7 +212,7 @@ func (a *Authenticator) SocialCallback(c *reqCtx) {
 		}
 		subject, email, name, err = oidcSocialIdentity(ctx, p.verifier, p.clientID, tok, fc.Nonce, p.assumeVerified)
 		if err != nil {
-			c.JSON(http.StatusUnauthorized, H{"error": err.Error()})
+			c.JSON(http.StatusForbidden, H{"error": err.Error()}) // 403, matching the other providers' identity failures
 			return
 		}
 	}
@@ -340,29 +345,25 @@ func hmacSHA256Hex(key, msg string) string {
 	return hex.EncodeToString(m.Sum(nil))
 }
 
-// getJSONPlain is getJSON without GitHub's Accept header (for non-GitHub providers).
+// getJSONPlain GETs url and decodes the JSON body (for non-GitHub providers, no special Accept).
 func getJSONPlain(ctx context.Context, client *http.Client, url string, dest any) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return err
-	}
-	res, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer res.Body.Close()
-	if res.StatusCode != http.StatusOK {
-		return errors.New("provider returned " + res.Status)
-	}
-	return json.NewDecoder(res.Body).Decode(dest)
+	return getJSONWithAccept(ctx, client, url, "", dest)
 }
 
+// getJSON GETs url with GitHub's Accept header and decodes the JSON body.
 func getJSON(ctx context.Context, client *http.Client, url string, dest any) error {
+	return getJSONWithAccept(ctx, client, url, "application/vnd.github+json", dest)
+}
+
+// getJSONWithAccept is the shared GET+decode used by both helpers (optional Accept header).
+func getJSONWithAccept(ctx context.Context, client *http.Client, url, accept string, dest any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
 	}
-	req.Header.Set("Accept", "application/vnd.github+json")
+	if accept != "" {
+		req.Header.Set("Accept", accept)
+	}
 	res, err := client.Do(req)
 	if err != nil {
 		return err
@@ -371,5 +372,5 @@ func getJSON(ctx context.Context, client *http.Client, url string, dest any) err
 	if res.StatusCode != http.StatusOK {
 		return errors.New("provider returned " + res.Status)
 	}
-	return json.NewDecoder(res.Body).Decode(dest)
+	return json.NewDecoder(io.LimitReader(res.Body, maxRequestBody)).Decode(dest)
 }

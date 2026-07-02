@@ -49,14 +49,6 @@ func (a *Authenticator) publicPath(p string) bool {
 	return false
 }
 
-// sessionFrom returns the session GateHTTP attached to the request context (the gating path).
-func sessionFrom(c *reqCtx) *SessionClaims {
-	if sc, ok := c.Request.Context().Value(sessionCtxKey).(*SessionClaims); ok {
-		return sc
-	}
-	return nil
-}
-
 // sessionOf resolves the session straight from the cookie — for /auth handlers (admin API, account
 // endpoints) that self-gate rather than sitting behind GateHTTP.
 func (a *Authenticator) sessionOf(c *reqCtx) *SessionClaims {

@@ -15,12 +15,15 @@ const bcryptCost = 12
 // so response timing doesn't leak whether an email is registered.
 var dummyHash, _ = bcrypt.GenerateFromPassword([]byte("timing-equalizer-not-a-real-password"), bcryptCost)
 
-// a tiny embedded set of the most-common breached passwords (NIST 800-63B: block the worst,
-// don't impose composition rules).
+// a tiny embedded set of the most-common breached passwords (NIST 800-63B: block the worst, don't
+// impose composition rules). Only entries meeting the 10-char minimum are useful here (shorter ones
+// are already rejected by the length check), so every entry is >= 10 chars. A real deployment should
+// screen against a full breach corpus (e.g. HIBP) rather than this illustrative set.
 var commonPasswords = map[string]bool{
-	"password": true, "password1": true, "12345678": true, "123456789": true, "1234567890": true,
-	"qwertyuiop": true, "qwerty123": true, "111111111": true, "iloveyou": true, "admin123": true,
-	"welcome1": true, "letmein1": true, "password123": true, "changeme": true, "trustno1": true,
+	"1234567890": true, "12345678901": true, "123456789012": true, "qwertyuiop": true,
+	"password123": true, "password1234": true, "qwerty12345": true, "1q2w3e4r5t": true,
+	"1qaz2wsx3edc": true, "iloveyou123": true, "welcome123": true, "administrator": true,
+	"passw0rd123": true, "letmein123": true, "trustno1234": true,
 }
 
 // passwordStrengthError returns a user-facing reason a password is unacceptable, or "".
@@ -93,7 +96,10 @@ func (a *Authenticator) PasswordSignup(c *reqCtx) {
 		return
 	case u.EmailVerified:
 		// Account already exists and is verified: do NOT touch its password. Nudge them to
-		// sign in / reset instead, and still answer generically.
+		// sign in / reset instead, and still answer generically. Burn a bcrypt hash first so this
+		// branch costs ~the same as the new-account path below — otherwise the response time would
+		// reveal that the address is already registered.
+		_, _ = bcrypt.GenerateFromPassword([]byte(body.Password), bcryptCost)
 		base := a.baseURL()
 		_ = a.sendAuthEmail(email, "You already have an account",
 			"You already have an account",
@@ -175,6 +181,13 @@ func (a *Authenticator) PasswordLogin(c *reqCtx) {
 		invalid()
 		return
 	}
+	// Transparent rehash: if the stored hash predates the current cost, re-hash the (now known-good)
+	// password at bcryptCost so credentials keep pace with policy over time.
+	if cost, cerr := bcrypt.Cost([]byte(hash)); cerr == nil && cost < bcryptCost {
+		if nh, herr := hashPassword(body.Password); herr == nil {
+			_ = a.creds.SetPasswordHash(u.ID, nh, "bcrypt")
+		}
+	}
 	if u.Disabled {
 		c.JSON(http.StatusForbidden, H{"error": "this account has been disabled"})
 		return
@@ -211,15 +224,21 @@ func (a *Authenticator) PasswordResetRequest(c *reqCtx) {
 		c.JSON(http.StatusOK, generic)
 		return
 	}
-	if u, err := a.creds.UserByEmail(email); err == nil && !u.Disabled {
-		raw, hash := newToken()
-		if a.creds.CreateToken(purposePasswordReset, u.ID, email, hash, time.Now().Add(ttlPasswordReset)) == nil {
-			link := a.baseURL() + "/reset?token=" + raw
-			_ = a.sendAuthEmail(email, "Reset your password", "Reset your password",
-				"Click below to choose a new password. This link is valid for 1 hour and can be used once.",
-				"Reset password", link, "If you didn't request this, you can ignore this email.")
+	// Off the request path so response timing doesn't reveal whether the account exists.
+	go func() {
+		u, err := a.creds.UserByEmail(email)
+		if err != nil || u.Disabled {
+			return
 		}
-	}
+		raw, hash := newToken()
+		if a.creds.CreateToken(purposePasswordReset, u.ID, email, hash, time.Now().Add(ttlPasswordReset)) != nil {
+			return
+		}
+		link := a.baseURL() + "/reset?token=" + raw
+		_ = a.sendAuthEmail(email, "Reset your password", "Reset your password",
+			"Click below to choose a new password. This link is valid for 1 hour and can be used once.",
+			"Reset password", link, "If you didn't request this, you can ignore this email.")
+	}()
 	c.JSON(http.StatusOK, generic)
 }
 

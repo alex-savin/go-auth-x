@@ -46,20 +46,39 @@ func ifNoneMatchSatisfied(r *http.Request, version string) bool {
 	return h != "" && (h == "*" || etagListHas(h, version))
 }
 
-// ifMatchFails reports whether an If-Match precondition is present and NOT satisfied (→ 412).
+// ifMatchFails reports whether an If-Match precondition is present and NOT satisfied (→ 412). Per
+// RFC 9110 §13.1.1, If-Match uses STRONG comparison: a weak (W/-prefixed) tag never matches, even if
+// its opaque value equals ours.
 func ifMatchFails(r *http.Request, version string) bool {
 	h := r.Header.Get("If-Match")
 	if h == "" || h == "*" { // absent, or "*" matches any existing resource
 		return false
 	}
-	return !etagListHas(h, version)
+	return !etagListHasStrong(h, version)
 }
 
 // etagListHas compares an ETag header list against version using weak comparison (ignore the W/ flag).
+// Used for If-None-Match (RFC 9110 §13.1.2 permits the weak comparator).
 func etagListHas(header, version string) bool {
 	want := etagCore(version)
 	for _, tag := range strings.Split(header, ",") {
 		if etagCore(strings.TrimSpace(tag)) == want {
+			return true
+		}
+	}
+	return false
+}
+
+// etagListHasStrong compares an ETag header list against version using STRONG comparison: a weak tag
+// (W/…) in the header never matches. Our emitted tags are always strong.
+func etagListHasStrong(header, version string) bool {
+	want := etagCore(version)
+	for _, tag := range strings.Split(header, ",") {
+		tag = strings.TrimSpace(tag)
+		if strings.HasPrefix(tag, "W/") { // weak validator can't satisfy strong comparison
+			continue
+		}
+		if etagCore(tag) == want {
 			return true
 		}
 	}

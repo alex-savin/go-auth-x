@@ -250,6 +250,7 @@ provider activates when its client id + secret are present.
 | `SESSION_SECRET` | `SessionSecret` | **Required, ≥ 32 bytes.** HMAC key for the session/flow/CSRF cookies. |
 | `APP_URL` | `AppURL` | Public origin, e.g. `https://app.example.com`. Used for email links + redirects. |
 | `OWNER_EMAIL` | `OwnerEmail` | Exempt from hard lockout; gates the admin API via session. |
+| `BRAND_NAME` | `BrandName` | Product name shown in auth emails and the default WebAuthn RP display name (default `go-auth-x`). |
 | `COOKIE_SECURE` | `CookieSecure` | Force the `Secure` flag (also auto-on under TLS / `X-Forwarded-Proto: https`). |
 | `OIDC_ISSUER` | `Issuer` | Enables the OIDC client (with `OIDC_CLIENT_ID`). |
 | `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | `ClientID` / `ClientSecret` | Confidential OIDC client. |
@@ -262,6 +263,7 @@ provider activates when its client id + secret are present.
 | `APPLE_CLIENT_ID` `APPLE_TEAM_ID` `APPLE_KEY_ID` `APPLE_PRIVATE_KEY` | `AppleClientID` / `…TeamID` / `…KeyID` / `…PrivateKey` | Sign in with Apple (Services ID, Team ID, Key ID, `.p8` PEM). Requires HTTPS. |
 | `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET` / `MICROSOFT_TENANT` | `MicrosoftClientID` / `…Secret` / `…Tenant` | Microsoft / Entra ID login. Tenant defaults to `common`; set a directory ID to restrict to one org. |
 | `DISCORD_CLIENT_ID` / `DISCORD_CLIENT_SECRET` | `DiscordClientID` / `…Secret` | Enables Discord login (verified email required). |
+| `MICROSOFT_STRICT_EMAIL_VERIFIED` | `MicrosoftStrictEmailVerified` | Require an explicit `email_verified` from Entra (default off — trust the tenant's token email). |
 | — (programmatic) | `SocialOIDC []SocialOIDCProvider` | Register any OIDC IdP (GitLab, Okta, Auth0, Keycloak, …) as a social login. |
 | `TRUSTED_PROXIES` | — (`authx.TrustedProxies()`) | CSV of proxy CIDRs; default = private ranges + loopback. |
 | `WEBAUTHN_RPID` / `WEBAUTHN_RP_NAME` | — | Override the passkey relying-party id/name (default: app host). |
@@ -277,7 +279,8 @@ Boot **fails closed** if auth is active and `SESSION_SECRET` is shorter than 32 
 `POST /auth/password/signup` → creates an unverified user and emails a verification link.
 `POST /auth/password/login` → verifies bcrypt, requires a verified email, mints the session. NIST-style
 policy (length + breach/email-localpart checks), constant-cost dummy-hash on unknown users to defeat
-enumeration, and a transparent rehash path via a stored algorithm tag.
+enumeration, and a transparent rehash-on-login path that upgrades stored hashes when the bcrypt cost
+is raised (algorithm recorded via a stored tag).
 
 ### Passkeys / WebAuthn (incl. cross-device QR)
 Same-origin WebAuthn — no IdP hop. **Registration requires a discoverable (resident) credential and
@@ -362,7 +365,8 @@ Mounted under `/auth` by `Handler()`:
 | GET | `/auth/email/login` · `/auth/email/verify` | redeem magic-link / verify email | token |
 | POST | `/auth/webauthn/login/begin` · `/auth/webauthn/login/finish` | passkey sign-in (discoverable / QR) | public |
 | POST | `/auth/webauthn/register/begin` · `/auth/webauthn/register/finish` | enroll a passkey | session |
-| GET / POST | `/auth/social/{provider}/login` · `/auth/social/{provider}/callback` | Google / GitHub / Facebook / Apple / Microsoft / Discord / any OIDC | public |
+| GET | `/auth/social/{provider}/login` | start social login (Google / GitHub / Facebook / Apple / Microsoft / Discord / any OIDC) | public |
+| GET · POST | `/auth/social/{provider}/callback` | social callback (POST is Apple's `form_post`) | public |
 | POST | `/auth/2fa/totp/begin` · `/auth/2fa/totp/confirm` · `/auth/2fa/disable` | enroll / confirm / disable TOTP | session |
 | POST · GET | `/auth/2fa/verify` · `/auth/2fa/pending` | finish a 2FA-challenged login / poll state | 2fa-pending cookie |
 | POST | `/auth/2fa/webauthn/begin` · `/auth/2fa/webauthn/finish` | passkey as the second factor | 2fa-pending cookie |

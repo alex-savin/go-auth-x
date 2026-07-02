@@ -13,6 +13,8 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -21,6 +23,31 @@ import (
 
 	authx "github.com/alex-savin/go-auth-x"
 )
+
+// maxBodyBytes caps a SCIM request body to defend against memory-exhaustion from an unbounded read.
+const maxBodyBytes = 1 << 20 // 1 MiB (matches the advertised bulk maxPayloadSize)
+
+// readBody reads at most maxBodyBytes of the request body.
+func readBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
+	return io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodyBytes))
+}
+
+// scimInternal logs the real error and returns a generic 500, so internal (e.g. GORM) error strings
+// never leak to the SCIM client.
+func scimInternal(w http.ResponseWriter, context string, err error) {
+	log.Printf("scim: %s: %v", context, err)
+	scimError(w, http.StatusInternalServerError, "internal error")
+}
+
+// activeWithDefault reads the optional SCIM `active` field, defaulting to true when it is ABSENT
+// (RFC 7644 — a create/replace that omits active must not disable the account).
+func activeWithDefault(raw []byte) bool {
+	var probe struct {
+		Active *bool `json:"active"`
+	}
+	_ = json.Unmarshal(raw, &probe)
+	return probe.Active == nil || *probe.Active
+}
 
 const (
 	schemaUser         = "urn:ietf:params:scim:schemas:core:2.0:User"
@@ -91,6 +118,10 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		if s.auth == nil || !s.auth(strings.TrimSpace(tok)) {
 			scimError(w, http.StatusUnauthorized, "invalid or missing bearer token")
 			return
+		}
+		// Cap every request body so an unbounded JSON payload can't exhaust memory.
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 		}
 		next.ServeHTTP(w, r)
 	})
@@ -264,7 +295,7 @@ func pathID(r *http.Request) uint {
 func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
 	users, err := s.dir.ListUsers()
 	if err != nil {
-		scimError(w, http.StatusInternalServerError, err.Error())
+		scimInternal(w, "listUsers", err)
 		return
 	}
 	// Filtering: boolean-composed (and / or / not / parens) over eq/ne/co/sw/ew/pr on userName,
@@ -296,8 +327,9 @@ func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
+	raw, rerr := readBody(w, r)
 	var in scimUser
-	if json.NewDecoder(r.Body).Decode(&in) != nil || in.UserName == "" {
+	if rerr != nil || json.Unmarshal(raw, &in) != nil || in.UserName == "" {
 		scimError(w, http.StatusBadRequest, "userName required")
 		return
 	}
@@ -314,13 +346,14 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, authx.ErrEmailConflict) {
 			scimErrorType(w, http.StatusConflict, "uniqueness", "a user with this email already exists")
 		} else {
-			scimError(w, http.StatusInternalServerError, err.Error())
+			scimInternal(w, "createUser", err)
 		}
 		return
 	}
-	if in.Active != !u.Disabled {
-		_ = s.dir.SetUserDisabled(u.ID, !in.Active)
-		u.Disabled = !in.Active
+	active := activeWithDefault(raw) // absent → true (never disable a freshly created user)
+	if active != !u.Disabled {
+		_ = s.dir.SetUserDisabled(u.ID, !active)
+		u.Disabled = !active
 	}
 	res := s.toSCIMUser(u)
 	if res.Meta.Location != "" {
@@ -402,8 +435,9 @@ func (s *Server) putUser(w http.ResponseWriter, r *http.Request) {
 		scimError(w, http.StatusPreconditionFailed, "ETag precondition failed")
 		return
 	}
+	raw, rerr := readBody(w, r)
 	var in scimUser
-	if json.NewDecoder(r.Body).Decode(&in) != nil || in.UserName == "" {
+	if rerr != nil || json.Unmarshal(raw, &in) != nil || in.UserName == "" {
 		scimError(w, http.StatusBadRequest, "userName required")
 		return
 	}
@@ -416,10 +450,10 @@ func (s *Server) putUser(w http.ResponseWriter, r *http.Request) {
 		name = in.Name.Formatted
 	}
 	if _, uerr := s.dir.UpsertExternalUser(cur.Sub, email, name, true); uerr != nil { // preserve Sub
-		scimError(w, http.StatusInternalServerError, uerr.Error())
+		scimInternal(w, "putUser", uerr)
 		return
 	}
-	_ = s.dir.SetUserDisabled(cur.ID, !in.Active)
+	_ = s.dir.SetUserDisabled(cur.ID, !activeWithDefault(raw)) // absent → true
 	u, _ := s.dir.UserByID(cur.ID)
 	writeResource(w, http.StatusOK, s.toSCIMUser(u), userVersion(u))
 }
@@ -434,7 +468,7 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
 	}
 	// SCIM DELETE = deprovision; we soft-disable (safer than a hard delete of audit history).
 	if err := s.dir.SetUserDisabled(id, true); err != nil {
-		scimError(w, http.StatusInternalServerError, err.Error())
+		scimInternal(w, "deleteUser", err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -445,7 +479,7 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
 func (s *Server) listGroups(w http.ResponseWriter, r *http.Request) {
 	gs, err := s.dir.Groups()
 	if err != nil {
-		scimError(w, http.StatusInternalServerError, err.Error())
+		scimInternal(w, "listGroups", err)
 		return
 	}
 	q := r.URL.Query()
@@ -477,17 +511,23 @@ func (s *Server) listGroups(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
+	raw, rerr := readBody(w, r)
 	var in scimGroup
-	if json.NewDecoder(r.Body).Decode(&in) != nil || in.DisplayName == "" {
+	if rerr != nil || json.Unmarshal(raw, &in) != nil || in.DisplayName == "" {
 		scimError(w, http.StatusBadRequest, "displayName required")
 		return
 	}
-	g, err := s.dir.GroupByName(in.DisplayName)
-	if err == authx.ErrNoGroup {
-		g, err = s.dir.CreateGroup(in.DisplayName, "provisioned via SCIM")
+	// A duplicate displayName is a uniqueness conflict (RFC 7644 §3.3), not an idempotent create.
+	if existing, gerr := s.dir.GroupByName(in.DisplayName); gerr == nil && existing != nil {
+		scimErrorType(w, http.StatusConflict, "uniqueness", "a group with this displayName already exists")
+		return
+	} else if gerr != nil && !errors.Is(gerr, authx.ErrNoGroup) {
+		scimInternal(w, "createGroup lookup", gerr)
+		return
 	}
+	g, err := s.dir.CreateGroup(in.DisplayName, "provisioned via SCIM")
 	if err != nil {
-		scimError(w, http.StatusInternalServerError, err.Error())
+		scimInternal(w, "createGroup", err)
 		return
 	}
 	for _, m := range in.Members {
@@ -586,15 +626,52 @@ func (s *Server) patchGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, op := range p.Operations {
-		if !strings.EqualFold(op.Path, "members") {
+		opl := strings.ToLower(op.Op)
+		pathl := strings.ToLower(strings.TrimSpace(op.Path))
+
+		// valuePath removal: members[value eq "42"] (the Okta/Azure single-member remove).
+		if strings.HasPrefix(pathl, "members[") {
+			if opl == "remove" {
+				if uid, ok := memberIDFromValuePath(op.Path); ok {
+					_ = s.dir.RemoveUserFromGroup(uid, id)
+				}
+			}
 			continue
 		}
-		for _, uid := range memberValues(op.Value) {
-			switch strings.ToLower(op.Op) {
-			case "add", "replace":
+		if pathl != "members" {
+			continue
+		}
+		switch opl {
+		case "add":
+			for _, uid := range memberValues(op.Value) {
 				_ = s.dir.AddUserToGroup(uid, id)
-			case "remove":
-				_ = s.dir.RemoveUserFromGroup(uid, id)
+			}
+		case "replace":
+			// Replace the ENTIRE membership set with the provided one (not merely additive).
+			want := map[uint]bool{}
+			for _, uid := range memberValues(op.Value) {
+				want[uid] = true
+			}
+			current, _ := s.dir.GroupMembers(id)
+			for _, m := range current {
+				if !want[m.ID] {
+					_ = s.dir.RemoveUserFromGroup(m.ID, id)
+				}
+			}
+			for uid := range want {
+				_ = s.dir.AddUserToGroup(uid, id)
+			}
+		case "remove":
+			if len(op.Value) == 0 || string(op.Value) == "null" {
+				// `remove` on "members" with no value → clear all members.
+				current, _ := s.dir.GroupMembers(id)
+				for _, m := range current {
+					_ = s.dir.RemoveUserFromGroup(m.ID, id)
+				}
+			} else {
+				for _, uid := range memberValues(op.Value) {
+					_ = s.dir.RemoveUserFromGroup(uid, id)
+				}
 			}
 		}
 	}
@@ -614,7 +691,7 @@ func (s *Server) deleteGroup(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err := s.dir.DeleteGroup(id); err != nil {
-		scimError(w, http.StatusInternalServerError, err.Error())
+		scimInternal(w, "deleteGroup", err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -702,7 +779,8 @@ func (s *Server) resourceTypes(w http.ResponseWriter, _ *http.Request) {
 
 // schemasEndpoint returns the supported resource schemas as a SCIM ListResponse (RFC 7644 §4).
 func (s *Server) schemasEndpoint(w http.ResponseWriter, _ *http.Request) {
-	writeSCIM(w, http.StatusOK, listEnvelope(schemaDocs(), len(schemaDocs()), 1))
+	docs := schemaDocs()
+	writeSCIM(w, http.StatusOK, listEnvelope(docs, len(docs), 1))
 }
 
 // schemaByID serves a single schema document by URN (RFC 7644 §4), 404 if unknown.
@@ -790,6 +868,28 @@ func activeFromOp(path string, value json.RawMessage) (bool, bool) {
 		}
 	}
 	return false, false
+}
+
+// memberIDFromValuePath extracts the user id from a valuePath like `members[value eq "42"]`
+// (the Okta/Azure member-removal form). Returns false if it can't be parsed.
+func memberIDFromValuePath(path string) (uint, bool) {
+	l, r := strings.Index(path, "["), strings.LastIndex(path, "]")
+	if l < 0 || r <= l {
+		return 0, false
+	}
+	inner := path[l+1 : r] // e.g. value eq "42"
+	q1 := strings.Index(inner, `"`)
+	if q1 < 0 {
+		return 0, false
+	}
+	q2 := strings.Index(inner[q1+1:], `"`)
+	if q2 < 0 {
+		return 0, false
+	}
+	if uid, err := strconv.ParseUint(inner[q1+1:q1+1+q2], 10, 64); err == nil {
+		return uint(uid), true
+	}
+	return 0, false
 }
 
 // memberValues extracts user ids from a members patch value ([{value:"1"}] or {value:"1"}).

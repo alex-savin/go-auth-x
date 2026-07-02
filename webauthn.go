@@ -33,7 +33,7 @@ func (a *Authenticator) enableWebauthn() {
 	}
 	name := os.Getenv("WEBAUTHN_RP_NAME")
 	if name == "" {
-		name = "AI Trading System"
+		name = a.brandName()
 	}
 	if w, err := webauthn.New(&webauthn.Config{
 		RPID: rpID, RPDisplayName: name, RPOrigins: []string{base},
