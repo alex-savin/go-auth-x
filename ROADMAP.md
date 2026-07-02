@@ -5,6 +5,21 @@ Direction and planned work for the library. Authoritative usage/feature docs liv
 
 ## Shipped
 
+### v0.4.0
+
+- **Security hardening pass** (from a full audit) — fail-closed session signing on a weak/absent
+  `SESSION_SECRET`; the account-linking invariant enforced on the primary OIDC callback and gated on a
+  proven email before a store rebinds a verified/bootstrap row (with an atomic squatter-reclaim); Sign
+  in with Apple's `form_post` callback exempted from CSRF; rate limiters installed with 2FA (throttling
+  `/auth/reauth` + `/auth/2fa/disable`); an atomic TOTP replay guard and monotonic WebAuthn sign
+  counts; request body-size limits + SCIM filter depth cap; SCIM `active`-defaults-true, strong
+  `If-Match`, PATCH group replace/valuePath-remove, and non-leaking errors; LDAP paged search + TLS +
+  DN normalization; email URL escaping, SMTP header sanitization, and constant-time send paths.
+- **BREAKING** — `TwoFactorStore` gains `ClaimTOTPStep` (atomic replay guard); custom implementations
+  must add it.
+- **Added** — `Config.BrandName` (email + WebAuthn RP branding), bcrypt rehash-on-login, and
+  `Authenticator.Close()` to stop the built-in rate-limiter GC goroutine.
+
 ### v0.3.0
 
 - **Social login: Microsoft/Entra + Discord + any OIDC provider** — Microsoft (Entra ID / Azure AD)
@@ -53,4 +68,4 @@ a pre-v1.0 breaking change if/when a uuid-keyed consumer adopts the library or t
 
 ---
 
-_Updated 2026-07._
+_Updated 2026-07-02._

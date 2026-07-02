@@ -536,7 +536,12 @@ go-auth-x/
 
 See **[ROADMAP.md](./ROADMAP.md)** for the full list and **[CHANGELOG.md](./CHANGELOG.md)** for details.
 
-- **v0.3.0** (latest): **Microsoft/Entra + Discord + any-OIDC** social (`Config.SocialOIDC`); **SCIM**
+- **v0.4.0** (latest): a **security-hardening pass** from a full audit — fail-closed session signing,
+  the account-linking invariant enforced on the OIDC callback, Apple `form_post` CSRF fix, 2FA/reauth
+  throttling, an atomic TOTP replay guard, request body-size + SCIM filter-depth limits, plus LDAP
+  paging, email/SMTP hardening, `Config.BrandName`, and bcrypt rehash-on-login. **Breaking:**
+  `TwoFactorStore` gains `ClaimTOTPStep`.
+- **v0.3.0**: **Microsoft/Entra + Discord + any-OIDC** social (`Config.SocialOIDC`); **SCIM**
   pagination (`startIndex`/`count`), `meta.created`/`lastModified`, and full `/Schemas` documents.
 - **v0.2.0**: **2FA** (TOTP + recovery codes, passkey-as-2FA, step-up re-auth);
   **Apple + Facebook** social; a much richer **SCIM** server (full filter grammar + valuePath, sorting,
