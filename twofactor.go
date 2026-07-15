@@ -136,14 +136,17 @@ func (a *Authenticator) completePendingLogin(c *reqCtx, pc *pendingClaims) error
 	if err != nil {
 		return err
 	}
-	a.setCookie(c, sessionCookie, session, int(ttl/time.Second))
 	var uid uint
 	if a.creds != nil {
 		if u, e := a.creds.UserBySub(pc.Subject); e == nil {
 			uid = u.ID
 		}
 	}
-	a.recordSession(c.Request, sid, pc.Subject, uid, ttl)
+	// Record before the cookie (see completeLogin) so a lost store write fails the second-factor step.
+	if rerr := a.recordSession(c.Request, sid, pc.Subject, uid, ttl); rerr != nil {
+		return rerr
+	}
+	a.setCookie(c, sessionCookie, session, int(ttl/time.Second))
 	a.issueCSRF(c)
 	return nil
 }

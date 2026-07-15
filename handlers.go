@@ -211,8 +211,12 @@ func (a *Authenticator) Callback(c *reqCtx) {
 		c.JSON(http.StatusInternalServerError, H{"error": "session creation failed"})
 		return
 	}
+	// Record before the cookie (see completeLogin) so a lost session-store write fails the login.
+	if rerr := a.recordSession(c.Request, sid, idToken.Subject, 0, sessionTTL); rerr != nil {
+		c.JSON(http.StatusInternalServerError, H{"error": "session creation failed"})
+		return
+	}
 	a.setCookie(c, sessionCookie, session, int(sessionTTL/time.Second))
-	a.recordSession(c.Request, sid, idToken.Subject, 0, sessionTTL)
 	a.issueCSRF(c) // parity with the in-app login funnel — the SPA needs a CSRF cookie for its first POST
 	c.Redirect(http.StatusFound, fc.Next)
 }
