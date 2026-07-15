@@ -16,7 +16,10 @@ import (
 // It returns twoFactorRequired=true when the user has confirmed TOTP: instead of the full session it
 // sets a short-lived 2fa-pending cookie, and the caller must tell the client to finish at
 // POST /auth/2fa/verify. Otherwise it mints the session and returns false.
-func (a *Authenticator) completeLogin(c *reqCtx, id Identity, remember bool) (twoFactorRequired bool, err error) {
+// firstFactorCred, when non-nil, is the WebAuthn credential ID that satisfied the FIRST factor (a
+// primary passkey login). It is carried into the 2fa-pending cookie so passkey-as-2FA can refuse the
+// SAME credential as the second factor (a different passkey, or TOTP/recovery, is still accepted).
+func (a *Authenticator) completeLogin(c *reqCtx, id Identity, remember bool, firstFactorCred []byte) (twoFactorRequired bool, err error) {
 	var role string
 	if a.authorizer != nil {
 		r, aerr := a.authorizer.Authorize(c.Request.Context(), id)
@@ -41,7 +44,7 @@ func (a *Authenticator) completeLogin(c *reqCtx, id Identity, remember bool) (tw
 	// Second-factor gate: if the user has confirmed TOTP, don't mint the session yet — stash the
 	// half-authenticated identity in a signed, short-lived pending cookie and require a code.
 	if u != nil && a.userHasTOTP(u.ID) {
-		pending, perr := a.mintPending(Identity{Subject: id.Subject, Email: id.Email, Name: id.Name, Groups: id.Groups}, role, remember)
+		pending, perr := a.mintPending(Identity{Subject: id.Subject, Email: id.Email, Name: id.Name, Groups: id.Groups}, role, remember, firstFactorCred)
 		if perr != nil {
 			return false, perr
 		}
@@ -53,11 +56,19 @@ func (a *Authenticator) completeLogin(c *reqCtx, id Identity, remember bool) (tw
 	if remember {
 		ttl = rememberTTL
 	}
-	session, serr := mintSession(a.cfg.SessionSecret, id.Subject, id.Email, id.Name, role, "", id.Groups, time.Now(), ttl)
+	sid := a.newSessionID()
+	session, serr := mintSessionWith(a.cfg.SessionSecret, SessionClaims{
+		Email: id.Email, Name: id.Name, Groups: id.Groups, Role: role, SID: sid,
+	}, id.Subject, time.Now(), ttl)
 	if serr != nil {
 		return false, serr
 	}
 	a.setCookie(c, sessionCookie, session, int(ttl/time.Second))
+	var uid uint
+	if u != nil {
+		uid = u.ID
+	}
+	a.recordSession(c.Request, sid, id.Subject, uid, ttl)
 	a.issueCSRF(c)
 	a.clearCookie(c, flowCookie)
 	return false, nil

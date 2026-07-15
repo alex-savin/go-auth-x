@@ -31,8 +31,11 @@ func passwordStrengthError(pw, email string) string {
 	if len(pw) < 10 {
 		return "password must be at least 10 characters"
 	}
-	if len(pw) > 200 {
-		return "password is too long"
+	// bcrypt.GenerateFromPassword rejects (does NOT silently truncate) any input over 72 bytes, so cap
+	// here — otherwise a 73–200 byte password would pass validation and then fail hashing with an opaque
+	// 500 (and, on reset, burn the single-use token). 72 bytes is bcrypt's hard input limit.
+	if len(pw) > 72 {
+		return "password must be at most 72 characters"
 	}
 	lower := strings.ToLower(pw)
 	if commonPasswords[lower] {
@@ -72,12 +75,14 @@ func (a *Authenticator) PasswordSignup(c *reqCtx) {
 		c.JSON(http.StatusBadRequest, H{"error": "enter a valid email address"})
 		return
 	}
-	if msg := passwordStrengthError(body.Password, email); msg != "" {
-		c.JSON(http.StatusBadRequest, H{"error": msg})
+	// Rate-limit BEFORE the password policy check: passwordPolicyError may make an outbound HIBP call, so
+	// gating first keeps a flood of signup POSTs from each holding an upstream request open.
+	if !a.ipLimiter.Allow("signup:" + c.rateIP()) {
+		c.tooMany("too many attempts — try again shortly")
 		return
 	}
-	if !a.ipLimiter.Allow("signup:" + c.ClientIP()) {
-		c.JSON(http.StatusTooManyRequests, H{"error": "too many attempts — try again shortly"})
+	if msg := a.passwordPolicyError(c.Request.Context(), body.Password, email); msg != "" {
+		c.JSON(http.StatusBadRequest, H{"error": msg})
 		return
 	}
 	const generic = "Check your email to finish creating your account."
@@ -138,15 +143,15 @@ func (a *Authenticator) PasswordLogin(c *reqCtx) {
 	}
 	email := normEmail(body.Email)
 	ip := c.ClientIP()
-	if !a.ipLimiter.Allow("login:" + ip) {
-		c.JSON(http.StatusTooManyRequests, H{"error": "too many attempts — try again shortly"})
+	if !a.ipLimiter.Allow("login:" + maskIPForRateLimit(ip)) {
+		c.tooMany("too many attempts — try again shortly")
 		return
 	}
 	// Per-account soft lockout from durable failure history (owner exempt). Recovery via the
 	// email-link / reset paths stays open regardless.
 	if !a.isOwnerEmail(email) {
 		if fails, _ := a.creds.RecentFailures(email, time.Now().Add(-15*time.Minute)); fails >= 5 {
-			c.JSON(http.StatusTooManyRequests, H{"error": "too many attempts — use “email me a sign-in link” instead"})
+			c.tooMany("too many attempts — use “email me a sign-in link” instead")
 			return
 		}
 	}
@@ -188,8 +193,8 @@ func (a *Authenticator) PasswordLogin(c *reqCtx) {
 			_ = a.creds.SetPasswordHash(u.ID, nh, "bcrypt")
 		}
 	}
-	if u.Disabled {
-		c.JSON(http.StatusForbidden, H{"error": "this account has been disabled"})
+	if blocked, msg := u.loginBlocked(); blocked {
+		c.JSON(http.StatusForbidden, H{"error": msg})
 		return
 	}
 	if !u.EmailVerified {
@@ -202,7 +207,7 @@ func (a *Authenticator) PasswordLogin(c *reqCtx) {
 		return
 	}
 	a.creds.RecordAudit(u.ID, email, ip, "password", "login", true, "")
-	tfr, err := a.completeLogin(c, Identity{Subject: u.Sub, Email: u.Email, Name: u.Name, EmailVerified: true}, body.Remember)
+	tfr, err := a.completeLogin(c, Identity{Subject: u.Sub, Email: u.Email, Name: u.Name, EmailVerified: true}, body.Remember, nil)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, H{"error": "login failed"})
 		return
@@ -220,14 +225,17 @@ func (a *Authenticator) PasswordResetRequest(c *reqCtx) {
 	_ = c.ShouldBindJSON(&body)
 	email := normEmail(body.Email)
 	generic := H{"ok": true, "message": "If an account exists for that address, we've sent a reset link."}
-	if !validEmail(email) || !a.ipLimiter.Allow("reset:"+c.ClientIP()) || !a.acctLimiter.Allow("reset:"+email) {
+	if !validEmail(email) || !a.ipLimiter.Allow("reset:"+c.rateIP()) || !a.acctLimiter.Allow("reset:"+email) {
 		c.JSON(http.StatusOK, generic)
 		return
 	}
 	// Off the request path so response timing doesn't reveal whether the account exists.
 	go func() {
 		u, err := a.creds.UserByEmail(email)
-		if err != nil || u.Disabled {
+		if err != nil {
+			return
+		}
+		if blocked, _ := u.loginBlocked(); blocked {
 			return
 		}
 		raw, hash := newToken()
@@ -250,13 +258,20 @@ func (a *Authenticator) PasswordResetConfirm(c *reqCtx) {
 		c.JSON(http.StatusBadRequest, H{"error": "invalid request"})
 		return
 	}
-	claim, err := a.creds.ConsumeToken(purposePasswordReset, hashToken(body.Token))
+	// Validate BEFORE consuming: peek the token so a policy-rejected password doesn't burn the
+	// single-use link (which would force the user to request a fresh one for nothing).
+	claim, err := a.creds.PeekToken(purposePasswordReset, hashToken(body.Token))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, H{"error": "this reset link is invalid or has expired"})
 		return
 	}
-	if msg := passwordStrengthError(body.Password, claim.Email); msg != "" {
+	if msg := a.passwordPolicyError(c.Request.Context(), body.Password, claim.Email); msg != "" {
 		c.JSON(http.StatusBadRequest, H{"error": msg})
+		return
+	}
+	// Password is acceptable — now atomically consume the token (single-use) and set the password.
+	if _, err := a.creds.ConsumeToken(purposePasswordReset, hashToken(body.Token)); err != nil {
+		c.JSON(http.StatusBadRequest, H{"error": "this reset link is invalid or has expired"})
 		return
 	}
 	hash, herr := hashPassword(body.Password)

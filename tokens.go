@@ -11,6 +11,8 @@ const (
 	purposeVerifyEmail   = "verify_email"
 	purposePasswordReset = "password_reset"
 	purposeInvite        = "invite"
+	purposeChangeEmail   = "change_email" // verify a NEW address before rebinding it
+	purposeEmailOTP      = "email_otp"    // short numeric sign-in code (see emailotp.go)
 )
 
 // Token TTLs by purpose (used by the Phase 1+ email flows).
@@ -19,6 +21,7 @@ const (
 	ttlVerifyEmail   = 24 * time.Hour
 	ttlPasswordReset = 1 * time.Hour
 	ttlInvite        = 7 * 24 * time.Hour
+	ttlChangeEmail   = 1 * time.Hour
 )
 
 // newToken returns a fresh random URL-safe token plus its sha256 hash. The raw token is

@@ -121,7 +121,7 @@ func (a *Authenticator) SocialCallback(c *reqCtx) {
 	}
 	ctx := c.Request.Context()
 	flowTok, _ := c.Cookie(flowCookie)
-	fc, err := parseFlow(a.cfg.SessionSecret, flowTok)
+	fc, err := parseFlowMulti(a.verifySecrets(), flowTok)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, H{"error": "login session expired — try again"})
 		return
@@ -226,12 +226,12 @@ func (a *Authenticator) SocialCallback(c *reqCtx) {
 		c.JSON(http.StatusInternalServerError, H{"error": "sign-in failed"})
 		return
 	}
-	if au.Disabled {
-		c.JSON(http.StatusForbidden, H{"error": "this account has been disabled"})
+	if blocked, msg := au.loginBlocked(); blocked {
+		c.JSON(http.StatusForbidden, H{"error": msg})
 		return
 	}
 	a.creds.RecordAudit(au.ID, au.Email, c.ClientIP(), provider, "login", true, "")
-	tfr, err := a.completeLogin(c, Identity{Subject: au.Sub, Email: au.Email, Name: au.Name, EmailVerified: true}, false)
+	tfr, err := a.completeLogin(c, Identity{Subject: au.Sub, Email: au.Email, Name: au.Name, EmailVerified: true}, false, nil)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, H{"error": "sign-in failed"})
 		return

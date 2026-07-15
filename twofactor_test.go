@@ -95,7 +95,7 @@ func TestVerifySecondFactor_TOTPReplayAndRecovery(t *testing.T) {
 
 func TestPendingCookieRoundTrip(t *testing.T) {
 	a := &Authenticator{cfg: Config{SessionSecret: []byte("0123456789abcdef0123456789abcdef")}}
-	tok, err := a.mintPending(Identity{Subject: "local:u1", Email: "u@x.com", Name: "U", Groups: []string{"admins"}}, "owner", true)
+	tok, err := a.mintPending(Identity{Subject: "local:u1", Email: "u@x.com", Name: "U", Groups: []string{"admins"}}, "owner", true, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,7 +123,7 @@ func TestTokenAudienceSegregation(t *testing.T) {
 	secret := []byte("0123456789abcdef0123456789abcdef")
 	a := &Authenticator{cfg: Config{SessionSecret: secret}}
 
-	pending, err := a.mintPending(Identity{Subject: "local:u1", Email: "u@x.com"}, "", false)
+	pending, err := a.mintPending(Identity{Subject: "local:u1", Email: "u@x.com"}, "", false, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

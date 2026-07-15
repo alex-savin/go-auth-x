@@ -2,6 +2,7 @@ package authx
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/url"
 	"os"
@@ -140,7 +141,7 @@ func (a *Authenticator) setWauthnFlow(c *reqCtx, sd *webauthn.SessionData) error
 func (a *Authenticator) getWauthnFlow(c *reqCtx) (*webauthn.SessionData, error) {
 	tok, _ := c.Cookie(wauthnFlowCookie)
 	var claims webauthnFlowClaims
-	if err := parseJWT(a.cfg.SessionSecret, tok, &claims, audWebauthn); err != nil {
+	if err := parseJWTMulti(a.verifySecrets(), tok, &claims, audWebauthn); err != nil {
 		return nil, err
 	}
 	var sd webauthn.SessionData
@@ -154,9 +155,12 @@ func (a *Authenticator) getWauthnFlow(c *reqCtx) (*webauthn.SessionData, error) 
 // self-service endpoints registered on the public /auth group).
 func (a *Authenticator) currentAuthUser(c *reqCtx) (*AuthUser, error) {
 	tok, _ := c.Cookie(sessionCookie)
-	sc, err := parseSession(a.cfg.SessionSecret, tok)
+	sc, err := parseSessionMulti(a.verifySecrets(), tok)
 	if err != nil {
 		return nil, err
+	}
+	if a.sessionRevoked(sc) {
+		return nil, errors.New("session revoked")
 	}
 	return a.creds.UserBySub(sc.Subject)
 }
@@ -301,8 +305,8 @@ func (a *Authenticator) WebauthnLoginFinish(c *reqCtx) {
 		c.JSON(http.StatusUnauthorized, H{"error": "passkey sign-in failed"})
 		return
 	}
-	if matched.Disabled {
-		c.JSON(http.StatusForbidden, H{"error": "this account has been disabled"})
+	if blocked, msg := matched.loginBlocked(); blocked {
+		c.JSON(http.StatusForbidden, H{"error": msg})
 		return
 	}
 	// Clone detection: the library flags CloneWarning when the authenticator's signature
@@ -315,7 +319,9 @@ func (a *Authenticator) WebauthnLoginFinish(c *reqCtx) {
 	}
 	_ = a.creds.TouchPasskey(cred.ID, cred.Authenticator.SignCount)
 	a.creds.RecordAudit(matched.ID, matched.Email, c.ClientIP(), "passkey", "login", true, "")
-	tfr, err := a.completeLogin(c, Identity{Subject: matched.Sub, Email: matched.Email, Name: matched.Name, EmailVerified: true}, c.Query("remember") == "true")
+	// Pass this passkey's credential ID as the first factor, so passkey-as-2FA can't be satisfied by the
+	// very same credential.
+	tfr, err := a.completeLogin(c, Identity{Subject: matched.Sub, Email: matched.Email, Name: matched.Name, EmailVerified: true}, c.Query("remember") == "true", cred.ID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, H{"error": "sign-in failed"})
 		return

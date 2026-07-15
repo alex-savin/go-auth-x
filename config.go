@@ -19,7 +19,21 @@ type Config struct {
 	RedirectURL   string   // OIDC_REDIRECT_URL, e.g. https://app.example.com/auth/callback
 	AllowedGroups []string // OIDC_ALLOWED_GROUPS (comma-sep); empty = any authenticated user
 	SessionSecret []byte   // SESSION_SECRET — HMAC key for the session/flow cookies
-	CookieSecure  bool     // COOKIE_SECURE — force the Secure flag (also auto-on under TLS)
+	// PreviousSessionSecrets are retired signing keys still accepted for VERIFICATION (never signing),
+	// so SESSION_SECRET can be rotated without logging every user out at once. Populate from
+	// SESSION_SECRET_PREVIOUS (comma-separated) or programmatically; keep an old key only for one
+	// session TTL after rotation, then drop it (each entry widens the trusted-signer set). Each must
+	// also be at least 32 bytes.
+	PreviousSessionSecrets [][]byte
+	CookieSecure           bool // COOKIE_SECURE — force the Secure flag (also auto-on under TLS)
+	// TrustedOrigins is an optional allow-list of exact origins (scheme://host[:port]) accepted on
+	// state-changing requests as defense-in-depth ON TOP OF the double-submit CSRF token. AppURL's
+	// origin is always allowed. Empty (and an absent Origin/Referer) fails open — the token remains
+	// the primary check — so this never rejects a legitimate same-origin request.
+	TrustedOrigins []string
+	// BreachCheckHIBP (HIBP_BREACH_CHECK=true) wires the default Have I Been Pwned k-anonymity password
+	// checker at boot. It can also be set programmatically via SetBreachChecker with a custom checker.
+	BreachCheckHIBP bool
 	// AppURL (APP_URL) is the public origin of the app, used to build email links and
 	// post-login redirects (e.g. https://trader.savin.nyc). Falls back to RedirectURL's origin.
 	AppURL string
@@ -57,13 +71,16 @@ type Config struct {
 	AppleKeyID      string // APPLE_KEY_ID
 	ApplePrivateKey string // APPLE_PRIVATE_KEY (.p8 PEM)
 
-	// Microsoft / Entra ID (OIDC). Tenant defaults to "common" (any work/school or personal
-	// Microsoft account); set a directory (tenant) ID to restrict to one organization. Entra
-	// tokens rarely carry email_verified, so the token email is trusted by default (the tenant
-	// owns the address); set MicrosoftStrictEmailVerified to require an explicit email_verified.
+	// Microsoft / Entra ID (OIDC). Tenant defaults to "common" (any work/school or personal Microsoft
+	// account) — a MULTI-TENANT endpoint whose token email is NOT trustworthy: any Entra tenant can mint
+	// a token asserting any address (nOAuth). Set MICROSOFT_TENANT to a single tenant GUID / verified
+	// custom domain to restrict sign-in to that organization, which is the ONLY configuration in which the
+	// token email is trusted. With a multi-tenant endpoint the email is treated as unverified, so Entra's
+	// (which omits email_verified) sign-ins are refused until a tenant is pinned. MicrosoftStrictEmailVerified
+	// additionally requires an explicit email_verified even for a pinned single tenant.
 	MicrosoftClientID            string // MICROSOFT_CLIENT_ID
 	MicrosoftClientSecret        string // MICROSOFT_CLIENT_SECRET
-	MicrosoftTenant              string // MICROSOFT_TENANT (default "common")
+	MicrosoftTenant              string // MICROSOFT_TENANT (default "common" — pin a single tenant to enable email sign-in)
 	MicrosoftStrictEmailVerified bool   // MICROSOFT_STRICT_EMAIL_VERIFIED
 
 	// Discord (OAuth2 + REST; requires a verified email).
@@ -93,18 +110,21 @@ type SocialOIDCProvider struct {
 // ConfigFromEnv loads the OIDC configuration from the environment.
 func ConfigFromEnv() Config {
 	return Config{
-		Issuer:        strings.TrimRight(os.Getenv("OIDC_ISSUER"), "/"),
-		ClientID:      os.Getenv("OIDC_CLIENT_ID"),
-		ClientSecret:  os.Getenv("OIDC_CLIENT_SECRET"),
-		RedirectURL:   os.Getenv("OIDC_REDIRECT_URL"),
-		AllowedGroups: splitCSV(os.Getenv("OIDC_ALLOWED_GROUPS")),
-		SessionSecret: []byte(os.Getenv("SESSION_SECRET")),
-		CookieSecure:  os.Getenv("COOKIE_SECURE") == "true",
-		AppURL:        strings.TrimRight(os.Getenv("APP_URL"), "/"),
-		OwnerEmail:    strings.ToLower(strings.TrimSpace(os.Getenv("OWNER_EMAIL"))),
-		BrandName:     strings.TrimSpace(os.Getenv("BRAND_NAME")),
+		Issuer:                 strings.TrimRight(os.Getenv("OIDC_ISSUER"), "/"),
+		ClientID:               os.Getenv("OIDC_CLIENT_ID"),
+		ClientSecret:           os.Getenv("OIDC_CLIENT_SECRET"),
+		RedirectURL:            os.Getenv("OIDC_REDIRECT_URL"),
+		AllowedGroups:          splitCSV(os.Getenv("OIDC_ALLOWED_GROUPS")),
+		SessionSecret:          []byte(os.Getenv("SESSION_SECRET")),
+		PreviousSessionSecrets: envSecrets("SESSION_SECRET_PREVIOUS"),
+		CookieSecure:           os.Getenv("COOKIE_SECURE") == "true",
+		TrustedOrigins:         splitCSV(os.Getenv("TRUSTED_ORIGINS")),
+		AppURL:                 strings.TrimRight(os.Getenv("APP_URL"), "/"),
+		OwnerEmail:             strings.ToLower(strings.TrimSpace(os.Getenv("OWNER_EMAIL"))),
+		BrandName:              strings.TrimSpace(os.Getenv("BRAND_NAME")),
 
 		OIDCAssumeVerified: os.Getenv("OIDC_ASSUME_VERIFIED") == "true",
+		BreachCheckHIBP:    os.Getenv("HIBP_BREACH_CHECK") == "true",
 
 		GoogleClientID:     os.Getenv("GOOGLE_CLIENT_ID"),
 		GoogleClientSecret: os.Getenv("GOOGLE_CLIENT_SECRET"),
@@ -133,6 +153,19 @@ func ConfigFromEnv() Config {
 // too — without it the signed cookies would be unsafe.
 func (c Config) Enabled() bool {
 	return c.Issuer != "" && c.ClientID != "" && len(c.SessionSecret) > 0
+}
+
+// envSecrets reads a comma-separated env var into a slice of byte keys (retired signing secrets).
+func envSecrets(name string) [][]byte {
+	parts := splitCSV(os.Getenv(name))
+	if len(parts) == 0 {
+		return nil
+	}
+	out := make([][]byte, 0, len(parts))
+	for _, p := range parts {
+		out = append(out, []byte(p))
+	}
+	return out
 }
 
 func splitCSV(s string) []string {

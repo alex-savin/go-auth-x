@@ -102,13 +102,16 @@ type pendingClaims struct {
 	Groups   []string `json:"groups,omitempty"`
 	Role     string   `json:"role,omitempty"`
 	Remember bool     `json:"rm,omitempty"`
+	// FirstFactorCred is the WebAuthn credential ID that proved the first factor (a primary passkey
+	// login), so passkey-as-2FA can reject the SAME credential as the second factor. Empty otherwise.
+	FirstFactorCred []byte `json:"ffc,omitempty"`
 	jwt.RegisteredClaims
 }
 
-func (a *Authenticator) mintPending(id Identity, role string, remember bool) (string, error) {
+func (a *Authenticator) mintPending(id Identity, role string, remember bool, firstFactorCred []byte) (string, error) {
 	now := time.Now()
 	return signJWT(a.cfg.SessionSecret, pendingClaims{
-		Email: id.Email, Name: id.Name, Groups: id.Groups, Role: role, Remember: remember,
+		Email: id.Email, Name: id.Name, Groups: id.Groups, Role: role, Remember: remember, FirstFactorCred: firstFactorCred,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   id.Subject,
 			Audience:  jwt.ClaimStrings{audPending},
@@ -126,11 +129,21 @@ func (a *Authenticator) completePendingLogin(c *reqCtx, pc *pendingClaims) error
 	if pc.Remember {
 		ttl = rememberTTL
 	}
-	session, err := mintSession(a.cfg.SessionSecret, pc.Subject, pc.Email, pc.Name, pc.Role, "", pc.Groups, time.Now(), ttl)
+	sid := a.newSessionID()
+	session, err := mintSessionWith(a.cfg.SessionSecret, SessionClaims{
+		Email: pc.Email, Name: pc.Name, Groups: pc.Groups, Role: pc.Role, SID: sid,
+	}, pc.Subject, time.Now(), ttl)
 	if err != nil {
 		return err
 	}
 	a.setCookie(c, sessionCookie, session, int(ttl/time.Second))
+	var uid uint
+	if a.creds != nil {
+		if u, e := a.creds.UserBySub(pc.Subject); e == nil {
+			uid = u.ID
+		}
+	}
+	a.recordSession(c.Request, sid, pc.Subject, uid, ttl)
 	a.issueCSRF(c)
 	return nil
 }
@@ -140,7 +153,7 @@ func (a *Authenticator) parsePending(token string) (*pendingClaims, error) {
 		return nil, errors.New("no 2fa-pending cookie")
 	}
 	var c pendingClaims
-	if err := parseJWT(a.cfg.SessionSecret, token, &c, audPending); err != nil {
+	if err := parseJWTMulti(a.verifySecrets(), token, &c, audPending); err != nil {
 		return nil, err
 	}
 	if c.Subject == "" {

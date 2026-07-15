@@ -15,7 +15,9 @@ const (
 // whenever ANY auth method is live — OIDC OR in-app local auth — so a password/passkey-only
 // deployment (no OIDC issuer) is still gated instead of silently wide open.
 func (a *Authenticator) enforcing() bool {
-	return a != nil && (a.enabled || a.LocalEnabled())
+	// Social login mints sessions too, so a social-only deployment (no OIDC issuer, no SetLocalEnabled)
+	// must still gate — otherwise GateHTTP/CSRFHTTP would no-op while login quietly issues cookies.
+	return a != nil && (a.enabled || a.LocalEnabled() || a.anySocialConfigured())
 }
 
 // TrustedProxies returns the proxy IPs/CIDRs to trust when extracting the client IP from
@@ -52,8 +54,11 @@ func (a *Authenticator) publicPath(p string) bool {
 // sessionOf resolves the session straight from the cookie — for /auth handlers (admin API, account
 // endpoints) that self-gate rather than sitting behind GateHTTP.
 func (a *Authenticator) sessionOf(c *reqCtx) *SessionClaims {
-	sc, err := parseSession(a.cfg.SessionSecret, cookieValue(c.Request, sessionCookie))
+	sc, err := parseSessionMulti(a.verifySecrets(), cookieValue(c.Request, sessionCookie))
 	if err != nil {
+		return nil
+	}
+	if a.sessionRevoked(sc) {
 		return nil
 	}
 	return sc

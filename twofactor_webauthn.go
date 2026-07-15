@@ -1,6 +1,7 @@
 package authx
 
 import (
+	"bytes"
 	"net/http"
 
 	"github.com/go-webauthn/webauthn/protocol"
@@ -67,8 +68,8 @@ func (a *Authenticator) TwoFactorWebauthnFinish(c *reqCtx) {
 		c.JSON(http.StatusUnauthorized, H{"error": "your login session expired — sign in again"})
 		return
 	}
-	if u.Disabled { // parity with the primary passkey login: a disabled user can't complete 2FA
-		c.JSON(http.StatusForbidden, H{"error": "this account has been disabled"})
+	if blocked, msg := u.loginBlocked(); blocked { // parity with the primary passkey login
+		c.JSON(http.StatusForbidden, H{"error": msg})
 		return
 	}
 	sd, err := a.getWauthnFlow(c)
@@ -86,6 +87,13 @@ func (a *Authenticator) TwoFactorWebauthnFinish(c *reqCtx) {
 	if err != nil {
 		a.creds.RecordAudit(u.ID, u.Email, c.ClientIP(), "2fa", "webauthn_verify", false, "")
 		c.JSON(http.StatusUnauthorized, H{"error": "passkey verification failed"})
+		return
+	}
+	// Two-factor means two DISTINCT factors: if the first factor was a passkey, the same credential
+	// can't also satisfy the second. (A different passkey, or TOTP/recovery, is fine.)
+	if len(pc.FirstFactorCred) > 0 && bytes.Equal(cred.ID, pc.FirstFactorCred) {
+		a.creds.RecordAudit(u.ID, u.Email, c.ClientIP(), "2fa", "webauthn_verify", false, "same_credential")
+		c.JSON(http.StatusUnauthorized, H{"error": "use a different passkey or your authenticator code for the second step"})
 		return
 	}
 	if cred.Authenticator.CloneWarning { // possible cloned credential — refuse

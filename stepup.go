@@ -40,12 +40,12 @@ func (a *Authenticator) setStepUpCookie(c *reqCtx, sub string) {
 // issued within maxAge. (Bound to the session subject so a step-up from one account can't elevate
 // another.)
 func (a *Authenticator) StepUpFresh(r *http.Request, maxAge time.Duration) bool {
-	sc, err := parseSession(a.cfg.SessionSecret, cookieValue(r, sessionCookie))
-	if err != nil {
+	sc, err := parseSessionMulti(a.verifySecrets(), cookieValue(r, sessionCookie))
+	if err != nil || a.sessionRevoked(sc) {
 		return false
 	}
 	var claims stepUpClaims
-	if parseJWT(a.cfg.SessionSecret, cookieValue(r, stepUpCookie), &claims, audStepUp) != nil {
+	if parseJWTMulti(a.verifySecrets(), cookieValue(r, stepUpCookie), &claims, audStepUp) != nil {
 		return false
 	}
 	if claims.Subject != sc.Subject || claims.IssuedAt == nil {
@@ -79,12 +79,12 @@ func (a *Authenticator) ReAuth(c *reqCtx) {
 	}
 	// Throttle: reauth verifies a password OR the same brute-forceable 6-digit TOTP code space that
 	// /2fa/verify guards, so a session that hasn't proven the second factor must not hammer it.
-	if a.ipLimiter != nil && !a.ipLimiter.Allow("reauth:"+c.ClientIP()) {
-		c.JSON(http.StatusTooManyRequests, H{"error": "too many attempts — wait and try again"})
+	if a.ipLimiter != nil && !a.ipLimiter.Allow("reauth:"+c.rateIP()) {
+		c.tooMany("too many attempts — wait and try again")
 		return
 	}
 	if a.acctLimiter != nil && !a.acctLimiter.Allow("reauth:"+au.Sub) {
-		c.JSON(http.StatusTooManyRequests, H{"error": "too many attempts — wait and try again"})
+		c.tooMany("too many attempts — wait and try again")
 		return
 	}
 	var body struct{ Password, Code string }

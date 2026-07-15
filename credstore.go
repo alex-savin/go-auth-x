@@ -26,10 +26,33 @@ type AuthUser struct {
 	Name          string
 	EmailVerified bool
 	Disabled      bool
+	// Ban is a time-boxed login block with a reason, distinct from Disabled (an operator off-switch).
+	// Banned + zero BannedUntil = permanent; Banned + a future BannedUntil = until that instant.
+	Banned      bool
+	BannedUntil time.Time
+	BanReason   string
 	// Timestamps for SCIM meta.created / meta.lastModified. Best-effort — a store that doesn't
 	// track them leaves them zero and SCIM omits the field.
 	CreatedAt time.Time
 	UpdatedAt time.Time
+}
+
+// loginBlocked reports whether this user may not complete a login, and a user-facing reason. It folds
+// the Disabled off-switch and an active (unexpired) Ban into the single gate the login callers use.
+func (u *AuthUser) loginBlocked() (bool, string) {
+	if u == nil {
+		return false, ""
+	}
+	if u.Disabled {
+		return true, "this account has been disabled"
+	}
+	if u.Banned && (u.BannedUntil.IsZero() || time.Now().Before(u.BannedUntil)) {
+		if u.BanReason != "" {
+			return true, "this account is suspended: " + u.BanReason
+		}
+		return true, "this account is suspended"
+	}
+	return false, ""
 }
 
 // TokenClaim is what a redeemed single-use token resolves to.
@@ -64,6 +87,14 @@ type CredentialStore interface {
 	UserBySub(sub string) (*AuthUser, error)
 	CreateLocalUser(email, name string) (*AuthUser, error) // Sub="local:<uuid>", EmailVerified=false
 	SetEmailVerified(userID uint, verified bool) error
+	// SetEmail changes a user's email (used by the verified change-email flow AFTER the new address is
+	// proven). It must uphold the one-user-per-email invariant, returning ErrEmailConflict if another
+	// user already owns newEmail.
+	SetEmail(userID uint, newEmail string) error
+	// DeleteUser hard-deletes a user and everything keyed to it (credentials, passkeys, tokens, OAuth
+	// links, 2FA, group memberships). Audit rows are retained but any PII (email/IP) is anonymized, so
+	// the forensic count survives an erasure. Idempotent: deleting an absent user is not an error.
+	DeleteUser(userID uint) error
 
 	// Passkeys (WebAuthn)
 	EnsureWebauthnHandle(userID uint) ([]byte, error)      // get-or-create the stable user handle
@@ -72,6 +103,7 @@ type CredentialStore interface {
 	AddPasskey(userID uint, p Passkey) error
 	TouchPasskey(credentialID []byte, signCount uint32) error // update sign count + last-used
 	RemovePasskey(userID, id uint) error
+	RenamePasskey(userID, id uint, name string) error // relabel a passkey; no-op if not the user's
 
 	// Password
 	PasswordHash(userID uint) (hash, algo string, err error) // ErrNoCredential if unset
@@ -81,10 +113,24 @@ type CredentialStore interface {
 	// email change doesn't fork the account.
 	UserByOAuth(provider, subject string) (*AuthUser, error)      // ErrNoUser if unlinked
 	LinkOAuth(userID uint, provider, subject, email string) error // idempotent per (provider,subject)
+	UnlinkOAuth(userID uint, provider string) error               // remove the user's link to a provider
+	OAuthIdentities(userID uint) ([]string, error)                // provider slugs the user has linked
 
 	// Single-use, hashed-at-rest email tokens (magic-link, verify-email, password-reset, invite)
 	CreateToken(purpose string, userID uint, email string, tokenHash []byte, expiresAt time.Time) error
 	ConsumeToken(purpose string, tokenHash []byte) (*TokenClaim, error) // marks consumed atomically; ErrTokenInvalid
+	// PeekToken validates a token (exists, unconsumed, unexpired) and returns its claim WITHOUT consuming
+	// it, so a caller can validate downstream input (e.g. the new password) before burning a single-use
+	// link. ErrTokenInvalid on a miss/expiry.
+	PeekToken(purpose string, tokenHash []byte) (*TokenClaim, error)
+
+	// Email OTP (short numeric codes). Unlike the 256-bit tokens above these are brute-forceable, so
+	// they are scoped by (purpose,email) — NOT matched globally by hash — and carry an attempt counter.
+	// CreateEmailOTP replaces any existing OTP for (purpose,email). VerifyEmailOTP atomically compares
+	// (constant-time), increments the attempt count, and invalidates the code on success OR once
+	// maxAttempts is exceeded; it returns ErrTokenInvalid on any miss/expiry/exhaustion.
+	CreateEmailOTP(purpose, email string, codeHash []byte, expiresAt time.Time, maxAttempts int) error
+	VerifyEmailOTP(purpose, email string, codeHash []byte) (*TokenClaim, error)
 
 	// Audit + lockout
 	RecordAudit(userID uint, email, ip, method, event string, success bool, detail string)
@@ -104,8 +150,9 @@ func (a *Authenticator) SetCredentialStore(cs CredentialStore) { a.creds = cs }
 // SetMailer installs the email sender for magic-link/verify/reset mails.
 func (a *Authenticator) SetMailer(m Mailer) { a.email = m }
 
-// SetLocalEnabled toggles whether in-app auth methods (password/passkey/email/social) are
-// wired (mirrors the AUTH_LOCAL env flag). OIDC is unaffected.
+// SetLocalEnabled toggles whether the in-app auth methods (password / passkey / email magic-link + OTP)
+// are wired (mirrors the AUTH_LOCAL env flag). OIDC and social login are independent of this flag —
+// each social provider activates on its own credentials, and OIDC on its issuer.
 func (a *Authenticator) SetLocalEnabled(on bool) {
 	a.localEnabled = on
 	if on {

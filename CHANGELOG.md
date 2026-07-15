@@ -7,6 +7,103 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-07-15
+
+A feature pass adding self-service, session-management, admin, and hardening capabilities that fit a
+same-origin Go BFF. Everything slots into the existing seams (the `completeLogin` funnel, the
+pluggable-backend pattern, small store interfaces).
+
+### Added
+
+- **HIBP password-breach check (opt-in).** A pluggable `BreachChecker` interface with a default Have I
+  Been Pwned k-anonymity implementation (`NewHIBPBreachChecker`) — only the first 5 hex chars of the
+  SHA-1 are sent, and the checker is fail-open by default so a HIBP outage degrades to the embedded
+  common-password list rather than blocking signups. Enable with `HIBP_BREACH_CHECK=true` or
+  `SetBreachChecker`. Consulted on signup, password reset, password change, and admin set-password.
+- **Signing-key rotation without mass logout.** `Config.PreviousSessionSecrets` (env
+  `SESSION_SECRET_PREVIOUS`, comma-separated) is a verify-only list: sessions/step-up/flow/2FA cookies
+  are always *signed* with the primary `SESSION_SECRET` but *verified* against the primary plus any
+  previous keys, so a key can be rotated and the old one retired after one TTL window. Previous keys are
+  length-validated (≥ 32 bytes) at `New`.
+- **Email OTP (numeric sign-in code).** `POST /auth/email-otp/send` + `POST /auth/email-otp/verify` — a
+  6-digit code alternative to the magic link (better for mail-scanner link-prefetch and native apps).
+  Codes are `crypto/rand`, salted-sha256-at-rest, **email-scoped** (a guessed code can't match another
+  user's), single-use, and bounded by a per-code attempt counter plus the per-IP limiter.
+- **Server-side session revocation (opt-in).** A pluggable `SessionStore` interface (reference impls in
+  `gormstore` + `memory`) records a random `sid` per session and lets you revoke it. New self-service
+  endpoints `GET /auth/api/sessions`, `DELETE /auth/api/sessions/{sid}`,
+  `POST /auth/api/sessions/revoke-others`, plus admin `GET/POST /auth/admin/users/{id}/sessions[/revoke]`.
+  `nil` store = today's stateless behavior; when wired, `GateHTTP`/self-gated endpoints consult
+  revocation and logout revokes the current session.
+- **Self-service account lifecycle.** `DELETE /auth/api/account` (step-up gated; cascades all
+  credentials/2FA/sessions and anonymizes the audit trail — GDPR erasure) and verified change-email
+  (`POST /auth/api/account/email` → confirmation link to the NEW address → `GET /auth/email/change`),
+  which never writes the new address until it's proven and notifies the old address.
+- **OAuth unlink + a real last-method guard.** `DELETE /auth/api/identities/{provider}` removes a linked
+  social/OIDC identity, and both it and passkey removal now refuse to strip the user's **last** sign-in
+  method counted across password + passkeys + OAuth (the previous guard was passkey-only). `AccountInfo`
+  now lists linked `oauth` providers. New store methods `UnlinkOAuth` / `OAuthIdentities`.
+- **Passkey rename.** `POST /auth/api/passkeys/{id}` relabels a passkey (`RenamePasskey`).
+- **Admin user verbs.** `POST /auth/admin/users` (create), `POST /auth/admin/users/{id}/password`
+  (set/reset, policy-checked), `DELETE /auth/admin/users/{id}` (hard delete), and
+  `POST /auth/admin/users/{id}/ban` (time-boxed ban with reason). Bans are enforced in the login callers
+  and, when a session store is wired, revoke live sessions immediately.
+- **Admin impersonation.** `POST /auth/admin/users/{id}/impersonate` mints a short-lived session
+  carrying an `ImpersonatedBy` marker (surfaced at `/auth/me`); `POST /auth/api/stop-impersonating` ends
+  it. `adminGuard` refuses admin actions from an impersonated session.
+- **Trusted-origins allow-list (defense-in-depth).** `Config.TrustedOrigins` (env `TRUSTED_ORIGINS`)
+  adds an `Origin`/`Referer` allow-list check *on top of* the CSRF token, seeded from `AppURL`. Fails
+  open when the header is absent or nothing is configured, so no legitimate same-origin POST is rejected.
+
+### Changed
+
+- **`429` responses now carry `Retry-After`** on every auth rate-limit / lockout throttle.
+- **IPv6 rate-limit keys collapse to the `/64`** so an actor can't dodge per-IP limits by rotating
+  within its allocation (IPv4 keys are unchanged; audit/display still records the full address).
+- **Password length is capped at 72 bytes** (bcrypt's hard input limit), replacing the prior 200-byte
+  cap — an over-limit password is now a clean `400` instead of passing validation and failing to hash.
+- **`GET /auth/config`** now advertises `emailOtp`; **`GET /auth/me`** now returns `impersonatedBy`.
+
+### Security
+
+- **Revoking a user is durable when a `SessionStore` is wired.** Ban, disable, and hard-delete revoke the
+  target's live sessions; delete **tombstones** them (marks revoked + nulls the PII) rather than deleting
+  the rows, so an absent record can't be misread as "not revoked" and re-admit a deleted user on another
+  device. **Without a `SessionStore` (the stateless default), active sessions cannot be revoked before
+  they expire** — ban/disable/delete take effect on the next login; wire a `SessionStore` for immediate,
+  cross-device termination.
+- **Password reset validates the new password before consuming the token** (via the new `PeekToken`), so
+  a policy-rejected attempt no longer burns the single-use reset link.
+- **Defense-in-depth on the unauthenticated entry points.** The trusted-origins allow-list now also
+  guards the CSRF-exempt login endpoints (e.g. `/auth/email-otp/verify`) against login-CSRF; the
+  change-email endpoint is rate-limited; the signup rate limiter runs before any outbound HIBP call; the
+  last-sign-in-method removal guard is serialized against concurrent removals; and admin impersonation
+  always records a non-empty actor (`apikey:<id>` for API-key callers). Both reference stores are at
+  parity on duplicate-email conflicts and audit anonymization.
+- **Microsoft/Entra multi-tenant email is no longer trusted (nOAuth).** The `common`/`organizations`/
+  `consumers` (and unset) endpoints accept tokens from any tenant, so their email claim is
+  attacker-controllable; the Microsoft preset now only assume-verifies the email when a single tenant is
+  pinned (`MICROSOFT_TENANT`), and logs a warning otherwise. Prevents linking an attacker's identity onto
+  a victim's verified account.
+- **A social-login-only deployment now still gates.** `enforcing()` counts configured social providers,
+  so `GateHTTP`/`CSRFHTTP` no longer no-op (serving protected routes unauthenticated) when only social
+  login is wired.
+- **Session-cookie verification fails closed on an under-strength key** (symmetric with signing), the
+  post-login `next` redirect rejects control bytes (a tab-based scheme-relative open-redirect), a SCIM
+  `CREATE`/`PUT` onto an existing email returns `409 uniqueness` instead of silently rebinding/reclaiming
+  the account, LDAP deprovision keys on LDAP presence (not on whether the per-user upsert succeeded), an
+  untracked session (a lost `RecordSession`) fails closed rather than staying un-revocable, and
+  passkey-as-2FA can't be satisfied by the same credential used for the first factor.
+
+### Breaking
+
+- `CredentialStore` gains `SetEmail`, `DeleteUser`, `RenamePasskey`, `UnlinkOAuth`, `OAuthIdentities`,
+  `CreateEmailOTP`, `VerifyEmailOTP`, `PeekToken`; `DirectoryStore` gains `SetUserBan` and `UserByEmail`
+  (the latter lets SCIM enforce create-uniqueness); and a new optional `SessionStore` interface is
+  introduced. `AuthUser` gains `Banned` / `BannedUntil` / `BanReason`. `SessionStore.IsRevoked` now
+  treats an unknown (non-empty) SID as revoked. Custom store implementations must add the new methods
+  (both reference stores already do).
+
 ## [0.4.1] — 2026-07-02
 
 ### Fixed

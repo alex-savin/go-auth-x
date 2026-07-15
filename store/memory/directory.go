@@ -16,6 +16,14 @@ var _ authx.DirectoryStore = (*Store)(nil)
 func (s *Store) CreateGroup(name, description string) (*authx.Group, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Enforce name uniqueness (parity with gormstore's uniqueIndex on Group.Name), so a concurrent
+	// check-then-create can't leave two groups with the same name.
+	trimmed := strings.TrimSpace(name)
+	for _, g := range s.groups {
+		if g.Name == trimmed {
+			return nil, errDuplicateGroup
+		}
+	}
 	s.groupSeq++
 	g := &authx.Group{ID: s.groupSeq, Name: strings.TrimSpace(name), Description: description, CreatedAt: time.Now(), UpdatedAt: time.Now()}
 	s.groups[g.ID] = g
@@ -131,6 +139,26 @@ func (s *Store) SetUserDisabled(userID uint, disabled bool) error {
 	defer s.mu.Unlock()
 	if u := s.users[userID]; u != nil {
 		u.disabled = disabled
+	}
+	return nil
+}
+
+func (s *Store) SetUserBan(userID uint, banned bool, until *time.Time, reason string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if u := s.users[userID]; u != nil {
+		u.banned = banned
+		if banned {
+			u.banReason = reason
+			if until != nil {
+				u.bannedUntil = *until
+			} else {
+				u.bannedUntil = time.Time{}
+			}
+		} else {
+			u.banReason = ""
+			u.bannedUntil = time.Time{}
+		}
 	}
 	return nil
 }

@@ -1,10 +1,14 @@
 package authx
 
 import (
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"errors"
 	"fmt"
+	"log"
+	"os"
+	"sync"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/go-webauthn/webauthn/webauthn"
@@ -71,6 +75,17 @@ type Authenticator struct {
 	dir DirectoryStore
 	// twoFactor backs optional TOTP 2FA + recovery codes (nil = 2FA off).
 	twoFactor TwoFactorStore
+	// breach optionally screens new passwords against a breach corpus (e.g. HIBP k-anonymity), in
+	// addition to the embedded common-password list; nil = embedded list only.
+	breach BreachChecker
+	// sessions optionally records sessions so they can be revoked server-side (sign-out-everywhere,
+	// list/revoke devices, ban-revokes-all); nil = the stateless signed-cookie default.
+	sessions SessionStore
+	// credMu serializes last-sign-in-method removals (passkey/OAuth unlink) so two concurrent removals
+	// can't both pass the "don't strip the last method" check and race to zero credentials. Process-local
+	// — sufficient for the typical single-process BFF; a multi-replica deployment needing cross-node
+	// atomicity should enforce the invariant in its store. Removals are rare, so one lock is ample.
+	credMu sync.Mutex
 }
 
 // SetAuthorizer installs an optional post-login authorization hook.
@@ -89,7 +104,30 @@ func New(ctx context.Context, cfg Config) (*Authenticator, error) {
 			return nil, fmt.Errorf("authx: SESSION_SECRET must be at least 32 bytes (got %d)", len(cfg.SessionSecret))
 		}
 	}
+	// Retired verify-only keys must be just as strong as the primary — a short one would be a
+	// forgeable trusted signer. Fail closed rather than silently accepting a weak rollover key.
+	for i, prev := range cfg.PreviousSessionSecrets {
+		if len(prev) > 0 && len(prev) < 32 {
+			return nil, fmt.Errorf("authx: PreviousSessionSecrets[%d] must be at least 32 bytes (got %d)", i, len(prev))
+		}
+	}
+	// SESSION_SECRET_PREVIOUS is comma-split + whitespace-trimmed on intake, so a primary secret carrying
+	// a comma or surrounding whitespace (a common env_file / --from-file footgun) won't round-trip
+	// byte-for-byte once demoted into the rotation list — silently invalidating exactly the cookies the
+	// rollover window exists to preserve. Warn now so it's caught before a rotation, not during one.
+	if s := cfg.SessionSecret; len(s) > 0 && (bytes.ContainsRune(s, ',') || len(bytes.TrimSpace(s)) != len(s)) {
+		log.Printf("authx: WARNING SESSION_SECRET contains a comma or surrounding whitespace; it cannot be safely rotated via SESSION_SECRET_PREVIOUS (comma-split + trimmed). Use a comma/whitespace-free secret (base64/hex).")
+	}
+	// The client IP (for per-IP rate limits) trusts X-Forwarded-For only from TRUSTED_PROXIES; unset, it
+	// defaults to the private ranges + loopback. Warn so an operator whose app socket is directly reachable
+	// (not only via a proxy) knows a client on a private network could spoof its IP.
+	if os.Getenv("TRUSTED_PROXIES") == "" {
+		log.Printf("authx: TRUSTED_PROXIES is unset — X-Forwarded-For is trusted from the default private ranges (RFC1918 + loopback). Ensure the app is reachable only via your proxy, or set TRUSTED_PROXIES to the proxy address, so clients can't spoof their IP.")
+	}
 	a := &Authenticator{cfg: cfg}
+	if cfg.BreachCheckHIBP {
+		a.breach = NewHIBPBreachChecker()
+	}
 	if cfg.Enabled() {
 		provider, err := oidc.NewProvider(ctx, cfg.Issuer)
 		if err != nil {

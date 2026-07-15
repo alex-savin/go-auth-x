@@ -5,6 +5,24 @@ Direction and planned work for the library. Authoritative usage/feature docs liv
 
 ## Shipped
 
+### v0.5.0
+
+- **New capabilities** — features that fit a same-origin embedded Go BFF (IdP-shaped / multi-tenant /
+  framework-DX items were deliberately left out of scope):
+  - **HIBP password-breach check** (pluggable `BreachChecker` + k-anonymity default, fail-open, opt-in).
+  - **`SESSION_SECRET` rotation** via a `PreviousSessionSecrets` verify-only list (no mass logout).
+  - **Email OTP** (numeric code) alongside the magic link — email-scoped, salted-at-rest, attempt-capped.
+  - **Server-side session revocation** (optional `SessionStore`): list/revoke devices, sign-out-everywhere,
+    ban-revokes-all.
+  - **Self-service account lifecycle**: delete-account (GDPR cascade + audit anonymization) and verified
+    change-email; **OAuth unlink** + a cross-method last-sign-in-method guard; **passkey rename**.
+  - **Admin verbs**: create-user, set/reset password, hard-delete, time-boxed **ban**, and
+    **impersonation** (with an `ImpersonatedBy` marker `adminGuard` refuses).
+  - **Hardening quick-wins**: `429 + Retry-After`, IPv6 `/64` rate-limit keying, and a **trusted-origins**
+    allow-list layered on top of the CSRF token.
+- **BREAKING** — `CredentialStore` / `DirectoryStore` grew methods and a new optional `SessionStore`
+  interface was added (see CHANGELOG); `AuthUser` gained ban fields. Both reference stores implement them.
+
 ### v0.4.1
 
 - **`/auth/me` local-only fix** — the `Me` handler branched on the OIDC-only `Enabled()` predicate, so
@@ -74,4 +92,4 @@ a pre-v1.0 breaking change if/when a uuid-keyed consumer adopts the library or t
 
 ---
 
-_Updated 2026-07-02._
+_Updated 2026-07-15._

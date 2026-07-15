@@ -34,6 +34,24 @@ func decode(t *testing.T, w *httptest.ResponseRecorder) map[string]any {
 	return m
 }
 
+func TestSCIMCreateUniqueness(t *testing.T) {
+	// A SCIM CREATE onto an existing email must be 409 uniqueness — not a silent login-upsert rebind/reclaim.
+	srv := testServer(t)
+	body := `{"userName":"u1","emails":[{"value":"dup@x.com","primary":true}]}`
+	if w := srv("POST", "/scim/v2/Users", body); w.Code != http.StatusCreated {
+		t.Fatalf("first create: want 201, got %d (%s)", w.Code, w.Body.String())
+	}
+	// Same email via a DIFFERENT userName must conflict rather than rebind the existing user.
+	dup := `{"userName":"u2","emails":[{"value":"dup@x.com","primary":true}]}`
+	w := srv("POST", "/scim/v2/Users", dup)
+	if w.Code != http.StatusConflict {
+		t.Fatalf("duplicate-email create: want 409, got %d (%s)", w.Code, w.Body.String())
+	}
+	if m := decode(t, w); m["scimType"] != "uniqueness" {
+		t.Fatalf("want scimType=uniqueness, got %v", m["scimType"])
+	}
+}
+
 func TestSCIMPagination(t *testing.T) {
 	do := testServer(t)
 	for _, u := range []string{"a", "b", "c", "d", "e"} {
