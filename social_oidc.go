@@ -3,12 +3,23 @@ package authx
 import (
 	"context"
 	"errors"
+	"log"
 	"sort"
 	"strings"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 	"golang.org/x/oauth2"
 )
+
+// isMultiTenantMicrosoft reports whether the tenant is one of Entra's multi-tenant meta-endpoints, which
+// accept id_tokens from any tenant and therefore cannot vouch for the token's email (nOAuth).
+func isMultiTenantMicrosoft(tenant string) bool {
+	switch strings.ToLower(strings.TrimSpace(tenant)) {
+	case "", "common", "organizations", "consumers":
+		return true
+	}
+	return false
+}
 
 // oidcProvider is a generic OIDC social provider: an OAuth2 config plus an id_token verifier. It
 // backs Microsoft/Entra and any Config.SocialOIDC entry, reusing the exact Google sign-in path.
@@ -31,12 +42,22 @@ func (a *Authenticator) enableOIDCSocial(ctx context.Context) {
 		if tenant == "" {
 			tenant = "common"
 		}
+		// nOAuth guard: a MULTI-TENANT endpoint (common/organizations/consumers or unset) accepts
+		// id_tokens from ANY Entra tenant, so the token's email is attacker-controllable — an attacker's
+		// own tenant can set a user's `mail` to a victim's address. Only trust an ABSENT email_verified
+		// (assume-verified) when a single concrete tenant/domain is pinned, so the org owns its addresses.
+		// In multi-tenant mode we force strict verification; since Entra omits email_verified, logins there
+		// are refused until the operator pins a tenant (MICROSOFT_TENANT) — the safe posture.
+		assumeVerified := !a.cfg.MicrosoftStrictEmailVerified && !isMultiTenantMicrosoft(tenant)
+		if a.cfg.MicrosoftTenant == "" || isMultiTenantMicrosoft(a.cfg.MicrosoftTenant) {
+			log.Printf("authx: Microsoft login is configured for a multi-tenant endpoint (%q); token email is not trusted there — set MICROSOFT_TENANT to a single tenant/domain to enable email-based sign-in.", tenant)
+		}
 		providers = append(providers, SocialOIDCProvider{
 			Name:           "microsoft",
 			Issuer:         "https://login.microsoftonline.com/" + tenant + "/v2.0",
 			ClientID:       a.cfg.MicrosoftClientID,
 			ClientSecret:   a.cfg.MicrosoftClientSecret,
-			AssumeVerified: !a.cfg.MicrosoftStrictEmailVerified,
+			AssumeVerified: assumeVerified,
 		})
 	}
 

@@ -153,6 +153,11 @@ func (s *Syncer) Sync() (*Result, error) {
 		if uid == "" || email == "" {
 			continue // a user with no uid/email can't be keyed or linked
 		}
+		// Mark PRESENCE as soon as a valid uid is read — BEFORE the upsert — so a user who is present in
+		// LDAP but whose upsert transiently fails (DB deadlock / connection blip) is NOT then deprovisioned
+		// (disabled) as "missing from LDAP". Deprovision must key on absence from the LDAP search, not on
+		// whether the write succeeded this run.
+		seen["ldap:"+uid] = true
 		au, uerr := s.dir.UpsertExternalUser("ldap:"+uid, email, e.GetAttributeValue(s.cfg.AttrName), true)
 		if uerr != nil {
 			res.Errors = append(res.Errors, fmt.Sprintf("user %s: %v", uid, uerr))
@@ -160,7 +165,6 @@ func (s *Syncer) Sync() (*Result, error) {
 		}
 		userByDN[normalizeDN(e.DN)] = au.ID
 		userByUID[uid] = au.ID
-		seen["ldap:"+uid] = true
 		res.Users++
 	}
 

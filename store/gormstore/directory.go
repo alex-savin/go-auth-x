@@ -186,6 +186,15 @@ func (s *Store) SetUserDisabled(userID uint, disabled bool) error {
 	return s.db.Model(&User{}).Where("id = ?", userID).Update("disabled", disabled).Error
 }
 
+func (s *Store) SetUserBan(userID uint, banned bool, until *time.Time, reason string) error {
+	updates := map[string]any{"banned": banned, "banned_until": until, "ban_reason": reason}
+	if !banned {
+		updates["banned_until"] = nil
+		updates["ban_reason"] = ""
+	}
+	return s.db.Model(&User{}).Where("id = ?", userID).Updates(updates).Error
+}
+
 // UpsertExternalUser provisions a directory-sourced user (LDAP/SCIM) via the safe linking rule.
 func (s *Store) UpsertExternalUser(sub, email, name string, emailVerified bool) (*authx.AuthUser, error) {
 	return s.UpsertUserOnLogin(sub, email, name, emailVerified)

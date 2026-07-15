@@ -93,8 +93,8 @@ func (a *Authenticator) TOTPDisable(c *reqCtx) {
 		return
 	}
 	// Throttle: disabling verifies the same brute-forceable 6-digit code space as /2fa/verify.
-	if a.ipLimiter != nil && !a.ipLimiter.Allow("2fa:"+c.ClientIP()) {
-		c.JSON(http.StatusTooManyRequests, H{"error": "too many attempts — wait and try again"})
+	if a.ipLimiter != nil && !a.ipLimiter.Allow("2fa:"+c.rateIP()) {
+		c.tooMany("too many attempts — wait and try again")
 		return
 	}
 	var body struct{ Code string }
@@ -125,8 +125,8 @@ func (a *Authenticator) TwoFactorVerify(c *reqCtx) {
 		return
 	}
 	// Throttle second-factor guessing (a 6-digit code space in a short window is brute-forceable).
-	if a.ipLimiter != nil && !a.ipLimiter.Allow("2fa:"+c.ClientIP()) {
-		c.JSON(http.StatusTooManyRequests, H{"error": "too many attempts — wait and try again"})
+	if a.ipLimiter != nil && !a.ipLimiter.Allow("2fa:"+c.rateIP()) {
+		c.tooMany("too many attempts — wait and try again")
 		return
 	}
 	tok, _ := c.Cookie(twoFactorPendingCookie)
@@ -136,7 +136,7 @@ func (a *Authenticator) TwoFactorVerify(c *reqCtx) {
 		return
 	}
 	if a.acctLimiter != nil && !a.acctLimiter.Allow("2fa:"+pc.Subject) {
-		c.JSON(http.StatusTooManyRequests, H{"error": "too many attempts — wait and try again"})
+		c.tooMany("too many attempts — wait and try again")
 		return
 	}
 	u, uerr := a.creds.UserBySub(pc.Subject)
@@ -144,8 +144,8 @@ func (a *Authenticator) TwoFactorVerify(c *reqCtx) {
 		c.JSON(http.StatusUnauthorized, H{"error": "sign in again"})
 		return
 	}
-	if u.Disabled { // a user disabled between the first and second factor must not complete the login
-		c.JSON(http.StatusForbidden, H{"error": "this account has been disabled"})
+	if blocked, msg := u.loginBlocked(); blocked { // disabled/banned between the two factors: refuse
+		c.JSON(http.StatusForbidden, H{"error": msg})
 		return
 	}
 	var body struct{ Code string }

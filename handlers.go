@@ -30,6 +30,12 @@ func (a *Authenticator) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /auth/logout", a.wrap(a.Logout))
 	mux.HandleFunc("GET /auth/me", a.wrap(a.Me))
 	mux.HandleFunc("GET /auth/config", a.wrap(a.AuthConfig)) // public: which methods are available
+	// Session management + impersonation-exit act on the session cookie regardless of which methods are
+	// enabled, so they're registered unconditionally (they self-gate and 501 when no session store).
+	mux.HandleFunc("GET /auth/api/sessions", a.wrap(a.SessionList))
+	mux.HandleFunc("DELETE /auth/api/sessions/{sid}", a.wrap(a.SessionRevoke))
+	mux.HandleFunc("POST /auth/api/sessions/revoke-others", a.wrap(a.SessionRevokeOthers))
+	mux.HandleFunc("POST /auth/api/stop-impersonating", a.wrap(a.StopImpersonating))
 	if a.LocalEnabled() {
 		mux.HandleFunc("POST /auth/password/signup", a.wrap(a.PasswordSignup))
 		mux.HandleFunc("POST /auth/password/login", a.wrap(a.PasswordLogin))
@@ -38,14 +44,21 @@ func (a *Authenticator) routes(mux *http.ServeMux) {
 		mux.HandleFunc("POST /auth/email/request", a.wrap(a.EmailRequest))
 		mux.HandleFunc("GET /auth/email/login", a.wrap(a.EmailLogin))
 		mux.HandleFunc("GET /auth/email/verify", a.wrap(a.EmailVerify))
+		mux.HandleFunc("POST /auth/email-otp/send", a.wrap(a.EmailOTPSend))     // numeric sign-in code
+		mux.HandleFunc("POST /auth/email-otp/verify", a.wrap(a.EmailOTPVerify)) // redeem the code
+		mux.HandleFunc("GET /auth/email/change", a.wrap(a.EmailChangeConfirm))  // confirm a new address
 		mux.HandleFunc("POST /auth/webauthn/register/begin", a.wrap(a.WebauthnRegisterBegin))
 		mux.HandleFunc("POST /auth/webauthn/register/finish", a.wrap(a.WebauthnRegisterFinish))
 		mux.HandleFunc("POST /auth/webauthn/login/begin", a.wrap(a.WebauthnLoginBegin))
 		mux.HandleFunc("POST /auth/webauthn/login/finish", a.wrap(a.WebauthnLoginFinish))
 		mux.HandleFunc("GET /auth/api/account", a.wrap(a.AccountInfo))
 		mux.HandleFunc("POST /auth/api/account/password", a.wrap(a.AccountSetPassword))
+		mux.HandleFunc("POST /auth/api/account/email", a.wrap(a.AccountChangeEmailRequest)) // verified change-email
+		mux.HandleFunc("DELETE /auth/api/account", a.wrap(a.AccountDelete))                 // self-service delete
 		mux.HandleFunc("DELETE /auth/api/passkeys/{id}", a.wrap(a.PasskeyRemove))
-		mux.HandleFunc("POST /auth/reauth", a.wrap(a.ReAuth)) // step-up re-auth for sensitive actions
+		mux.HandleFunc("POST /auth/api/passkeys/{id}", a.wrap(a.PasskeyRename))
+		mux.HandleFunc("DELETE /auth/api/identities/{provider}", a.wrap(a.OAuthUnlink)) // unlink social/OIDC
+		mux.HandleFunc("POST /auth/reauth", a.wrap(a.ReAuth))                           // step-up re-auth for sensitive actions
 	}
 	if a.TwoFactorEnabled() {
 		mux.HandleFunc("POST /auth/2fa/totp/begin", a.wrap(a.TOTPBegin))     // session-gated: start enrollment
@@ -105,7 +118,7 @@ func (a *Authenticator) Callback(c *reqCtx) {
 	ctx := c.Request.Context()
 
 	flowTok, _ := c.Cookie(flowCookie)
-	fc, err := parseFlow(a.cfg.SessionSecret, flowTok)
+	fc, err := parseFlowMulti(a.verifySecrets(), flowTok)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, H{"error": "login session expired — try again"})
 		return
@@ -190,12 +203,16 @@ func (a *Authenticator) Callback(c *reqCtx) {
 		}
 	}
 
-	session, err := mintSession(a.cfg.SessionSecret, idToken.Subject, claims.Email, name, role, rawID, claims.Groups, time.Now(), sessionTTL)
+	sid := a.newSessionID()
+	session, err := mintSessionWith(a.cfg.SessionSecret, SessionClaims{
+		Email: claims.Email, Name: name, Groups: claims.Groups, Role: role, IDToken: rawID, SID: sid,
+	}, idToken.Subject, time.Now(), sessionTTL)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, H{"error": "session creation failed"})
 		return
 	}
 	a.setCookie(c, sessionCookie, session, int(sessionTTL/time.Second))
+	a.recordSession(c.Request, sid, idToken.Subject, 0, sessionTTL)
 	a.issueCSRF(c) // parity with the in-app login funnel — the SPA needs a CSRF cookie for its first POST
 	c.Redirect(http.StatusFound, fc.Next)
 }
@@ -203,12 +220,18 @@ func (a *Authenticator) Callback(c *reqCtx) {
 // Logout clears the session and, if the IdP advertises one, redirects to its
 // RP-initiated logout endpoint.
 func (a *Authenticator) Logout(c *reqCtx) {
-	// Read the id_token (logout hint) before clearing the session cookie.
-	var idHint string
+	// Read the id_token (logout hint) + session id before clearing the session cookie.
+	var idHint, sid string
 	if tok, _ := c.Cookie(sessionCookie); tok != "" {
-		if sc, err := parseSession(a.cfg.SessionSecret, tok); err == nil {
+		if sc, err := parseSessionMulti(a.verifySecrets(), tok); err == nil {
 			idHint = sc.IDToken
+			sid = sc.SID
 		}
+	}
+	// If server-side session tracking is on, revoke this session's record too (belt-and-suspenders
+	// with clearing the cookie — so a copy of the cookie can't be replayed after logout).
+	if sid != "" && a.sessions != nil {
+		_ = a.sessions.RevokeSession(sid)
 	}
 	a.clearCookie(c, sessionCookie)
 	a.clearCookie(c, csrfCookie)
@@ -251,19 +274,20 @@ func (a *Authenticator) Me(c *reqCtx) {
 	}
 	// The /auth group is public, so parse the cookie directly here.
 	tok, _ := c.Cookie(sessionCookie)
-	sc, err := parseSession(a.cfg.SessionSecret, tok)
-	if err != nil {
+	sc, err := parseSessionMulti(a.verifySecrets(), tok)
+	if err != nil || a.sessionRevoked(sc) {
 		c.JSON(http.StatusOK, H{"authEnabled": true, "authenticated": false})
 		return
 	}
 	c.JSON(http.StatusOK, H{
-		"authEnabled":   true,
-		"authenticated": true,
-		"sub":           sc.Subject,
-		"email":         sc.Email,
-		"name":          sc.Name,
-		"groups":        sc.Groups,
-		"role":          sc.Role,
+		"authEnabled":    true,
+		"authenticated":  true,
+		"sub":            sc.Subject,
+		"email":          sc.Email,
+		"name":           sc.Name,
+		"groups":         sc.Groups,
+		"role":           sc.Role,
+		"impersonatedBy": sc.ImpersonatedBy,
 	})
 }
 
@@ -289,12 +313,19 @@ func randToken() string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
-// sanitizeNext keeps the post-login redirect to a local path (prevents open-redirect
-// to an attacker host); defaults to the dashboard root. It rejects scheme-relative targets:
-// "//evil.com" AND "/\evil.com" (browsers treat a backslash as a slash, so "/\" is scheme-relative).
+// sanitizeNext keeps the post-login redirect to a local path (prevents open-redirect to an attacker
+// host); defaults to the dashboard root. It rejects scheme-relative targets ("//evil.com" AND
+// "/\evil.com" — browsers treat a backslash as a slash) and any target containing a control byte:
+// browsers strip ASCII whitespace such as a tab before parsing a URL, so "/\t/evil.com" would be read
+// as "//evil.com" (scheme-relative) and redirect off-site.
 func sanitizeNext(next string) string {
 	if next == "" || !strings.HasPrefix(next, "/") {
 		return "/"
+	}
+	for i := 0; i < len(next); i++ {
+		if next[i] < 0x20 || next[i] == 0x7f { // control byte (tab/newline/…) → reject
+			return "/"
+		}
 	}
 	if len(next) > 1 && (next[1] == '/' || next[1] == '\\') {
 		return "/"

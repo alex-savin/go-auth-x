@@ -2,6 +2,7 @@ package authx
 
 import (
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -30,6 +31,8 @@ var csrfExempt = map[string]bool{
 	"/auth/password/reset/request": true,
 	"/auth/password/reset/confirm": true, // proven by the reset token in the body
 	"/auth/email/request":          true,
+	"/auth/email-otp/send":         true, // pre-session: emails a numeric code
+	"/auth/email-otp/verify":       true, // pre-session: redeems the code to establish the session
 	"/auth/webauthn/login/begin":   true, // discoverable login — no session yet
 	"/auth/webauthn/login/finish":  true,
 	"/auth/2fa/verify":             true, // pre-session (mid-login); gated by the code + signed pending cookie
@@ -50,3 +53,43 @@ func (a *Authenticator) writeCSRFCookie(w http.ResponseWriter, r *http.Request) 
 
 // issueCSRF sets a fresh CSRF cookie (called on every login).
 func (a *Authenticator) issueCSRF(c *reqCtx) { a.writeCSRFCookie(c.w, c.Request) }
+
+// originAllowed is defense-in-depth layered ON TOP of the double-submit token: on a state-changing
+// request it requires the Origin (or, absent that, the Referer's origin) to match an allow-list of
+// AppURL + Config.TrustedOrigins. It FAILS OPEN — a request with neither header, or an empty
+// allow-list, passes — so the token stays the primary check and no legitimate same-origin POST is
+// rejected (important in local-only mode, where AppURL may be unset). Only a PRESENT-and-mismatched
+// origin is refused, which uniquely blocks the sibling-subdomain cookie-injection CSRF variant that
+// SameSite=Lax (an eTLD+1-scoped signal) does not.
+func (a *Authenticator) originAllowed(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		if ref := r.Header.Get("Referer"); ref != "" {
+			if u, err := url.Parse(ref); err == nil && u.Scheme != "" && u.Host != "" {
+				origin = u.Scheme + "://" + u.Host
+			}
+		}
+	}
+	if origin == "" {
+		return true // nothing to check — the token remains the primary defense
+	}
+	allowed := a.trustedOrigins()
+	if len(allowed) == 0 {
+		return true // no allow-list configured
+	}
+	for _, o := range allowed {
+		if o != "" && strings.EqualFold(o, origin) {
+			return true
+		}
+	}
+	return false
+}
+
+// trustedOrigins is AppURL's origin plus any Config.TrustedOrigins.
+func (a *Authenticator) trustedOrigins() []string {
+	var out []string
+	if b := a.baseURL(); b != "" {
+		out = append(out, b)
+	}
+	return append(out, a.cfg.TrustedOrigins...)
+}

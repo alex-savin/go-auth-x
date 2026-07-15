@@ -7,12 +7,21 @@ package memory
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
+	"errors"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	authx "github.com/alex-savin/go-auth-x"
+)
+
+// Uniqueness violations mirrored from gormstore's unique indexes (parity for tests/demos).
+var (
+	errDuplicateCredential = errors.New("memory: credential already registered")
+	errDuplicateGroup      = errors.New("memory: a group with that name already exists")
 )
 
 type user struct {
@@ -21,6 +30,9 @@ type user struct {
 	email, name          string
 	emailVerified        bool
 	disabled             bool
+	banned               bool
+	bannedUntil          time.Time
+	banReason            string
 	webauthnHandle       []byte
 	createdAt, updatedAt time.Time
 }
@@ -39,7 +51,20 @@ type token struct {
 	consumedAt *time.Time
 }
 
+type emailOTP struct {
+	codeHash    []byte
+	attempts    int
+	maxAttempts int
+	expiresAt   time.Time
+}
+
+type sessionRec struct {
+	rec     authx.SessionRecord
+	revoked bool
+}
+
 type audit struct {
+	userID    uint
 	email     string
 	success   bool
 	createdAt time.Time
@@ -55,6 +80,8 @@ type Store struct {
 	pkSeq     uint
 	oauth     map[string]uint // (provider|subject) -> userID
 	tokens    []*token
+	otps      map[string]*emailOTP // (purpose|email) -> code
+	sessions  map[string]*sessionRec
 	audits    []*audit
 	// directory state
 	groups      map[uint]*authx.Group
@@ -85,6 +112,8 @@ func New() *Store {
 		passwords:   map[uint]struct{ hash, algo string }{},
 		passkeys:    map[uint]*passkey{},
 		oauth:       map[string]uint{},
+		otps:        map[string]*emailOTP{},
+		sessions:    map[string]*sessionRec{},
 		groups:      map[uint]*authx.Group{},
 		memberships: map[uint]map[uint]bool{},
 		apikeys:     map[uint]*apiKey{},
@@ -102,7 +131,7 @@ func randID() string {
 }
 
 func view(u *user) *authx.AuthUser {
-	return &authx.AuthUser{ID: u.id, Sub: u.sub, Email: u.email, Name: u.name, EmailVerified: u.emailVerified, Disabled: u.disabled, CreatedAt: u.createdAt, UpdatedAt: u.updatedAt}
+	return &authx.AuthUser{ID: u.id, Sub: u.sub, Email: u.email, Name: u.name, EmailVerified: u.emailVerified, Disabled: u.disabled, Banned: u.banned, BannedUntil: u.bannedUntil, BanReason: u.banReason, CreatedAt: u.createdAt, UpdatedAt: u.updatedAt}
 }
 
 func (s *Store) findByEmail(email string) *user {
@@ -206,6 +235,12 @@ func (s *Store) Passkeys(userID uint) ([]authx.Passkey, error) {
 func (s *Store) AddPasskey(userID uint, p authx.Passkey) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Reject a globally-duplicate credential ID (parity with gormstore's uniqueIndex on CredentialID).
+	for _, pk := range s.passkeys {
+		if string(pk.p.CredentialID) == string(p.CredentialID) {
+			return errDuplicateCredential
+		}
+	}
 	s.pkSeq++
 	p.ID = s.pkSeq
 	p.CreatedAt, p.LastUsedAt = time.Now(), time.Now()
@@ -295,10 +330,140 @@ func (s *Store) ConsumeToken(purpose string, tokenHash []byte) (*authx.TokenClai
 	return nil, authx.ErrTokenInvalid
 }
 
+func (s *Store) SetEmail(userID uint, newEmail string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ne := norm(newEmail)
+	for _, u := range s.users {
+		if u.email == ne && u.id != userID {
+			return authx.ErrEmailConflict
+		}
+	}
+	if u := s.users[userID]; u != nil {
+		u.email = ne
+		u.emailVerified = true
+		u.updatedAt = time.Now()
+	}
+	return nil
+}
+
+// DeleteUser hard-deletes the user + everything keyed to it, drops its email OTPs, and anonymizes its
+// audit rows' email (parity with gormstore's GDPR-erasure behavior). Idempotent.
+func (s *Store) DeleteUser(userID uint) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	email := ""
+	if u := s.users[userID]; u != nil {
+		email = u.email
+	}
+	s.deleteUserCascadeLocked(userID)
+	if email != "" {
+		for k := range s.otps {
+			if strings.HasSuffix(k, "|"+email) {
+				delete(s.otps, k)
+			}
+		}
+	}
+	// Anonymize by userID (matching gormstore's key), so audit rows written under a since-changed email
+	// are still scrubbed. memory never stores an IP, so there is nothing else to clear.
+	for _, a := range s.audits {
+		if a.userID == userID {
+			a.email = ""
+		}
+	}
+	return nil
+}
+
+func (s *Store) RenamePasskey(userID, id uint, name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if pk := s.passkeys[id]; pk != nil && pk.userID == userID {
+		pk.p.Name = name
+	}
+	return nil
+}
+
+func (s *Store) UnlinkOAuth(userID uint, provider string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for k, uid := range s.oauth {
+		if uid == userID && strings.HasPrefix(k, provider+"|") {
+			delete(s.oauth, k)
+		}
+	}
+	return nil
+}
+
+func (s *Store) OAuthIdentities(userID uint) ([]string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	seen := map[string]bool{}
+	var out []string
+	for k, uid := range s.oauth {
+		if uid != userID {
+			continue
+		}
+		if i := strings.IndexByte(k, '|'); i > 0 {
+			if p := k[:i]; !seen[p] {
+				seen[p] = true
+				out = append(out, p)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func (s *Store) CreateEmailOTP(purpose, email string, codeHash []byte, expiresAt time.Time, maxAttempts int) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.otps[purpose+"|"+norm(email)] = &emailOTP{codeHash: codeHash, maxAttempts: maxAttempts, expiresAt: expiresAt}
+	return nil
+}
+
+func (s *Store) VerifyEmailOTP(purpose, email string, codeHash []byte) (*authx.TokenClaim, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := purpose + "|" + norm(email)
+	o := s.otps[key]
+	if o == nil {
+		return nil, authx.ErrTokenInvalid
+	}
+	if time.Now().After(o.expiresAt) {
+		delete(s.otps, key)
+		return nil, authx.ErrTokenInvalid
+	}
+	match := subtle.ConstantTimeCompare(o.codeHash, codeHash) == 1
+	last := o.attempts+1 >= o.maxAttempts
+	if match || last {
+		delete(s.otps, key)
+		if !match {
+			return nil, authx.ErrTokenInvalid
+		}
+		return &authx.TokenClaim{Email: norm(email)}, nil
+	}
+	o.attempts++
+	return nil, authx.ErrTokenInvalid
+}
+
+func (s *Store) PeekToken(purpose string, tokenHash []byte) (*authx.TokenClaim, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, t := range s.tokens {
+		if t.purpose == purpose && string(t.hash) == string(tokenHash) {
+			if t.consumedAt != nil || time.Now().After(t.expiresAt) {
+				return nil, authx.ErrTokenInvalid
+			}
+			return &authx.TokenClaim{UserID: t.userID, Email: t.email}, nil
+		}
+	}
+	return nil, authx.ErrTokenInvalid
+}
+
 func (s *Store) RecordAudit(userID uint, email, ip, method, event string, success bool, detail string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.audits = append(s.audits, &audit{email: norm(email), success: success, createdAt: time.Now()})
+	s.audits = append(s.audits, &audit{userID: userID, email: norm(email), success: success, createdAt: time.Now()})
 }
 
 func (s *Store) RecentFailures(email string, since time.Time) (int, error) {
@@ -396,4 +561,12 @@ func (s *Store) deleteUserCascadeLocked(id uint) {
 		}
 	}
 	s.tokens = kept
+	// Tombstone (do not delete) the user's sessions so IsRevoked keeps denying them on other devices
+	// after a hard delete — deleting would make an absent SID read as "not revoked". (Reclaim targets
+	// have no sessions, so this is a no-op for the squatter-reclaim caller.)
+	for _, r := range s.sessions {
+		if r.rec.UserID == id {
+			r.revoked = true
+		}
+	}
 }

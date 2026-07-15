@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -48,6 +49,32 @@ func (c *reqCtx) ShouldBindJSON(v any) error {
 }
 func (c *reqCtx) Redirect(code int, url string) { http.Redirect(c.w, c.Request, url, code) }
 func (c *reqCtx) ClientIP() string              { return c.a.clientIP(c.Request) }
+
+// rateAfterSeconds is the Retry-After hint (seconds) returned with a 429 throttle response.
+const rateAfterSeconds = 60
+
+// tooMany writes a 429 with a Retry-After header so clients (and well-behaved bots) back off instead
+// of hammering. Used for every auth rate-limit / lockout throttle.
+func (c *reqCtx) tooMany(msg string) {
+	c.w.Header().Set("Retry-After", strconv.Itoa(rateAfterSeconds))
+	c.JSON(http.StatusTooManyRequests, H{"error": msg})
+}
+
+// rateIP returns the client IP normalized for rate-limit KEYS: an IPv6 address collapses to its /64
+// prefix (a single actor is typically handed a whole /64, so per-address limits are trivially dodged
+// by rotating within it), while IPv4 is unchanged. Not for audit/display — use ClientIP() there.
+func (c *reqCtx) rateIP() string { return maskIPForRateLimit(c.ClientIP()) }
+
+func maskIPForRateLimit(ip string) string {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return ip
+	}
+	if parsed.To4() != nil {
+		return ip // IPv4 (incl. IPv4-mapped): key on the exact address
+	}
+	return parsed.Mask(net.CIDRMask(64, 128)).String() + "/64"
+}
 
 // clientIP extracts the client IP, honoring X-Forwarded-For ONLY when the direct peer is a trusted
 // proxy (so XFF can't be spoofed) — the behavior gin's SetTrustedProxies provided.

@@ -44,7 +44,10 @@ func (a *Authenticator) GateHTTP(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		sc, err := parseSession(a.cfg.SessionSecret, cookieValue(r, sessionCookie))
+		sc, err := parseSessionMulti(a.verifySecrets(), cookieValue(r, sessionCookie))
+		if err == nil && a.sessionRevoked(sc) {
+			err = errRevokedSession // a revoked session is treated as no session
+		}
 		if err != nil {
 			// API-key (Bearer) principals authenticate without a session cookie — let them through so
 			// RequireGroupsHTTP can authorize by the key's groups (CSRFHTTP already skips Bearer).
@@ -81,12 +84,30 @@ func (a *Authenticator) CSRFHTTP(next http.Handler) http.Handler {
 			return
 		}
 		p := r.URL.Path
-		if (!strings.HasPrefix(p, "/api/") && !strings.HasPrefix(p, "/auth/")) || csrfExempt[p] || isSocialCallback(p) {
+		if !strings.HasPrefix(p, "/api/") && !strings.HasPrefix(p, "/auth/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// Social callbacks are legitimately cross-site (Apple's form_post arrives from Apple's origin) and
+		// are protected by the OAuth `state` parameter — skip both the token AND the origin check.
+		if isSocialCallback(p) {
 			next.ServeHTTP(w, r)
 			return
 		}
 		// Bearer (API key) auth isn't cookie-based → not CSRF-able; skip.
 		if bearerToken(r.Header.Get("Authorization")) != "" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		// The unauthenticated entry points (login/reset/OTP-verify/…) can't carry a double-submit token,
+		// but the trusted-origins check still applies as defense-in-depth against a cross-site login-CSRF
+		// (e.g. logging a victim into the attacker's account via /auth/email-otp/verify). It fails open
+		// when no allow-list is configured or no Origin/Referer is present, so the default is unaffected.
+		if csrfExempt[p] {
+			if !a.originAllowed(r) {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "cross-origin request refused"})
+				return
+			}
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -138,5 +159,9 @@ func (a *Authenticator) csrfValidHTTP(r *http.Request) bool {
 	if cookie == "" || header == "" {
 		return false
 	}
-	return subtle.ConstantTimeCompare([]byte(cookie), []byte(header)) == 1
+	if subtle.ConstantTimeCompare([]byte(cookie), []byte(header)) != 1 {
+		return false
+	}
+	// Defense-in-depth: also require a present Origin/Referer to be allow-listed (fails open otherwise).
+	return a.originAllowed(r)
 }

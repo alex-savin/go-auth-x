@@ -79,8 +79,12 @@ func (s *Server) loc(kind, id string) string {
 	return s.baseURL + "/" + kind + "/" + id
 }
 
-// NewServer builds a SCIM server. auth validates the bearer token on every request; pass
-// func(t string) bool { _, ok := authn.ValidateAPIKey(t); return ok } to authenticate via API keys.
+// NewServer builds a SCIM server. auth validates the bearer token on every request; pass a
+// scope-checking closure so only keys granted the "scim" scope may provision:
+//
+//	func(t string) bool { return authn.ValidateAPIKeyScope(t, "scim") }
+//
+// (Prefer this over the scopeless ValidateAPIKey, which would admit any valid key regardless of scope.)
 func NewServer(dir authx.DirectoryStore, auth func(token string) bool) *Server {
 	s := &Server{dir: dir, auth: auth}
 	s.mux = s.routes()
@@ -341,6 +345,17 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 	if in.Name != nil && in.Name.Formatted != "" {
 		name = in.Name.Formatted
 	}
+	// A SCIM CREATE must be a create, not the login-time upsert: pre-check email uniqueness and refuse any
+	// collision with 409 uniqueness (RFC 7644 §3.3). Without this, UpsertExternalUser's account-linking
+	// rule would silently REBIND a verified existing user's Sub (orphaning their sessions/data) or
+	// destructively cascade-delete an unverified row's credentials — data loss from a provisioning CREATE.
+	if existing, cerr := s.dir.UserByEmail(email); cerr == nil && existing != nil {
+		scimErrorType(w, http.StatusConflict, "uniqueness", "a user with this email already exists")
+		return
+	} else if cerr != nil && !errors.Is(cerr, authx.ErrNoUser) {
+		scimInternal(w, "createUser", cerr)
+		return
+	}
 	u, err := s.dir.UpsertExternalUser("scim:"+in.UserName, email, name, true)
 	if err != nil {
 		if errors.Is(err, authx.ErrEmailConflict) {
@@ -450,6 +465,10 @@ func (s *Server) putUser(w http.ResponseWriter, r *http.Request) {
 		name = in.Name.Formatted
 	}
 	if _, uerr := s.dir.UpsertExternalUser(cur.Sub, email, name, true); uerr != nil { // preserve Sub
+		if errors.Is(uerr, authx.ErrEmailConflict) { // PUT would move this user onto another's email
+			scimErrorType(w, http.StatusConflict, "uniqueness", "a user with this email already exists")
+			return
+		}
 		scimInternal(w, "putUser", uerr)
 		return
 	}

@@ -69,25 +69,33 @@ IdP hand-off, no "double login page."
 - 🔑 **Passwords** — bcrypt (cost 12), NIST-style policy, constant-time anti-enumeration.
 - 🟢 **Passkeys / WebAuthn** — discoverable (usernameless) login, **cross-device QR** (FIDO2 hybrid),
   clone detection, self-service enrollment & removal.
-- ✉️ **Email magic-links** — passwordless sign-in + email verification + password reset, all via
-  single-use, hashed-at-rest tokens.
+- ✉️ **Email magic-links + OTP** — passwordless sign-in by single-use **link** or 6-digit **numeric code**
+  (email-scoped, salted-at-rest, attempt-capped), plus email verification + password reset.
 - 🌐 **OIDC client** — Authorization Code + PKCE; consume any OIDC provider (Keycloak, Auth0, …).
 - 👥 **Social login** — Google, Apple & Microsoft/Entra (OIDC), GitHub, Facebook & Discord (REST/Graph),
-  plus **any OIDC provider** via `Config.SocialOIDC`; verified-email only.
+  plus **any OIDC provider** via `Config.SocialOIDC`; verified-email only. Self-service **unlink**.
 - 🔐 **Two-factor (2FA)** — TOTP authenticator apps + single-use recovery codes; **stdlib, no dependency**.
+- 🔎 **Breached-password check** — optional **HIBP k-anonymity** screening (`BreachChecker`), fail-open.
 
 **Session & transport**
 - 🍪 **BFF sessions** — one HMAC-signed (HS256) HttpOnly cookie; the SPA never handles tokens.
-- 🛡 **CSRF** — double-submit token, enforced on state-changing requests.
+- 🔄 **Key rotation** — `PreviousSessionSecrets` verify-list rotates `SESSION_SECRET` without mass logout.
+- 📵 **Revocable sessions** *(optional)* — a pluggable `SessionStore` adds list/revoke-device,
+  sign-out-everywhere, and ban-revokes-all over the stateless default.
+- 🛡 **CSRF** — double-submit token + optional **trusted-origins** allow-list (defense-in-depth).
 - 🧩 **Framework-agnostic** — mount as an `http.Handler`; net/http middleware for chi/echo/stdlib.
+
+**Account self-service**
+- 👤 Change password, **verified change-email**, **delete account** (GDPR cascade), passkey enroll/rename/remove.
 
 **Directory (optional, enterprise tier)**
 - 🗂 **Groups** + per-group **access control** middleware.
-- 🔐 **API keys** (Bearer) + an **admin REST API**.
+- 🔐 **API keys** (Bearer) + an **admin REST API**: create/disable/**ban**/delete users, set passwords,
+  **impersonate**, and list/revoke a user's sessions.
 - 🏢 **LDAP** sync and a minimal **SCIM 2.0** provisioning server.
 
 **Operational**
-- 🚦 Rate limiting + soft lockout, trusted-proxy-aware client IP.
+- 🚦 Rate limiting + soft lockout (**`429 + Retry-After`**, IPv6 `/64` keying), trusted-proxy-aware client IP.
 - 🧪 Reference **GORM** and **in-memory** stores; swap in your own via small interfaces.
 
 ---
@@ -145,7 +153,9 @@ func main() {
 	authn.SetCredentialStore(store)         // persistence
 	authn.SetDirectoryStore(store)          // optional: groups / API keys / admin API
 	authn.SetTwoFactorStore(store)          // optional: TOTP 2FA + recovery codes
-	authn.SetMailer(mailer.FromEnv())       // optional: enables magic-link / verify / reset
+	authn.SetSessionStore(store)            // optional: revocable sessions (list/revoke devices, sign-out-everywhere)
+	authn.SetBreachChecker(authx.NewHIBPBreachChecker()) // optional: HIBP password-breach screening (or HIBP_BREACH_CHECK=true)
+	authn.SetMailer(mailer.FromEnv())       // optional: enables magic-link / email-OTP / verify / reset
 	authn.SetAuthorizer(store.Authorizer()) // safe identity upsert (wrap to add provisioning)
 	authn.SetLocalEnabled(true)             // turn on password + passkey + email
 
@@ -248,7 +258,10 @@ provider activates when its client id + secret are present.
 | Env var | Config field | Notes |
 |---|---|---|
 | `SESSION_SECRET` | `SessionSecret` | **Required, ≥ 32 bytes.** HMAC key for the session/flow/CSRF cookies. |
+| `SESSION_SECRET_PREVIOUS` | `PreviousSessionSecrets` | Comma-separated retired keys, accepted for **verification only**, so `SESSION_SECRET` rotates without mass logout. Each ≥ 32 bytes; drop after one TTL window. |
 | `APP_URL` | `AppURL` | Public origin, e.g. `https://app.example.com`. Used for email links + redirects. |
+| `TRUSTED_ORIGINS` | `TrustedOrigins` | Comma-separated extra origins allowed on state-changing requests (defense-in-depth atop the CSRF token; `AppURL` is always allowed). Fails open when absent. |
+| `HIBP_BREACH_CHECK` | `BreachCheckHIBP` | `true` wires the default HIBP k-anonymity password-breach checker (fail-open). Or call `SetBreachChecker`. |
 | `OWNER_EMAIL` | `OwnerEmail` | Exempt from hard lockout; gates the admin API via session. |
 | `BRAND_NAME` | `BrandName` | Product name shown in auth emails and the default WebAuthn RP display name (default `go-auth-x`). |
 | `COOKIE_SECURE` | `CookieSecure` | Force the `Secure` flag (also auto-on under TLS / `X-Forwarded-Proto: https`). |
@@ -261,9 +274,9 @@ provider activates when its client id + secret are present.
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | `GitHubClientID` / `…Secret` | Enables GitHub login. |
 | `FACEBOOK_CLIENT_ID` / `FACEBOOK_CLIENT_SECRET` | `FacebookClientID` / `…Secret` | Enables Facebook login. |
 | `APPLE_CLIENT_ID` `APPLE_TEAM_ID` `APPLE_KEY_ID` `APPLE_PRIVATE_KEY` | `AppleClientID` / `…TeamID` / `…KeyID` / `…PrivateKey` | Sign in with Apple (Services ID, Team ID, Key ID, `.p8` PEM). Requires HTTPS. |
-| `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET` / `MICROSOFT_TENANT` | `MicrosoftClientID` / `…Secret` / `…Tenant` | Microsoft / Entra ID login. Tenant defaults to `common`; set a directory ID to restrict to one org. |
+| `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET` / `MICROSOFT_TENANT` | `MicrosoftClientID` / `…Secret` / `…Tenant` | Microsoft / Entra ID login. **Pin `MICROSOFT_TENANT` to a single tenant GUID / verified domain to enable sign-in** — the default `common` (and `organizations`/`consumers`) is multi-tenant, where the token email is attacker-controllable (nOAuth) and therefore **not trusted**, so those sign-ins are refused. |
 | `DISCORD_CLIENT_ID` / `DISCORD_CLIENT_SECRET` | `DiscordClientID` / `…Secret` | Enables Discord login (verified email required). |
-| `MICROSOFT_STRICT_EMAIL_VERIFIED` | `MicrosoftStrictEmailVerified` | Require an explicit `email_verified` from Entra (default off — trust the tenant's token email). |
+| `MICROSOFT_STRICT_EMAIL_VERIFIED` | `MicrosoftStrictEmailVerified` | For a **pinned single tenant**, also require an explicit `email_verified` rather than trusting the tenant-owned address (default off). Has no effect in multi-tenant mode, where the email is never trusted. |
 | — (programmatic) | `SocialOIDC []SocialOIDCProvider` | Register any OIDC IdP (GitLab, Okta, Auth0, Keycloak, …) as a social login. |
 | `TRUSTED_PROXIES` | — (`authx.TrustedProxies()`) | CSV of proxy CIDRs; default = private ranges + loopback. |
 | `WEBAUTHN_RPID` / `WEBAUTHN_RP_NAME` | — | Override the passkey relying-party id/name (default: app host). |
@@ -317,9 +330,16 @@ cfg.SocialOIDC = []authx.SocialOIDCProvider{{
 ```
 
 This covers GitLab, Okta, Auth0, Keycloak, and the like with the same PKCE + nonce + `azp` +
-`email_verified` path as Google. Set `AssumeVerified` per provider (or `MICROSOFT_STRICT_EMAIL_VERIFIED`
-for Microsoft) to control whether a token that omits `email_verified` is trusted. `GET /auth/config`
+`email_verified` path as Google. Set `AssumeVerified` per provider to control whether a token that omits
+`email_verified` is trusted (only for a single, trusted issuer that owns its addresses). `GET /auth/config`
 lists every enabled provider in `socialProviders` so the SPA can render the right buttons.
+
+> **Microsoft / Entra — pin your tenant.** The multi-tenant endpoints (`common`, `organizations`,
+> `consumers`, or an unset `MICROSOFT_TENANT`) accept id_tokens from *any* Entra tenant, so the token's
+> email is attacker-controllable (the [nOAuth](https://www.descope.com/blog/post/noauth) class). go-auth-x
+> therefore does **not** trust the email in multi-tenant mode — because Entra omits `email_verified`,
+> those sign-ins are refused. Set `MICROSOFT_TENANT` to a single tenant GUID or a verified custom domain
+> to enable Microsoft sign-in; only then is the tenant-owned email trusted for account linking.
 
 **Sign in with Apple** needs four env values (`APPLE_CLIENT_ID` = Services ID, `APPLE_TEAM_ID`,
 `APPLE_KEY_ID`, `APPLE_PRIVATE_KEY` = the `.p8` PEM) — the library signs Apple's ES256 client-secret JWT
@@ -363,6 +383,8 @@ Mounted under `/auth` by `Handler()`:
 | POST | `/auth/password/reset/request` · `/auth/password/reset/confirm` | password reset | public |
 | POST | `/auth/email/request` | request a magic-link | public |
 | GET | `/auth/email/login` · `/auth/email/verify` | redeem magic-link / verify email | token |
+| POST | `/auth/email-otp/send` · `/auth/email-otp/verify` | request / redeem a 6-digit sign-in code | public |
+| GET | `/auth/email/change` | confirm a new email (change-email flow) | token |
 | POST | `/auth/webauthn/login/begin` · `/auth/webauthn/login/finish` | passkey sign-in (discoverable / QR) | public |
 | POST | `/auth/webauthn/register/begin` · `/auth/webauthn/register/finish` | enroll a passkey | session |
 | GET | `/auth/social/{provider}/login` | start social login (Google / GitHub / Facebook / Apple / Microsoft / Discord / any OIDC) | public |
@@ -371,9 +393,19 @@ Mounted under `/auth` by `Handler()`:
 | POST · GET | `/auth/2fa/verify` · `/auth/2fa/pending` | finish a 2FA-challenged login / poll state | 2fa-pending cookie |
 | POST | `/auth/2fa/webauthn/begin` · `/auth/2fa/webauthn/finish` | passkey as the second factor | 2fa-pending cookie |
 | POST | `/auth/reauth` | step-up re-auth (password or a 2FA code) | session + CSRF |
-| GET | `/auth/api/account` | account + passkeys | session |
+| GET | `/auth/api/account` | account + passkeys + linked providers | session |
 | POST | `/auth/api/account/password` | set/change password | session + CSRF |
-| DELETE | `/auth/api/passkeys/{id}` | remove a passkey | session + CSRF |
+| POST | `/auth/api/account/email` | start a verified email change | session + step-up + CSRF |
+| DELETE | `/auth/api/account` | delete the account (irreversible) | session + step-up + CSRF |
+| POST · DELETE | `/auth/api/passkeys/{id}` | rename / remove a passkey | session + CSRF |
+| DELETE | `/auth/api/identities/{provider}` | unlink a social/OIDC identity | session + CSRF |
+| GET · DELETE | `/auth/api/sessions` · `/auth/api/sessions/{sid}` | list / revoke your sessions | session (+ CSRF) |
+| POST | `/auth/api/sessions/revoke-others` | sign out your other devices | session + CSRF |
+| POST | `/auth/api/stop-impersonating` | end an admin impersonation session | session + CSRF |
+
+The account, session-management, unlink, and delete endpoints require a **`SessionStore`** only for the
+device-list/revoke features; everything else works statelessly. Step-up-gated actions expect a fresh
+`POST /auth/reauth` (see [Two-factor](#two-factor-totp--recovery-codes)).
 
 ---
 
@@ -407,8 +439,13 @@ Gated by an **owner session** (`OWNER_EMAIL`) **or** a valid API key carrying th
 | DELETE | `/auth/admin/groups/{id}` | delete a group |
 | GET | `/auth/admin/groups/{id}/members` | list members |
 | POST / DELETE | `/auth/admin/groups/{id}/members/{userId}` | add / remove a member |
-| GET | `/auth/admin/users` | list users |
+| GET / POST | `/auth/admin/users` | list / create users |
 | POST | `/auth/admin/users/{id}/disabled` | disable / enable a user |
+| POST | `/auth/admin/users/{id}/ban` | set / clear a time-boxed ban (reason + optional expiry) |
+| POST | `/auth/admin/users/{id}/password` | set / reset a user's password (policy-checked) |
+| DELETE | `/auth/admin/users/{id}` | hard-delete a user (cascade) |
+| POST | `/auth/admin/users/{id}/impersonate` | start impersonating a user |
+| GET / POST | `/auth/admin/users/{id}/sessions` · `…/sessions/revoke` | list / revoke a user's sessions |
 | GET / POST | `/auth/admin/apikeys` | list / create keys (create returns the raw key once) |
 | DELETE | `/auth/admin/apikeys/{id}` | revoke a key |
 
@@ -536,7 +573,14 @@ go-auth-x/
 
 See **[ROADMAP.md](./ROADMAP.md)** for the full list and **[CHANGELOG.md](./CHANGELOG.md)** for details.
 
-- **v0.4.1** (latest): **`/auth/me` fix** — reports `authEnabled` and reads the session in local-only
+- **v0.5.0** (latest): **self-service, session management, admin, and hardening** — HIBP breach check,
+  `SESSION_SECRET` rotation, email OTP, an optional `SessionStore` (server-side revocation / device
+  list / sign-out-everywhere), self-service delete-account + verified change-email + OAuth unlink +
+  passkey rename, and admin verbs (create / set-password / ban / hard-delete / impersonate). Plus two
+  audit passes: Microsoft multi-tenant email no longer trusted (nOAuth), social-only deployments still
+  gate, verify fails closed on a weak key, SCIM create-uniqueness, and more. **Breaking:** several new
+  store-interface methods + the optional `SessionStore` (see CHANGELOG).
+- **v0.4.1**: **`/auth/me` fix** — reports `authEnabled` and reads the session in local-only
   mode (local methods on, OIDC off), so frontends render the signed-in state and logout control.
 - **v0.4.0**: a **security-hardening pass** from a full audit — fail-closed session signing,
   the account-linking invariant enforced on the OIDC callback, Apple `form_post` CSRF fix, 2FA/reauth

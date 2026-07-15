@@ -7,6 +7,7 @@ package gormstore
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"strings"
@@ -23,16 +24,19 @@ import (
 // User is the opaque principal. Sub is the join key everywhere: the OIDC subject for IdP
 // logins, or "local:<uuid>" for in-app credentials.
 type User struct {
-	ID             uint      `gorm:"primaryKey"`
-	Sub            string    `gorm:"uniqueIndex"`
-	Email          string    `gorm:"index"`
-	Name           string    `gorm:""`
-	EmailVerified  bool      `gorm:""`
-	WebauthnHandle []byte    `gorm:""`
-	Disabled       bool      `gorm:""`
-	CreatedAt      time.Time `gorm:""`
-	UpdatedAt      time.Time `gorm:""` // gorm auto-updates on save; surfaced as SCIM meta.lastModified
-	LastLoginAt    time.Time `gorm:""`
+	ID             uint       `gorm:"primaryKey"`
+	Sub            string     `gorm:"uniqueIndex"`
+	Email          string     `gorm:"index"`
+	Name           string     `gorm:""`
+	EmailVerified  bool       `gorm:""`
+	WebauthnHandle []byte     `gorm:""`
+	Disabled       bool       `gorm:""`
+	Banned         bool       `gorm:""`
+	BannedUntil    *time.Time `gorm:""` // nil = permanent when Banned, or unused when !Banned
+	BanReason      string     `gorm:""`
+	CreatedAt      time.Time  `gorm:""`
+	UpdatedAt      time.Time  `gorm:""` // gorm auto-updates on save; surfaced as SCIM meta.lastModified
+	LastLoginAt    time.Time  `gorm:""`
 }
 
 func (User) TableName() string { return "authx_users" }
@@ -90,6 +94,22 @@ type AuthToken struct {
 
 func (AuthToken) TableName() string { return "authx_tokens" }
 
+// EmailOTP is a short numeric one-time code, scoped by (purpose,email) with an attempt counter. Unlike
+// AuthToken (a 256-bit secret matched globally by hash), a 6-digit code MUST be user-scoped or a
+// guessed value would match any user's concurrent code, so the natural key is (purpose,email).
+type EmailOTP struct {
+	ID          uint      `gorm:"primaryKey"`
+	Purpose     string    `gorm:"uniqueIndex:idx_authx_email_otp,priority:1"`
+	Email       string    `gorm:"uniqueIndex:idx_authx_email_otp,priority:2"`
+	CodeHash    []byte    `gorm:""`
+	Attempts    int       `gorm:""`
+	MaxAttempts int       `gorm:""`
+	ExpiresAt   time.Time `gorm:"index"`
+	CreatedAt   time.Time
+}
+
+func (EmailOTP) TableName() string { return "authx_email_otps" }
+
 type LoginAudit struct {
 	ID        uint   `gorm:"primaryKey"`
 	UserID    uint   `gorm:"index"`
@@ -117,7 +137,7 @@ var _ authx.CredentialStore = (*Store)(nil)
 // holds duplicate emails.
 func New(db *gorm.DB) (*Store, error) {
 	if err := db.AutoMigrate(
-		&User{}, &PasswordCredential{}, &WebauthnCredential{}, &OAuthIdentity{}, &AuthToken{}, &LoginAudit{},
+		&User{}, &PasswordCredential{}, &WebauthnCredential{}, &OAuthIdentity{}, &AuthToken{}, &EmailOTP{}, &LoginAudit{},
 	); err != nil {
 		return nil, err
 	}
@@ -129,6 +149,9 @@ func New(db *gorm.DB) (*Store, error) {
 		return nil, err
 	}
 	if err := s.migrateTwoFactor(); err != nil {
+		return nil, err
+	}
+	if err := s.migrateSessions(); err != nil {
 		return nil, err
 	}
 	return s, nil
@@ -143,7 +166,11 @@ func newPrincipalID() string {
 }
 
 func toAuthUser(u *User) *authx.AuthUser {
-	return &authx.AuthUser{ID: u.ID, Sub: u.Sub, Email: u.Email, Name: u.Name, EmailVerified: u.EmailVerified, Disabled: u.Disabled, CreatedAt: u.CreatedAt, UpdatedAt: u.UpdatedAt}
+	au := &authx.AuthUser{ID: u.ID, Sub: u.Sub, Email: u.Email, Name: u.Name, EmailVerified: u.EmailVerified, Disabled: u.Disabled, Banned: u.Banned, BanReason: u.BanReason, CreatedAt: u.CreatedAt, UpdatedAt: u.UpdatedAt}
+	if u.BannedUntil != nil {
+		au.BannedUntil = *u.BannedUntil
+	}
+	return au
 }
 
 func (s *Store) UserByEmail(email string) (*authx.AuthUser, error) {
@@ -169,8 +196,19 @@ func (s *Store) UserBySub(sub string) (*authx.AuthUser, error) {
 }
 
 func (s *Store) CreateLocalUser(email, name string) (*authx.AuthUser, error) {
-	u := User{Sub: "local:" + newPrincipalID(), Email: normalizeEmail(email), Name: name, CreatedAt: time.Now()}
+	email = normalizeEmail(email)
+	// Pre-check one-user-per-email so a duplicate returns the typed ErrEmailConflict (parity with the
+	// in-memory store); the unique index stays the fail-closed backstop under races.
+	if _, err := s.UserByEmail(email); err == nil {
+		return nil, authx.ErrEmailConflict
+	} else if !errors.Is(err, authx.ErrNoUser) {
+		return nil, err
+	}
+	u := User{Sub: "local:" + newPrincipalID(), Email: email, Name: name, CreatedAt: time.Now()}
 	if err := s.db.Create(&u).Error; err != nil {
+		if _, e2 := s.UserByEmail(email); e2 == nil { // a concurrent create won the race
+			return nil, authx.ErrEmailConflict
+		}
 		return nil, err
 	}
 	return toAuthUser(&u), nil
@@ -332,6 +370,150 @@ func (s *Store) ConsumeToken(purpose string, tokenHash []byte) (*authx.TokenClai
 	return claim, nil
 }
 
+func (s *Store) SetEmail(userID uint, newEmail string) error {
+	newEmail = normalizeEmail(newEmail)
+	// Uphold one-user-per-email (the unique index is the backstop; this gives a clean typed error).
+	var other User
+	err := s.db.Where("email = ? AND id <> ?", newEmail, userID).First(&other).Error
+	if err == nil {
+		return authx.ErrEmailConflict
+	}
+	if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
+	}
+	return s.db.Model(&User{}).Where("id = ?", userID).
+		Updates(map[string]any{"email": newEmail, "email_verified": true}).Error
+}
+
+// DeleteUser hard-deletes the user + everything keyed to it, deletes its email OTPs, and anonymizes
+// its retained audit rows (GDPR erasure of PII while keeping the forensic count). Idempotent.
+func (s *Store) DeleteUser(userID uint) error {
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		var u User
+		if err := tx.First(&u, userID).Error; err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			return err
+		}
+		if err := cascadeDeletes(tx, userID); err != nil {
+			return err
+		}
+		if u.Email != "" { // OTPs are keyed by email, not user_id
+			if err := tx.Where("email = ?", u.Email).Delete(&EmailOTP{}).Error; err != nil {
+				return err
+			}
+		}
+		// Tombstone (not delete) live sessions so IsRevoked keeps denying the deleted user on other
+		// devices until the cookie expires; null the PII for GDPR erasure but retain the revoked marker.
+		if err := tx.Model(&Session{}).Where("user_id = ? AND revoked_at IS NULL", userID).
+			Updates(map[string]any{"revoked_at": time.Now(), "user_agent": "", "ip": ""}).Error; err != nil {
+			return err
+		}
+		return tx.Model(&LoginAudit{}).Where("user_id = ?", userID).
+			Updates(map[string]any{"email": "", "ip": ""}).Error
+	})
+}
+
+func (s *Store) RenamePasskey(userID, id uint, name string) error {
+	return s.db.Model(&WebauthnCredential{}).Where("id = ? AND user_id = ?", id, userID).
+		Update("name", name).Error
+}
+
+func (s *Store) UnlinkOAuth(userID uint, provider string) error {
+	return s.db.Where("user_id = ? AND provider = ?", userID, provider).Delete(&OAuthIdentity{}).Error
+}
+
+func (s *Store) OAuthIdentities(userID uint) ([]string, error) {
+	var rows []OAuthIdentity
+	if err := s.db.Where("user_id = ?", userID).Order("provider").Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(rows))
+	for i := range rows {
+		out = append(out, rows[i].Provider)
+	}
+	return out, nil
+}
+
+func (s *Store) CreateEmailOTP(purpose, email string, codeHash []byte, expiresAt time.Time, maxAttempts int) error {
+	email = normalizeEmail(email)
+	now := time.Now()
+	// Replace any prior OTP for (purpose,email) with an explicit delete-then-insert rather than an
+	// upsert, so "one live code per address, attempts reset" holds identically on every backend (a
+	// composite-key ON CONFLICT does not resolve uniformly across drivers). The unique index remains
+	// as a backstop against a concurrent double-insert.
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("purpose = ? AND email = ?", purpose, email).Delete(&EmailOTP{}).Error; err != nil {
+			return err
+		}
+		return tx.Create(&EmailOTP{
+			Purpose: purpose, Email: email, CodeHash: codeHash, MaxAttempts: maxAttempts, ExpiresAt: expiresAt, CreatedAt: now,
+		}).Error
+	})
+}
+
+// VerifyEmailOTP atomically checks a code for (purpose,email): it locks the row, rejects an
+// expired/absent code, compares in constant time, and consumes the code on success OR once the attempt
+// cap is reached — so a 6-digit code can be guessed at most maxAttempts times.
+func (s *Store) VerifyEmailOTP(purpose, email string, codeHash []byte) (*authx.TokenClaim, error) {
+	email = normalizeEmail(email)
+	var claim *authx.TokenClaim
+	// invalid is signaled OUT OF BAND rather than by returning an error from the transaction: a wrong
+	// guess still has to COMMIT the attempts increment (returning an error would roll it back and defeat
+	// the brute-force cap), so the tx func returns nil on every non-fatal path.
+	var invalid bool
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		var o EmailOTP
+		err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where("purpose = ? AND email = ?", purpose, email).First(&o).Error
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			invalid = true
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		if time.Now().After(o.ExpiresAt) {
+			invalid = true
+			return tx.Delete(&EmailOTP{}, o.ID).Error
+		}
+		if subtle.ConstantTimeCompare(o.CodeHash, codeHash) == 1 {
+			claim = &authx.TokenClaim{Email: o.Email}
+			return tx.Delete(&EmailOTP{}, o.ID).Error
+		}
+		invalid = true
+		if o.Attempts+1 >= o.MaxAttempts { // this wrong guess exhausts the budget → burn the code
+			return tx.Delete(&EmailOTP{}, o.ID).Error
+		}
+		return tx.Model(&EmailOTP{}).Where("id = ?", o.ID).Update("attempts", o.Attempts+1).Error
+	})
+	if err != nil {
+		return nil, err
+	}
+	if invalid || claim == nil {
+		return nil, authx.ErrTokenInvalid
+	}
+	return claim, nil
+}
+
+// PeekToken validates a token without consuming it (read-only): same not-found/consumed/expired rules
+// as ConsumeToken, but leaves the row untouched so the caller can validate downstream input first.
+func (s *Store) PeekToken(purpose string, tokenHash []byte) (*authx.TokenClaim, error) {
+	var t AuthToken
+	err := s.db.Where("purpose = ? AND token_hash = ?", purpose, tokenHash).First(&t).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, authx.ErrTokenInvalid
+	}
+	if err != nil {
+		return nil, err
+	}
+	if t.ConsumedAt != nil || time.Now().After(t.ExpiresAt) {
+		return nil, authx.ErrTokenInvalid
+	}
+	return &authx.TokenClaim{UserID: t.UserID, Email: t.Email}, nil
+}
+
 func (s *Store) RecordAudit(userID uint, email, ip, method, event string, success bool, detail string) {
 	_ = s.db.Create(&LoginAudit{
 		UserID: userID, Email: normalizeEmail(email), IP: ip, Method: method,
@@ -421,6 +603,17 @@ func (s *Store) UpsertUserOnLogin(sub, email, name string, emailVerified bool) (
 	if err != nil {
 		return nil, err
 	}
+	// Moving this row onto an email another row already owns must return the typed ErrEmailConflict
+	// (parity with the in-memory store), not a raw driver unique-constraint error — the unique index is
+	// only the fail-closed backstop.
+	if email != normalizeEmail(u.Email) {
+		var other User
+		if e2 := s.db.Where("email = ? AND id <> ?", email, u.ID).First(&other).Error; e2 == nil {
+			return nil, authx.ErrEmailConflict
+		} else if !errors.Is(e2, gorm.ErrRecordNotFound) {
+			return nil, e2
+		}
+	}
 	u.Email, u.Name, u.LastLoginAt = email, name, time.Now()
 	if emailVerified {
 		u.EmailVerified = true
@@ -442,6 +635,10 @@ func (s *Store) deleteUserCascade(id uint) error {
 // cascadeDeletes removes a user + everything keyed to it on the given tx handle (no transaction of
 // its own, so a caller can compose it with a create for an atomic reclaim).
 func cascadeDeletes(tx *gorm.DB, id uint) error {
+	// NOTE: Session rows are intentionally NOT deleted here. Deleting them would make IsRevoked (an
+	// absent SID reads as "not revoked") silently re-admit a hard-deleted user on their other devices.
+	// DeleteUser tombstones the sessions as revoked instead; reclaim targets (unverified squatters) have
+	// no sessions, so their omission here is harmless.
 	for _, m := range []any{&PasswordCredential{}, &WebauthnCredential{}, &OAuthIdentity{}, &AuthToken{}, &GroupMembership{}, &TOTPCredential{}, &RecoveryCode{}} {
 		if err := tx.Where("user_id = ?", id).Delete(m).Error; err != nil {
 			return err

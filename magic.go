@@ -17,6 +17,7 @@ func (a *Authenticator) AuthConfig(c *reqCtx) {
 		"methods": H{
 			"password":  a.LocalEnabled(),
 			"email":     emailOn,
+			"emailOtp":  emailOn,
 			"passkey":   a.LocalEnabled() && a.wauthn != nil,
 			"google":    a.socialConfigured("google"),
 			"github":    a.socialConfigured("github"),
@@ -52,7 +53,7 @@ func (a *Authenticator) EmailRequest(c *reqCtx) {
 	_ = c.ShouldBindJSON(&body)
 	email := normEmail(body.Email)
 	generic := H{"ok": true, "message": "If an account exists for that address, we've sent a sign-in link."}
-	if !validEmail(email) || !a.ipLimiter.Allow("magic:"+c.ClientIP()) || !a.acctLimiter.Allow("magic:"+email) {
+	if !validEmail(email) || !a.ipLimiter.Allow("magic:"+c.rateIP()) || !a.acctLimiter.Allow("magic:"+email) {
 		c.JSON(http.StatusOK, generic)
 		return
 	}
@@ -62,7 +63,10 @@ func (a *Authenticator) EmailRequest(c *reqCtx) {
 	next := sanitizeNext(body.Next)
 	go func() {
 		u, err := a.creds.UserByEmail(email)
-		if err != nil || u.Disabled {
+		if err != nil {
+			return
+		}
+		if blocked, _ := u.loginBlocked(); blocked {
 			return
 		}
 		raw, hash := newToken()
@@ -116,12 +120,12 @@ func (a *Authenticator) redeemAndLogin(c *reqCtx, purpose string, markVerified b
 		fail("account not found")
 		return
 	}
-	if u.Disabled {
-		fail("this account has been disabled")
+	if blocked, msg := u.loginBlocked(); blocked {
+		fail(msg)
 		return
 	}
 	a.creds.RecordAudit(u.ID, u.Email, c.ClientIP(), "magic", "login", true, purpose)
-	tfr, err := a.completeLogin(c, Identity{Subject: u.Sub, Email: u.Email, Name: u.Name, EmailVerified: true}, c.Query("remember") == "true")
+	tfr, err := a.completeLogin(c, Identity{Subject: u.Sub, Email: u.Email, Name: u.Name, EmailVerified: true}, c.Query("remember") == "true", nil)
 	if err != nil {
 		fail("sign-in failed")
 		return

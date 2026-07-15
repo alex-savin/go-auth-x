@@ -63,8 +63,12 @@ type DirectoryStore interface {
 
 	// Admin user management
 	ListUsers() ([]AuthUser, error)
-	UserByID(id uint) (*AuthUser, error) // ErrNoUser if absent
+	UserByID(id uint) (*AuthUser, error)         // ErrNoUser if absent
+	UserByEmail(email string) (*AuthUser, error) // ErrNoUser if absent — used by SCIM to enforce create-uniqueness
 	SetUserDisabled(userID uint, disabled bool) error
+	// SetUserBan sets or clears a time-boxed ban with a reason. banned=false clears it; a nil `until`
+	// with banned=true is a permanent ban, else the ban lifts at *until.
+	SetUserBan(userID uint, banned bool, until *time.Time, reason string) error
 
 	// UpsertExternalUser provisions/updates a user from an external directory (LDAP/SCIM) keyed by
 	// an external Sub (e.g. "ldap:<uid>" / "scim:<id>"). Applies the same safe email-linking rule.

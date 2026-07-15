@@ -128,7 +128,9 @@ func (a *Authenticator) adminGuard(c *reqCtx) bool {
 			keyValidNoScope = true
 		}
 	}
-	if sc := a.sessionOf(c); sc != nil && a.cfg.OwnerEmail != "" &&
+	// An impersonation session must NOT be able to act as admin (it carries ImpersonatedBy), even if
+	// the impersonated user happens to be the owner.
+	if sc := a.sessionOf(c); sc != nil && sc.ImpersonatedBy == "" && a.cfg.OwnerEmail != "" &&
 		strings.EqualFold(strings.TrimSpace(sc.Email), a.cfg.OwnerEmail) {
 		return true
 	}
@@ -158,7 +160,14 @@ func (a *Authenticator) adminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /auth/admin/groups/{id}/members/{userId}", a.wrap(a.adminRemoveMember))
 	mux.HandleFunc("GET /auth/admin/groups/{id}/members", a.wrap(a.adminGroupMembers))
 	mux.HandleFunc("GET /auth/admin/users", a.wrap(a.adminListUsers))
+	mux.HandleFunc("POST /auth/admin/users", a.wrap(a.adminCreateUser))
 	mux.HandleFunc("POST /auth/admin/users/{id}/disabled", a.wrap(a.adminSetDisabled))
+	mux.HandleFunc("POST /auth/admin/users/{id}/password", a.wrap(a.adminSetPassword))
+	mux.HandleFunc("POST /auth/admin/users/{id}/ban", a.wrap(a.adminSetBan))
+	mux.HandleFunc("DELETE /auth/admin/users/{id}", a.wrap(a.adminDeleteUser))
+	mux.HandleFunc("POST /auth/admin/users/{id}/impersonate", a.wrap(a.adminImpersonate))
+	mux.HandleFunc("GET /auth/admin/users/{id}/sessions", a.wrap(a.adminListUserSessions))
+	mux.HandleFunc("POST /auth/admin/users/{id}/sessions/revoke", a.wrap(a.adminRevokeUserSessions))
 	mux.HandleFunc("GET /auth/admin/apikeys", a.wrap(a.adminListKeys))
 	mux.HandleFunc("POST /auth/admin/apikeys", a.wrap(a.adminCreateKey))
 	mux.HandleFunc("DELETE /auth/admin/apikeys/{id}", a.wrap(a.adminRevokeKey))
@@ -311,6 +320,13 @@ func (a *Authenticator) adminSetDisabled(c *reqCtx) {
 	if err := a.dir.SetUserDisabled(id, body.Disabled); err != nil {
 		a.adminFail(c, http.StatusInternalServerError, "could not update user", err)
 		return
+	}
+	// Parity with ban: when disabling and a SessionStore is wired, cut the user's live sessions so the
+	// disable takes effect immediately instead of lingering until the cookie expires.
+	if body.Disabled && a.sessions != nil {
+		if u, uerr := a.dir.UserByID(id); uerr == nil {
+			_ = a.sessions.RevokeAllForUser(u.Sub)
+		}
 	}
 	c.JSON(http.StatusOK, H{"ok": true, "disabled": body.Disabled})
 }
