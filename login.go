@@ -63,12 +63,16 @@ func (a *Authenticator) completeLogin(c *reqCtx, id Identity, remember bool, fir
 	if serr != nil {
 		return false, serr
 	}
-	a.setCookie(c, sessionCookie, session, int(ttl/time.Second))
 	var uid uint
 	if u != nil {
 		uid = u.ID
 	}
-	a.recordSession(c.Request, sid, id.Subject, uid, ttl)
+	// Record BEFORE issuing the cookie so a lost RecordSession write fails the login cleanly instead of
+	// minting a session that IsRevoked would reject on its next request.
+	if rerr := a.recordSession(c.Request, sid, id.Subject, uid, ttl); rerr != nil {
+		return false, rerr
+	}
+	a.setCookie(c, sessionCookie, session, int(ttl/time.Second))
 	a.issueCSRF(c)
 	a.clearCookie(c, flowCookie)
 	return false, nil

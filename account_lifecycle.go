@@ -11,6 +11,22 @@ import (
 // perform a destructive self-service account action (delete, change-email).
 const accountStepUpMaxAge = 10 * time.Minute
 
+// hasReauthFactor reports whether the user has a factor that step-up re-auth (POST /auth/reauth) can
+// verify — a password or enabled TOTP. A purely passwordless (social/OIDC-only) user has neither, so a
+// step-up gate would lock them out permanently; it is not a net protection loss for them, since their
+// session already permits setting a password (i.e. self-service takeover) without a prior factor.
+func (a *Authenticator) hasReauthFactor(userID uint) bool {
+	if _, _, err := a.creds.PasswordHash(userID); err == nil {
+		return true
+	}
+	if a.twoFactor != nil {
+		if info, err := a.twoFactor.TOTP(userID); err == nil && info != nil && info.Enabled {
+			return true
+		}
+	}
+	return false
+}
+
 // AccountDelete (DELETE /auth/api/account) hard-deletes the signed-in user's account after a fresh
 // step-up. Irreversible: it cascades credentials/passkeys/tokens/OAuth/2FA, anonymizes the audit
 // trail, revokes all sessions, and clears the caller's cookies. Data your app keyed on the user's Sub
@@ -21,7 +37,10 @@ func (a *Authenticator) AccountDelete(c *reqCtx) {
 		c.JSON(http.StatusUnauthorized, H{"error": "unauthenticated"})
 		return
 	}
-	if !a.StepUpFresh(c.Request, accountStepUpMaxAge) {
+	// Require a fresh step-up ONLY when the user has a factor that /auth/reauth can verify. A purely
+	// passwordless (social/OIDC-only) user has no password or TOTP, so demanding step-up would lock them
+	// out of this action forever; for them the gated session + CSRF is the strongest available proof.
+	if a.hasReauthFactor(au.ID) && !a.StepUpFresh(c.Request, accountStepUpMaxAge) {
 		c.JSON(http.StatusForbidden, H{"error": "reauth_required"})
 		return
 	}
@@ -49,7 +68,10 @@ func (a *Authenticator) AccountChangeEmailRequest(c *reqCtx) {
 		c.JSON(http.StatusUnauthorized, H{"error": "unauthenticated"})
 		return
 	}
-	if !a.StepUpFresh(c.Request, accountStepUpMaxAge) {
+	// Require a fresh step-up ONLY when the user has a factor that /auth/reauth can verify. A purely
+	// passwordless (social/OIDC-only) user has no password or TOTP, so demanding step-up would lock them
+	// out of this action forever; for them the gated session + CSRF is the strongest available proof.
+	if a.hasReauthFactor(au.ID) && !a.StepUpFresh(c.Request, accountStepUpMaxAge) {
 		c.JSON(http.StatusForbidden, H{"error": "reauth_required"})
 		return
 	}

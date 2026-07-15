@@ -8,13 +8,30 @@ import (
 )
 
 // compile-time proof the in-memory store also satisfies the optional session store.
+//
+// DEMO / SINGLE-PROCESS ONLY: the session records live in a map with no persistence, so a process
+// restart empties it — and because IsRevoked fails closed on an unknown SID, that logs EVERY outstanding
+// user out on each restart/deploy. Use gormstore (or another durable SessionStore) for anything that
+// restarts or scales. Expired rows are pruned opportunistically on write to bound growth.
 var _ authx.SessionStore = (*Store)(nil)
 
 func (s *Store) RecordSession(rec authx.SessionRecord) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.pruneSessionsLocked() // bound growth — an expired session's cookie is already invalid (exp), so dropping the row is safe
 	s.sessions[rec.SID] = &sessionRec{rec: rec}
 	return nil
+}
+
+// pruneSessionsLocked drops expired session rows. Caller holds s.mu. Safe because a row past ExpiresAt
+// corresponds to a cookie that parseSession already rejects on `exp`, so it can never reach IsRevoked.
+func (s *Store) pruneSessionsLocked() {
+	now := time.Now()
+	for sid, r := range s.sessions {
+		if r.rec.ExpiresAt.Before(now) {
+			delete(s.sessions, sid)
+		}
+	}
 }
 
 func (s *Store) IsRevoked(sid string) (bool, error) {

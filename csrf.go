@@ -62,6 +62,14 @@ func (a *Authenticator) issueCSRF(c *reqCtx) { a.writeCSRFCookie(c.w, c.Request)
 // origin is refused, which uniquely blocks the sibling-subdomain cookie-injection CSRF variant that
 // SameSite=Lax (an eTLD+1-scoped signal) does not.
 func (a *Authenticator) originAllowed(r *http.Request) bool {
+	// Fetch Metadata (widely supported): reject a request the browser itself marks as genuinely
+	// cross-site, even when no Origin allow-list is configured. This closes cross-site login-CSRF on the
+	// token-exempt entry points (e.g. /auth/email-otp/verify) in the local-only default. A missing or
+	// non-cross-site value falls through to the Origin allow-list below (which fails open when unset), so
+	// this only ever ADDS a rejection — no legitimate same-origin request is affected.
+	if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+		return false
+	}
 	origin := r.Header.Get("Origin")
 	if origin == "" {
 		if ref := r.Header.Get("Referer"); ref != "" {

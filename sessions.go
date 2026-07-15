@@ -55,13 +55,17 @@ func (a *Authenticator) newSessionID() string {
 	return randToken()
 }
 
-// recordSession persists a freshly minted session when a store is configured (best-effort).
-func (a *Authenticator) recordSession(r *http.Request, sid, subject string, userID uint, ttl time.Duration) {
+// recordSession persists a freshly minted session when a store is configured. It is REQUIRED, not
+// best-effort: because IsRevoked fails closed on an unknown SID, a session that wasn't durably recorded
+// would be rejected on its very next request (a "logged in, then instantly logged out" lockout). So a
+// record failure must fail the login rather than hand out an un-usable cookie — callers record BEFORE
+// setting the cookie and abort on error. Returns nil when no store is wired (the stateless default).
+func (a *Authenticator) recordSession(r *http.Request, sid, subject string, userID uint, ttl time.Duration) error {
 	if a.sessions == nil || sid == "" {
-		return
+		return nil
 	}
 	now := time.Now()
-	_ = a.sessions.RecordSession(SessionRecord{
+	return a.sessions.RecordSession(SessionRecord{
 		SID: sid, Subject: subject, UserID: userID,
 		UserAgent: truncate(r.UserAgent(), 400), IP: a.clientIP(r),
 		CreatedAt: now, ExpiresAt: now.Add(ttl),

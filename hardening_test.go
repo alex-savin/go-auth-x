@@ -65,6 +65,25 @@ func TestEnforcingWithSocialOnly(t *testing.T) {
 	}
 }
 
+func TestOriginAllowed_FetchMetadataCrossSite(t *testing.T) {
+	a := &Authenticator{cfg: Config{}} // no allow-list → normally fails open
+	mk := func(sfs string) *http.Request {
+		r := httptest.NewRequest(http.MethodPost, "/api/x", nil)
+		if sfs != "" {
+			r.Header.Set("Sec-Fetch-Site", sfs)
+		}
+		return r
+	}
+	if a.originAllowed(mk("cross-site")) {
+		t.Fatal("a browser-marked cross-site request must be refused even with no allow-list")
+	}
+	for _, v := range []string{"same-origin", "same-site", "none", ""} {
+		if !a.originAllowed(mk(v)) {
+			t.Fatalf("Sec-Fetch-Site=%q must fall through to the (fail-open) allow-list", v)
+		}
+	}
+}
+
 func TestIsMultiTenantMicrosoft(t *testing.T) {
 	for _, m := range []string{"", "common", "COMMON", "organizations", "consumers", " common "} {
 		if !isMultiTenantMicrosoft(m) {

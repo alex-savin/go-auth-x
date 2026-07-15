@@ -151,10 +151,20 @@ func (a *Authenticator) adminSetBan(c *reqCtx) {
 		a.adminFail(c, http.StatusInternalServerError, "could not update ban", err)
 		return
 	}
-	if body.Banned && a.sessions != nil {
-		if u, uerr := a.dir.UserByID(id); uerr == nil {
-			_ = a.sessions.RevokeAllForUser(u.Sub)
+	u, _ := a.dir.UserByID(id)
+	event := "unban"
+	if body.Banned {
+		event = "ban"
+	}
+	if a.creds != nil { // leave a forensic trail for this security-relevant admin action
+		email := ""
+		if u != nil {
+			email = u.Email
 		}
+		a.creds.RecordAudit(id, email, c.ClientIP(), "admin", event, true, strings.TrimSpace(body.Reason))
+	}
+	if body.Banned && a.sessions != nil && u != nil {
+		_ = a.sessions.RevokeAllForUser(u.Sub)
 	}
 	c.JSON(http.StatusOK, H{"ok": true, "banned": body.Banned})
 }
@@ -206,8 +216,13 @@ func (a *Authenticator) adminImpersonate(c *reqCtx) {
 		c.JSON(http.StatusInternalServerError, H{"error": "could not impersonate"})
 		return
 	}
+	// Record before the cookie (see completeLogin) so an unrecorded impersonation session isn't
+	// immediately rejected by the fail-closed revocation check.
+	if rerr := a.recordSession(c.Request, sid, target.Sub, id, impersonationTTL); rerr != nil {
+		c.JSON(http.StatusInternalServerError, H{"error": "could not impersonate"})
+		return
+	}
 	a.setCookie(c, sessionCookie, sess, int(impersonationTTL/time.Second))
-	a.recordSession(c.Request, sid, target.Sub, id, impersonationTTL)
 	a.issueCSRF(c)
 	if a.creds != nil {
 		a.creds.RecordAudit(id, target.Email, c.ClientIP(), "admin", "impersonate_start", true, adminSub)

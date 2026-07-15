@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-07-15
+
+Follow-up hardening from a post-merge review of v0.5.0.
+
+### Fixed
+
+- **A lost `RecordSession` write at login now fails the login** rather than minting a session the
+  fail-closed revocation check would reject on its next request ("logged in, then instantly logged
+  out"). Sessions are recorded *before* the cookie is issued, at every mint site.
+- **`adminSetBan` now writes an audit record** (`ban` / `unban`), matching the other admin verbs.
+- **Passwordless (social/OIDC-only) users can delete their account and change email.** Those endpoints
+  no longer demand a step-up re-auth that a user with no password or TOTP can never satisfy — it was a
+  permanent lockout. Users who *do* have a re-authable factor still require step-up.
+
+### Security
+
+- **`Sec-Fetch-Site: cross-site` requests are refused** on the CSRF-token-exempt login entry points
+  (e.g. `/auth/email-otp/verify`), closing a cross-site login-CSRF even when no `TrustedOrigins`/`AppURL`
+  allow-list is configured (Fetch Metadata; a missing or non-cross-site value is unaffected, so no
+  legitimate same-origin request breaks).
+
+### Changed
+
+- The in-memory `SessionStore` prunes expired rows on write and is documented as **demo / single-process
+  only** — because an unknown SID fails closed, a process restart (which empties the map) logs every
+  outstanding user out; use `gormstore` (or another durable `SessionStore`) for anything that restarts
+  or scales.
+
+### Migration (from v0.5.0)
+
+- A **social-login-only** deployment now enforces the gate + CSRF (`enforcing()` counts configured
+  social providers — the fix for a gate that previously no-op'd while login still minted sessions). If
+  your app made state-changing `POST /api/...` calls without the double-submit CSRF token, it must now
+  send the `X-CSRF-Token` header.
+
 ## [0.5.0] — 2026-07-15
 
 A feature pass adding self-service, session-management, admin, and hardening capabilities that fit a

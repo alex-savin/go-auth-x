@@ -8,6 +8,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -20,6 +21,13 @@ import (
 	"github.com/alex-savin/go-auth-x/store/memory"
 	"golang.org/x/crypto/bcrypt"
 )
+
+// failRecord wraps the memory store but fails RecordSession, to prove a lost record fails the login.
+type failRecord struct{ *memory.Store }
+
+func (failRecord) RecordSession(authx.SessionRecord) error {
+	return errors.New("simulated store write failure")
+}
 
 const testSecret = "0123456789abcdef0123456789abcdef"
 
@@ -635,6 +643,43 @@ func TestAdminCreateDuplicateEmailIs409(t *testing.T) {
 	admin.login("owner@example.com", "owner-horse-9!")
 	if w := admin.do("POST", "/auth/admin/users", map[string]any{"email": "dup@x.com", "name": "D"}); w.Code != http.StatusConflict {
 		t.Fatalf("duplicate admin-create must be 409, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestLoginFailsWhenSessionRecordFails(t *testing.T) {
+	// REGRESSION: a lost RecordSession write must FAIL the login, not mint a session that the fail-closed
+	// revocation check would reject on the next request ("logged in, then instantly logged out").
+	a, s, _ := newTestAuth(t)
+	a.SetSessionStore(failRecord{s}) // record always errors
+	seedUser(t, s, "u@x.com", "correct-horse-9!", true)
+	c := newClient(t, a)
+	w := c.do("POST", "/auth/password/login", map[string]any{"email": "u@x.com", "password": "correct-horse-9!"})
+	if w.Code == http.StatusOK {
+		t.Fatal("login must fail when the session record cannot be persisted")
+	}
+	if c.cookies["sweep_session"] != "" {
+		t.Fatal("no session cookie may be set when recording failed")
+	}
+}
+
+func TestDeleteAccount_PasswordlessSkipsStepUp(t *testing.T) {
+	// REGRESSION (#4): a passwordless (social/OIDC-only) user has no step-up factor, so delete-account
+	// must not demand one — otherwise they're permanently locked out of self-service deletion.
+	a, s, mailer := newTestAuth(t)
+	u := seedUser(t, s, "social@x.com", "", true) // no password, verified email
+	c := newClient(t, a)
+	_ = c.do("POST", "/auth/email-otp/send", map[string]any{"email": "social@x.com"})
+	msg := mailer.waitFor(t, "sign-in code")
+	code := sixDigits.FindStringSubmatch(msg.text)[1]
+	if w := c.do("POST", "/auth/email-otp/verify", map[string]any{"email": "social@x.com", "code": code}); w.Code != http.StatusOK {
+		t.Fatalf("otp login = %d", w.Code)
+	}
+	// No prior /auth/reauth — delete must still succeed for a passwordless account.
+	if w := c.do("DELETE", "/auth/api/account", nil); w.Code != http.StatusOK {
+		t.Fatalf("passwordless delete without step-up must succeed, got %d: %s", w.Code, w.Body.String())
+	}
+	if _, err := s.UserBySub(u.Sub); err != authx.ErrNoUser {
+		t.Fatal("user must be gone")
 	}
 }
 
