@@ -5,6 +5,41 @@ Direction and planned work for the library. Authoritative usage/feature docs liv
 
 ## Shipped
 
+### v0.7.0 — organizations: org-scoped resources · _unreleased ([PR #8](https://github.com/alex-savin/go-auth-x/pull/8))_ · additive
+
+- **First-class invite records** (`OrgInvite`) — pending invites are listable + revocable; org + role
+  bind to the record (nothing tamperable in the accept URL), and re-inviting replaces the pending one.
+- **Org-scoped groups** via the optional `OrgDirectoryStore` upgrade interface (type-asserted — a
+  custom `DirectoryStore` that doesn't implement it keeps compiling; the features just 501). Per-org
+  namespaces (two orgs both own "engineering"), invisible to the global verbs, never in the session
+  cookie; gated live by `RequireOrgGroupsHTTP`. Removing a member cascades them out of the org's groups.
+- **Org-bound API keys** (`APIKeyInfo.OrgID`) — refused by every global surface (`adminGuard`,
+  `ValidateAPIKeyScope`, group merging, `GateHTTP`, empty `RequireGroupsHTTP`); honored only by
+  `ValidateOrgAPIKeyScope` for their own org.
+- **Per-customer SCIM** — `NewOrgScopedDirectory(dir, orgs, orgID)` presents one org as a
+  `DirectoryStore` for `scim.NewServer`: subjects namespaced per org, no cross-tenant email
+  adoption/rebind, deprovision = org removal (never the global account; owners refused).
+- **Review-hardened** — closed a cross-tenant SCIM email-rebind takeover, the org-key global-gate gap,
+  and the owner-deprovision / out-of-scope-group SCIM status codes.
+
+### v0.6.0 — organizations: core · _unreleased ([PR #8](https://github.com/alex-savin/go-auth-x/pull/8))_ · additive
+
+- **`OrgStore`** (fourth optional capability store, `SetOrgStore`; nil = off, zero behavior change) —
+  `Org` + per-org role memberships (reserved `owner`/`admin`/`member`, app-extensible). **Users stay
+  global** (one account, many orgs), so email uniqueness and the safe account-linking rule are
+  untouched — orgs are a layer *above* authentication, not a partition. **Opaque string org IDs from
+  day one** (reference stores keep `uint` PKs, convert at the boundary).
+- **Active-org sessions** — additive `org`/`orgRole` claims carry the active org only (the membership
+  list lives at `/auth/me`, not the cookie); a sole membership auto-activates. `POST /auth/org/switch`
+  re-verifies membership and re-mints (SID + remaining TTL preserved). `RequireOrgHTTP(roles…)`
+  re-checks membership live, so off-boarding takes effect immediately, not at cookie expiry.
+- **Email invites**, self-service member management with a lock-serialized **last-owner guard**, admin
+  org CRUD (bypasses the guard as the operator recovery path), and `/auth/me` + `/auth/config` surfacing.
+- **GDPR parity** — `DeleteUser` / `DeleteOrg` cascade org memberships (v0.7 extends the org cascade to
+  its groups, invites, and org-bound keys).
+- **Additive, not breaking** — `OrgStore` and `OrgDirectoryStore` are new *optional* interfaces;
+  existing `CredentialStore` / `DirectoryStore` implementations compile and behave unchanged.
+
 ### v0.5.0
 
 - **New capabilities** — features that fit a same-origin embedded Go BFF (IdP-shaped / multi-tenant /
@@ -82,43 +117,15 @@ uuid/ULID/KSUID consumers pass their IDs straight through (the reference GORM st
 PKs and converts at its boundary — no DB migration). Verified safe (the IDs are never used
 arithmetically). **Deferred past v0.2.0** — no current consumer needs it, and it's cheapest to land as
 a pre-v1.0 breaking change if/when a uuid-keyed consumer adopts the library or the API is frozen for 1.0.
+**Partially landed:** the org surface (`Org.ID`, and `OrgID` on groups/API keys/invites) already uses
+opaque `string` IDs, so this now covers only the pre-existing `uint` user / group / API-key ID type.
 
-### Organizations (tenant/org concept) — additive
+### Organizations — per-org SSO · deferred
 
-**Status: the v0.6 core slice AND the v0.7 org-scoped-resources slice are implemented on
-`feat/organizations` (unreleased).** v0.6: `OrgStore` + both reference stores, active-org session
-claims + `POST /auth/org/switch`, `RequireOrgHTTP` (live re-verification), email invites,
-self-service member management (last-owner guard), and the admin org verbs — org IDs shipped as
-**opaque strings from day one** (resolving the [#2](https://github.com/alex-savin/go-auth-x/issues/2)
-dependency below for the new surface). v0.7: first-class **invite records** (list/revoke),
-**org-scoped groups** (per-org namespaces + `RequireOrgGroupsHTTP`, live), **org-bound API keys**
-(refused by every global surface), and **per-customer SCIM** via `NewOrgScopedDirectory`
-(namespaced subjects, no cross-tenant email adoption, deprovision = org removal). Remaining: per-org
-SSO, only if a consumer ever demands it.
-
-Give the library a first-class org layer for B2B-shaped apps, as a fourth optional capability store
-following the house pattern (`SetOrgStore`; nil = feature off, zero behavior change):
-
-- **Model** — `Org` + `OrgMembership` (many-to-many, per-org role: reserved `owner`/`admin`/`member`,
-  app-extensible). **Users stay global** (one account, many orgs; email uniqueness and the safe
-  account-linking rule are untouched) — orgs are a layer *above* authentication, not a partition of it.
-  Isolated user pools (realm-style tenancy) stay a composition recipe — one `Authenticator` + store per
-  tenant — not schema.
-- **Session** — additive `Org`/`OrgRole` claims carry the **active org only** (memberships list lives at
-  `/auth/me`, not in the cookie); `POST /auth/org/switch` verifies membership and re-mints. Zero orgs is
-  a valid state (app decides onboarding); `RequireOrgHTTP(roles...)` gates on the active org and
-  re-verifies membership against the store so an off-boarded member doesn't ride out the session TTL.
-  Row-level isolation of app data remains the app's job.
-- **Invites** — reuse the single-use hashed-at-rest token infra + `Mailer` (purpose `org-invite`,
-  scoped to org + role, redeemed through the login funnel).
-- **Phasing** — v0.6: core (`OrgStore` + both reference stores, session claims + switch, middleware,
-  invites, org CRUD in the admin REST API). v0.7: org-scoped resources — nullable `OrgID` on groups +
-  API keys (null = global) unlocking **org-scoped SCIM** (org-bound key + org-filtered directory view
-  per customer IdP). Per-org SSO (email-domain → IdP routing) stays out of scope until a consumer
-  demands it — that's the IdP-shaped edge the README's positioning warns against.
-- **Depends on [#2](https://github.com/alex-savin/go-auth-x/issues/2)** — decide opaque string IDs
-  *before* `OrgStore` lands (or give the org types string IDs from day one); adding the largest new
-  interface with `uint` IDs widens exactly the break #2 defers.
+The one remaining org-layer item: route sign-in by the invitee's email domain to a per-org IdP
+(each org registers its own `SocialOIDC` provider). Explicitly **out of scope until a consumer
+demands it** — it's the IdP-shaped edge the README's positioning deliberately avoids; the org core
+(v0.6) and org-scoped resources incl. per-customer SCIM (v0.7) are done.
 
 ### Also on the list
 
@@ -126,7 +133,10 @@ following the house pattern (`SetOrgStore`; nil = feature off, zero behavior cha
   already covers any OIDC IdP; named presets (like Microsoft) are added for convenience/quirks.
 - **SCIM** — remaining depth: PATCH on complex multi-valued sub-attributes, `/Me`, and richer
   `$ref` handling. Core filters, sorting, ETags, pagination, timestamps, and schemas are done.
+- **Org-scoped SCIM efficiency** (non-blocking, noted in the v0.7 review) — the per-customer view
+  re-checks group ownership + membership per member in a group PUT/PATCH loop (an N+1 on large group
+  syncs); memoize group→org per request and validate members in one query if a large-org consumer hits it.
 
 ---
 
-_Updated 2026-07-15._
+_Updated 2026-07-16._
