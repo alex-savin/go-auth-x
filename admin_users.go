@@ -208,9 +208,15 @@ func (a *Authenticator) adminImpersonate(c *reqCtx) {
 	if gs, gerr := a.dir.UserGroups(id); gerr == nil {
 		groups = groupNames(gs)
 	}
+	// Impersonation sees the target's default active org too, so an org-scoped app renders as the
+	// user would see it (adminGuard still refuses the session for admin verbs via ImpersonatedBy).
+	var orgID, orgRole string
+	if a.orgs != nil {
+		orgID, orgRole = a.defaultOrgClaims(id)
+	}
 	sid := a.newSessionID()
 	sess, serr := mintSessionWith(a.cfg.SessionSecret, SessionClaims{
-		Email: target.Email, Name: target.Name, Groups: groups, SID: sid, ImpersonatedBy: adminSub,
+		Email: target.Email, Name: target.Name, Groups: groups, SID: sid, ImpersonatedBy: adminSub, Org: orgID, OrgRole: orgRole,
 	}, target.Sub, time.Now(), impersonationTTL)
 	if serr != nil {
 		c.JSON(http.StatusInternalServerError, H{"error": "could not impersonate"})

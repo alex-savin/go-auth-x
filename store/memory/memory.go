@@ -22,6 +22,7 @@ import (
 var (
 	errDuplicateCredential = errors.New("memory: credential already registered")
 	errDuplicateGroup      = errors.New("memory: a group with that name already exists")
+	errDuplicateOrg        = errors.New("memory: an organization with that slug already exists")
 )
 
 type user struct {
@@ -89,6 +90,10 @@ type Store struct {
 	memberships map[uint]map[uint]bool // userID -> set of groupID
 	apikeys     map[uint]*apiKey
 	apiSeq      uint
+	// org state
+	orgs       map[uint]*org
+	orgSeq     uint
+	orgMembers map[uint]map[uint]string // orgID -> userID -> role
 	// 2fa state
 	totp     map[uint]*totpRec
 	recovery map[uint]map[string]bool // userID -> set of hex(sha256(code))
@@ -117,6 +122,8 @@ func New() *Store {
 		groups:      map[uint]*authx.Group{},
 		memberships: map[uint]map[uint]bool{},
 		apikeys:     map[uint]*apiKey{},
+		orgs:        map[uint]*org{},
+		orgMembers:  map[uint]map[uint]string{},
 		totp:        map[uint]*totpRec{},
 		recovery:    map[uint]map[string]bool{},
 	}
@@ -544,6 +551,9 @@ func (s *Store) deleteUserCascadeLocked(id uint) {
 	delete(s.memberships, id)
 	delete(s.totp, id)
 	delete(s.recovery, id)
+	for _, members := range s.orgMembers { // org memberships die with the user (GDPR cascade parity)
+		delete(members, id)
+	}
 	for pkid, pk := range s.passkeys {
 		if pk.userID == id {
 			delete(s.passkeys, pkid)

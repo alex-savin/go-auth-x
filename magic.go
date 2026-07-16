@@ -13,6 +13,7 @@ func (a *Authenticator) AuthConfig(c *reqCtx) {
 	c.JSON(http.StatusOK, H{
 		"local":      a.LocalEnabled(),
 		"oidc":       a.Enabled(),
+		"orgs":       a.OrgsEnabled(),
 		"signupOpen": a.LocalEnabled(),
 		"methods": H{
 			"password":  a.LocalEnabled(),

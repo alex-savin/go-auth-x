@@ -154,6 +154,9 @@ func New(db *gorm.DB) (*Store, error) {
 	if err := s.migrateSessions(); err != nil {
 		return nil, err
 	}
+	if err := s.migrateOrgs(); err != nil {
+		return nil, err
+	}
 	return s, nil
 }
 
@@ -639,7 +642,7 @@ func cascadeDeletes(tx *gorm.DB, id uint) error {
 	// absent SID reads as "not revoked") silently re-admit a hard-deleted user on their other devices.
 	// DeleteUser tombstones the sessions as revoked instead; reclaim targets (unverified squatters) have
 	// no sessions, so their omission here is harmless.
-	for _, m := range []any{&PasswordCredential{}, &WebauthnCredential{}, &OAuthIdentity{}, &AuthToken{}, &GroupMembership{}, &TOTPCredential{}, &RecoveryCode{}} {
+	for _, m := range []any{&PasswordCredential{}, &WebauthnCredential{}, &OAuthIdentity{}, &AuthToken{}, &GroupMembership{}, &OrgMembership{}, &TOTPCredential{}, &RecoveryCode{}} {
 		if err := tx.Where("user_id = ?", id).Delete(m).Error; err != nil {
 			return err
 		}

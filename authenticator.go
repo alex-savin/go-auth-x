@@ -73,6 +73,12 @@ type Authenticator struct {
 	oidcSocial map[string]*oidcProvider
 	// dir backs groups / API keys / admin REST (optional; nil = those features off).
 	dir DirectoryStore
+	// orgs backs the optional organization layer (active-org sessions, invites, RequireOrgHTTP);
+	// nil = orgs off. Also requires creds — memberships are keyed by credential-store user IDs.
+	orgs OrgStore
+	// orgMu serializes the self-service last-owner checks (demote/remove) so two concurrent removals
+	// can't both pass the "don't strip the last owner" check — same process-local trade-off as credMu.
+	orgMu sync.Mutex
 	// twoFactor backs optional TOTP 2FA + recovery codes (nil = 2FA off).
 	twoFactor TwoFactorStore
 	// breach optionally screens new passwords against a breach corpus (e.g. HIBP k-anonymity), in

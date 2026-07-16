@@ -79,6 +79,16 @@ func (a *Authenticator) routes(mux *http.ServeMux) {
 	if a.DirectoryEnabled() {
 		a.adminRoutes(mux)
 	}
+	if a.OrgsEnabled() {
+		mux.HandleFunc("GET /auth/orgs", a.wrap(a.OrgList))
+		mux.HandleFunc("POST /auth/org/switch", a.wrap(a.OrgSwitch))
+		mux.HandleFunc("GET /auth/org/members", a.wrap(a.OrgMemberList))
+		mux.HandleFunc("POST /auth/org/members/{userId}", a.wrap(a.OrgMemberSetRole))
+		mux.HandleFunc("DELETE /auth/org/members/{userId}", a.wrap(a.OrgMemberRemove))
+		mux.HandleFunc("POST /auth/org/invites", a.wrap(a.OrgInviteCreate))
+		mux.HandleFunc("GET /auth/org/invite/accept", a.wrap(a.OrgInviteAccept))
+		a.adminOrgRoutes(mux)
+	}
 }
 
 // Login starts the Authorization Code + PKCE flow: stash state/nonce/verifier/next in
@@ -203,9 +213,12 @@ func (a *Authenticator) Callback(c *reqCtx) {
 		}
 	}
 
+	// Active-org enrichment (see completeLogin) — effective only when a CredentialStore also
+	// persists OIDC users (defaultOrgClaimsForSub resolves the subject through it).
+	orgID, orgRole := a.defaultOrgClaimsForSub(idToken.Subject)
 	sid := a.newSessionID()
 	session, err := mintSessionWith(a.cfg.SessionSecret, SessionClaims{
-		Email: claims.Email, Name: name, Groups: claims.Groups, Role: role, IDToken: rawID, SID: sid,
+		Email: claims.Email, Name: name, Groups: claims.Groups, Role: role, IDToken: rawID, SID: sid, Org: orgID, OrgRole: orgRole,
 	}, idToken.Subject, time.Now(), sessionTTL)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, H{"error": "session creation failed"})
@@ -283,7 +296,7 @@ func (a *Authenticator) Me(c *reqCtx) {
 		c.JSON(http.StatusOK, H{"authEnabled": true, "authenticated": false})
 		return
 	}
-	c.JSON(http.StatusOK, H{
+	resp := H{
 		"authEnabled":    true,
 		"authenticated":  true,
 		"sub":            sc.Subject,
@@ -292,7 +305,42 @@ func (a *Authenticator) Me(c *reqCtx) {
 		"groups":         sc.Groups,
 		"role":           sc.Role,
 		"impersonatedBy": sc.ImpersonatedBy,
-	})
+	}
+	// Org surface for the SPA: the active org (details + LIVE role) and every membership, so one
+	// bootstrap call renders both the current workspace and the org picker. On a STORE failure the
+	// org keys are OMITTED entirely (Me stays always-200) — absence means "unknown, retry", which
+	// the SPA can tell apart from the empty values a genuine zero-membership user gets.
+	if a.OrgsEnabled() {
+		if org, orgRole, orgs, err := a.meOrgs(sc); err == nil {
+			resp["org"], resp["orgRole"], resp["orgs"] = org, orgRole, orgs
+		}
+	}
+	c.JSON(http.StatusOK, resp)
+}
+
+// meOrgs assembles /auth/me's org fields from the store (NOT just the cookie): org, the active
+// org's view or nil; orgRole, the LIVE role in it ("" when the claim went stale — removed member,
+// deleted org); orgs, the flattened membership list for the picker. A session subject with no
+// credential-store row is a legitimate zero-membership answer, not an error.
+func (a *Authenticator) meOrgs(sc *SessionClaims) (org any, orgRole string, orgs []H, err error) {
+	u, uerr := a.creds.UserBySub(sc.Subject)
+	if errors.Is(uerr, ErrNoUser) {
+		return nil, "", []H{}, nil
+	}
+	if uerr != nil {
+		return nil, "", nil, uerr
+	}
+	ms, merr := a.orgs.UserOrgs(u.ID)
+	if merr != nil {
+		return nil, "", nil, merr
+	}
+	orgs = userOrgViews(ms)
+	for i := range ms {
+		if sc.Org != "" && ms[i].Org.ID == sc.Org {
+			org, orgRole = orgs[i], ms[i].Role
+		}
+	}
+	return org, orgRole, orgs, nil
 }
 
 // verifyAZP enforces OIDC Core §3.1.3.7 items 4-5: a multi-audience id_token MUST carry azp, and when

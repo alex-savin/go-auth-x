@@ -56,9 +56,15 @@ func (a *Authenticator) completeLogin(c *reqCtx, id Identity, remember bool, fir
 	if remember {
 		ttl = rememberTTL
 	}
+	// Active-org enrichment: a sole org membership becomes the session's active org (several = none;
+	// the app prompts and switches). Cookie-carried like groups, re-verified live by the org gates.
+	var orgID, orgRole string
+	if a.orgs != nil && u != nil {
+		orgID, orgRole = a.defaultOrgClaims(u.ID)
+	}
 	sid := a.newSessionID()
 	session, serr := mintSessionWith(a.cfg.SessionSecret, SessionClaims{
-		Email: id.Email, Name: id.Name, Groups: id.Groups, Role: role, SID: sid,
+		Email: id.Email, Name: id.Name, Groups: id.Groups, Role: role, SID: sid, Org: orgID, OrgRole: orgRole,
 	}, id.Subject, time.Now(), ttl)
 	if serr != nil {
 		return false, serr

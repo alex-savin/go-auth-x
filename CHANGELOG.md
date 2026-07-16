@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Organizations (tenant/org layer).** A fourth optional capability store, `OrgStore` (wire with
+  `SetOrgStore`; nil = feature off, zero behavior change), implemented by both reference stores:
+  - **Model** — `Org` + per-org role memberships (reserved `owner`/`admin`/`member`, app-extensible).
+    Users stay global (one account, many orgs); email uniqueness and the safe account-linking rule are
+    untouched. Org IDs are **opaque strings** from day one (roadmap #2 shape) — the reference stores
+    keep numeric PKs and convert at the boundary.
+  - **Sessions** — additive `org`/`orgRole` claims carry the ACTIVE org only (a sole membership is
+    auto-activated at login; several = none until the app switches). `POST /auth/org/switch` re-mints
+    the cookie after a live membership check, preserving SID and remaining lifetime. `/auth/me` gains
+    `org`, `orgRole` (live), and `orgs`; `/auth/config` reports `orgs`.
+  - **`RequireOrgHTTP(roles...)`** middleware — re-verifies membership/role against the store per
+    request, so an org removal or demotion takes effect immediately instead of at cookie expiry.
+  - **Email invites** — `POST /auth/org/invites` (owner/admin; only owners may invite owners) sends a
+    single-use, hashed-at-rest token whose stored purpose binds org + role (tampering with the accept
+    URL redeems nothing). Accepting requires a session whose email MATCHES the invited address; the
+    wrong account can't burn the token (peek-before-consume), and redemption marks the email verified.
+    Known limitation: pending invitations can't be listed or revoked before their 7-day TTL (the
+    token store is exact-lookup only); first-class invite records are planned for the v0.7 phase.
+  - **Self-service member management** — `GET/POST/DELETE /auth/org/members[/{userId}]` with a
+    serialized last-owner guard (can't demote/remove the final owner) and self-removal (leave).
+  - **Admin verbs** — org CRUD + membership under `/auth/admin/orgs` (admin API deliberately bypasses
+    the last-owner guard as the recovery path).
+  - **GDPR parity** — `DeleteUser` cascades org memberships in both reference stores; `DeleteOrg`
+    cascades its memberships.
+
 ## [0.5.1] — 2026-07-15
 
 Follow-up hardening from a post-merge review of v0.5.0.

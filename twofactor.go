@@ -129,18 +129,24 @@ func (a *Authenticator) completePendingLogin(c *reqCtx, pc *pendingClaims) error
 	if pc.Remember {
 		ttl = rememberTTL
 	}
-	sid := a.newSessionID()
-	session, err := mintSessionWith(a.cfg.SessionSecret, SessionClaims{
-		Email: pc.Email, Name: pc.Name, Groups: pc.Groups, Role: pc.Role, SID: sid,
-	}, pc.Subject, time.Now(), ttl)
-	if err != nil {
-		return err
-	}
 	var uid uint
 	if a.creds != nil {
 		if u, e := a.creds.UserBySub(pc.Subject); e == nil {
 			uid = u.ID
 		}
+	}
+	// Active-org enrichment (see completeLogin) — re-derived here because the pending cookie
+	// deliberately carries only the half-authenticated identity, not org state.
+	var orgID, orgRole string
+	if a.orgs != nil && uid != 0 {
+		orgID, orgRole = a.defaultOrgClaims(uid)
+	}
+	sid := a.newSessionID()
+	session, err := mintSessionWith(a.cfg.SessionSecret, SessionClaims{
+		Email: pc.Email, Name: pc.Name, Groups: pc.Groups, Role: pc.Role, SID: sid, Org: orgID, OrgRole: orgRole,
+	}, pc.Subject, time.Now(), ttl)
+	if err != nil {
+		return err
 	}
 	// Record before the cookie (see completeLogin) so a lost store write fails the second-factor step.
 	if rerr := a.recordSession(c.Request, sid, pc.Subject, uid, ttl); rerr != nil {

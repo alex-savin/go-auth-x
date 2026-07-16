@@ -83,6 +83,39 @@ PKs and converts at its boundary — no DB migration). Verified safe (the IDs ar
 arithmetically). **Deferred past v0.2.0** — no current consumer needs it, and it's cheapest to land as
 a pre-v1.0 breaking change if/when a uuid-keyed consumer adopts the library or the API is frozen for 1.0.
 
+### Organizations (tenant/org concept) — additive
+
+**Status: the v0.6 core slice is implemented on `main` (unreleased)** — `OrgStore` + both reference
+stores, active-org session claims + `POST /auth/org/switch`, `RequireOrgHTTP` (live re-verification),
+email invites, self-service member management (last-owner guard), and the admin org verbs. Org IDs
+shipped as **opaque strings from day one** (resolving the [#2](https://github.com/alex-savin/go-auth-x/issues/2)
+dependency below for the new surface). Remaining: the v0.7 org-scoped resources phase and (if ever
+demanded) per-org SSO.
+
+Give the library a first-class org layer for B2B-shaped apps, as a fourth optional capability store
+following the house pattern (`SetOrgStore`; nil = feature off, zero behavior change):
+
+- **Model** — `Org` + `OrgMembership` (many-to-many, per-org role: reserved `owner`/`admin`/`member`,
+  app-extensible). **Users stay global** (one account, many orgs; email uniqueness and the safe
+  account-linking rule are untouched) — orgs are a layer *above* authentication, not a partition of it.
+  Isolated user pools (realm-style tenancy) stay a composition recipe — one `Authenticator` + store per
+  tenant — not schema.
+- **Session** — additive `Org`/`OrgRole` claims carry the **active org only** (memberships list lives at
+  `/auth/me`, not in the cookie); `POST /auth/org/switch` verifies membership and re-mints. Zero orgs is
+  a valid state (app decides onboarding); `RequireOrgHTTP(roles...)` gates on the active org and
+  re-verifies membership against the store so an off-boarded member doesn't ride out the session TTL.
+  Row-level isolation of app data remains the app's job.
+- **Invites** — reuse the single-use hashed-at-rest token infra + `Mailer` (purpose `org-invite`,
+  scoped to org + role, redeemed through the login funnel).
+- **Phasing** — v0.6: core (`OrgStore` + both reference stores, session claims + switch, middleware,
+  invites, org CRUD in the admin REST API). v0.7: org-scoped resources — nullable `OrgID` on groups +
+  API keys (null = global) unlocking **org-scoped SCIM** (org-bound key + org-filtered directory view
+  per customer IdP). Per-org SSO (email-domain → IdP routing) stays out of scope until a consumer
+  demands it — that's the IdP-shaped edge the README's positioning warns against.
+- **Depends on [#2](https://github.com/alex-savin/go-auth-x/issues/2)** — decide opaque string IDs
+  *before* `OrgStore` lands (or give the org types string IDs from day one); adding the largest new
+  interface with `uint` IDs widens exactly the break #2 defers.
+
 ### Also on the list
 
 - **More named social providers** as demand warrants — the generic `Config.SocialOIDC` registration

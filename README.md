@@ -93,6 +93,8 @@ IdP hand-off, no "double login page."
 - 🔐 **API keys** (Bearer) + an **admin REST API**: create/disable/**ban**/delete users, set passwords,
   **impersonate**, and list/revoke a user's sessions.
 - 🏢 **LDAP** sync and a minimal **SCIM 2.0** provisioning server.
+- 🏬 **Organizations (multi-tenant orgs)** — per-org roles, an active-org session claim + switching,
+  **email invites**, `RequireOrgHTTP` middleware, and admin org CRUD.
 
 **Operational**
 - 🚦 Rate limiting + soft lockout (**`429 + Retry-After`**, IPv6 `/64` keying), trusted-proxy-aware client IP.
@@ -402,6 +404,12 @@ Mounted under `/auth` by `Handler()`:
 | GET · DELETE | `/auth/api/sessions` · `/auth/api/sessions/{sid}` | list / revoke your sessions | session (+ CSRF) |
 | POST | `/auth/api/sessions/revoke-others` | sign out your other devices | session + CSRF |
 | POST | `/auth/api/stop-impersonating` | end an admin impersonation session | session + CSRF |
+| GET | `/auth/orgs` | my org memberships + the active org | session |
+| POST | `/auth/org/switch` | switch (or clear) the active org | session + CSRF |
+| GET | `/auth/org/members` | list the active org's members | session (member) |
+| POST · DELETE | `/auth/org/members/{userId}` | set a member's role / remove (or leave) | session (owner/admin) + CSRF |
+| POST | `/auth/org/invites` | email a single-use org invite | session (owner/admin) + CSRF |
+| GET | `/auth/org/invite/accept` | redeem an invite from the emailed link | session + token |
 
 The account, session-management, unlink, and delete endpoints require a **`SessionStore`** only for the
 device-list/revoke features; everything else works statelessly. Step-up-gated actions expect a fresh
@@ -475,11 +483,46 @@ mux.Handle("/scim/v2/", http.StripPrefix("/scim/v2",
 	scim.NewServer(store, func(t string) bool { _, ok := authn.ValidateAPIKey(t); return ok }).Handler()))
 ```
 
+### Organizations (multi-tenant orgs)
+
+Optional, via its own store: `SetOrgStore(store)` (both reference stores implement it; also requires
+a `CredentialStore` — memberships are keyed by its user IDs). Orgs are a layer **above**
+authentication: users stay global (one account, many orgs, a different role in each — reserved
+`owner`/`admin`/`member` plus your own tokens), so the one-user-per-email invariant and the safe
+account-linking rule are untouched. If you need fully **isolated user pools** instead (realm-style
+tenancy), run one `Authenticator` + store per tenant and route by host — that composes today and
+needs no schema.
+
+- **Active org in the session** — a sole membership is auto-activated at login; with several, the app
+  shows a picker and calls `POST /auth/org/switch` (live membership check, cookie re-minted with its
+  remaining lifetime — `/auth/me` returns `org`, `orgRole`, and the full `orgs` list).
+- **Enforcement is live** — `RequireOrgHTTP(roles...)` re-verifies membership + role against the store
+  on every request, so off-boarding takes effect immediately, not at cookie expiry. It gates *who is
+  acting in which org*; row-level isolation of your app's data remains your responsibility.
+- **Invites** — `POST /auth/org/invites` emails a single-use, hashed-at-rest token bound to org +
+  role. Accepting requires signing in with the invited address (the token proves the mailbox — so it
+  also marks the email verified); a tampered role/org in the link redeems nothing, and the wrong
+  account can't burn the token. Owners/admins invite; only owners may grant `owner`. **Known
+  limitation:** pending invitations can't be listed or revoked — a mis-sent invite stays redeemable
+  (by that mailbox only) until its 7-day TTL passes, so double-check the address on `owner` invites.
+- **Member management** — members list the org; owners/admins set roles and remove members; anyone
+  may leave. A serialized **last-owner guard** refuses demoting/removing the final owner (the admin
+  API bypasses it as the recovery path).
+
+```go
+authn.SetOrgStore(store) // gormstore + memory both implement authx.OrgStore
+
+// gate an org-scoped area to live members (any role), or specific roles:
+mux.Handle("/app/", authn.GateHTTP(authn.RequireOrgHTTP()(appHandler)))
+mux.Handle("/app/billing", authn.GateHTTP(authn.RequireOrgHTTP(authx.OrgRoleOwner, "billing")(billingHandler)))
+```
+
 ---
 
 ## Storage
 
-go-auth-x ships two reference stores; both implement `CredentialStore` **and** `DirectoryStore`:
+go-auth-x ships two reference stores; both implement `CredentialStore` **and** `DirectoryStore` (plus
+the optional `TwoFactorStore`, `SessionStore`, and `OrgStore`):
 
 - **`gormstore`** — Postgres/SQLite via GORM. `New(db)` migrates self-contained `authx_*` tables
   (so it won't collide with yours) and adds a unique-email index. Ships the **safe verified-email

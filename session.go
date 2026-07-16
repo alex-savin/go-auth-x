@@ -39,6 +39,13 @@ type SessionClaims struct {
 	// at /auth/me so the app can show a banner, and refused by adminGuard so an impersonated session
 	// can't perform further admin actions.
 	ImpersonatedBy string `json:"imp,omitempty"`
+	// Org is the ACTIVE organization's ID when an OrgStore is wired — the sole membership at login,
+	// or whatever POST /auth/org/switch re-minted. Only the active org rides in the cookie (the full
+	// membership list is served by /auth/me); empty = no active org.
+	Org string `json:"org,omitempty"`
+	// OrgRole is the user's role in Org AT MINT TIME — a display hint. Enforcement (RequireOrgHTTP,
+	// the org endpoints) re-reads the live role from the store, so a demotion doesn't ride out the TTL.
+	OrgRole string `json:"orgRole,omitempty"`
 	jwt.RegisteredClaims
 }
 
