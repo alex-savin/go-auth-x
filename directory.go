@@ -8,9 +8,9 @@ import (
 // ErrNoGroup is returned by DirectoryStore lookups when a group doesn't exist.
 var ErrNoGroup = errors.New("authx: no such group")
 
-// Group is a named collection of users used for access control.
+// Group is a named collection of users used for access control. ID is opaque (see AuthUser.ID).
 type Group struct {
-	ID          uint      `json:"id"`
+	ID          string    `json:"id"`
 	Name        string    `json:"name"`
 	Description string    `json:"description"`
 	CreatedAt   time.Time `json:"createdAt"`
@@ -27,7 +27,7 @@ type Group struct {
 // are limited to the key's Scopes (e.g. "admin", "scim"). Scopes are DENY-BY-DEFAULT: an empty list
 // grants nothing; grant ["*"] for an unrestricted ("root") key.
 type APIKeyInfo struct {
-	ID         uint       `json:"id"`
+	ID         string     `json:"id"` // opaque; see AuthUser.ID
 	Name       string     `json:"name"`
 	Prefix     string     `json:"prefix"` // leading chars of the key, for identification in lists
 	Groups     []string   `json:"groups"`
@@ -64,20 +64,20 @@ type DirectoryStore interface {
 	CreateGroup(name, description string) (*Group, error)
 	Groups() ([]Group, error)
 	GroupByName(name string) (*Group, error) // ErrNoGroup if absent
-	DeleteGroup(id uint) error
-	AddUserToGroup(userID, groupID uint) error
-	RemoveUserFromGroup(userID, groupID uint) error
-	UserGroups(userID uint) ([]Group, error)
-	GroupMembers(groupID uint) ([]AuthUser, error)
+	DeleteGroup(id string) error
+	AddUserToGroup(userID, groupID string) error
+	RemoveUserFromGroup(userID, groupID string) error
+	UserGroups(userID string) ([]Group, error)
+	GroupMembers(groupID string) ([]AuthUser, error)
 
 	// Admin user management
 	ListUsers() ([]AuthUser, error)
-	UserByID(id uint) (*AuthUser, error)         // ErrNoUser if absent
+	UserByID(id string) (*AuthUser, error)       // ErrNoUser if absent
 	UserByEmail(email string) (*AuthUser, error) // ErrNoUser if absent — used by SCIM to enforce create-uniqueness
-	SetUserDisabled(userID uint, disabled bool) error
+	SetUserDisabled(userID string, disabled bool) error
 	// SetUserBan sets or clears a time-boxed ban with a reason. banned=false clears it; a nil `until`
 	// with banned=true is a permanent ban, else the ban lifts at *until.
-	SetUserBan(userID uint, banned bool, until *time.Time, reason string) error
+	SetUserBan(userID string, banned bool, until *time.Time, reason string) error
 
 	// UpsertExternalUser provisions/updates a user from an external directory (LDAP/SCIM) keyed by
 	// an external Sub (e.g. "ldap:<uid>" / "scim:<id>"). Applies the same safe email-linking rule.
@@ -88,8 +88,8 @@ type DirectoryStore interface {
 	CreateAPIKey(name string, groups, scopes []string, prefix string, hash []byte, expiresAt *time.Time) (*APIKeyInfo, error)
 	APIKeyByHash(hash []byte) (*APIKeyInfo, error)
 	ListAPIKeys() ([]APIKeyInfo, error)
-	RevokeAPIKey(id uint) error
-	TouchAPIKey(id uint) error // best-effort last-used stamp
+	RevokeAPIKey(id string) error
+	TouchAPIKey(id string) error // best-effort last-used stamp
 }
 
 // SetDirectoryStore enables groups, API keys, per-group access control, and the admin REST API.

@@ -72,9 +72,9 @@ func (s *Store) migrateDirectory() error {
 func toGroup(g *Group) authx.Group {
 	orgID := ""
 	if g.OrgID != 0 {
-		orgID = orgIDString(g.OrgID)
+		orgID = idStr(g.OrgID)
 	}
-	return authx.Group{ID: g.ID, Name: g.Name, Description: g.Description, OrgID: orgID, CreatedAt: g.CreatedAt, UpdatedAt: g.UpdatedAt}
+	return authx.Group{ID: idStr(g.ID), Name: g.Name, Description: g.Description, OrgID: orgID, CreatedAt: g.CreatedAt, UpdatedAt: g.UpdatedAt}
 }
 
 func csvSplit(s string) []string {
@@ -90,10 +90,10 @@ func csvSplit(s string) []string {
 func toAPIKeyInfo(k *APIKey) authx.APIKeyInfo {
 	orgID := ""
 	if k.OrgID != 0 {
-		orgID = orgIDString(k.OrgID)
+		orgID = idStr(k.OrgID)
 	}
 	return authx.APIKeyInfo{
-		ID: k.ID, Name: k.Name, Prefix: k.Prefix, Groups: csvSplit(k.Groups), Scopes: csvSplit(k.Scopes),
+		ID: idStr(k.ID), Name: k.Name, Prefix: k.Prefix, Groups: csvSplit(k.Groups), Scopes: csvSplit(k.Scopes),
 		ExpiresAt: k.ExpiresAt, CreatedAt: k.CreatedAt, LastUsedAt: k.LastUsedAt, OrgID: orgID,
 	}
 }
@@ -137,29 +137,53 @@ func (s *Store) GroupByName(name string) (*authx.Group, error) {
 	return &ag, nil
 }
 
-func (s *Store) DeleteGroup(id uint) error {
+func (s *Store) DeleteGroup(id string) error {
+	n, ok := parseID(id)
+	if !ok {
+		return nil // idempotent: an ID that can't exist is already gone
+	}
 	return s.db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Where("group_id = ?", id).Delete(&GroupMembership{}).Error; err != nil {
+		if err := tx.Where("group_id = ?", n).Delete(&GroupMembership{}).Error; err != nil {
 			return err
 		}
-		return tx.Delete(&Group{}, id).Error
+		return tx.Delete(&Group{}, n).Error
 	})
 }
 
-func (s *Store) AddUserToGroup(userID, groupID uint) error {
+func (s *Store) AddUserToGroup(userID, groupID string) error {
+	uid, ok := parseID(userID)
+	if !ok {
+		return authx.ErrNoUser
+	}
+	gid, ok := parseID(groupID)
+	if !ok {
+		return authx.ErrNoGroup
+	}
 	return s.db.Clauses(clause.OnConflict{DoNothing: true}).
-		Create(&GroupMembership{UserID: userID, GroupID: groupID}).Error
+		Create(&GroupMembership{UserID: uid, GroupID: gid}).Error
 }
 
-func (s *Store) RemoveUserFromGroup(userID, groupID uint) error {
-	return s.db.Where("user_id = ? AND group_id = ?", userID, groupID).Delete(&GroupMembership{}).Error
+func (s *Store) RemoveUserFromGroup(userID, groupID string) error {
+	uid, ok := parseID(userID)
+	if !ok {
+		return nil
+	}
+	gid, ok := parseID(groupID)
+	if !ok {
+		return nil
+	}
+	return s.db.Where("user_id = ? AND group_id = ?", uid, gid).Delete(&GroupMembership{}).Error
 }
 
-func (s *Store) UserGroups(userID uint) ([]authx.Group, error) {
+func (s *Store) UserGroups(userID string) ([]authx.Group, error) {
+	n, ok := parseID(userID)
+	if !ok {
+		return []authx.Group{}, nil
+	}
 	var rows []Group
 	err := s.db.Table("authx_groups").
 		Joins("JOIN authx_group_members m ON m.group_id = authx_groups.id").
-		Where("m.user_id = ?", userID).Order("authx_groups.name").Scan(&rows).Error
+		Where("m.user_id = ?", n).Order("authx_groups.name").Scan(&rows).Error
 	if err != nil {
 		return nil, err
 	}
@@ -170,11 +194,15 @@ func (s *Store) UserGroups(userID uint) ([]authx.Group, error) {
 	return out, nil
 }
 
-func (s *Store) GroupMembers(groupID uint) ([]authx.AuthUser, error) {
+func (s *Store) GroupMembers(groupID string) ([]authx.AuthUser, error) {
+	n, ok := parseID(groupID)
+	if !ok {
+		return []authx.AuthUser{}, nil
+	}
 	var rows []User
 	err := s.db.Table("authx_users").
 		Joins("JOIN authx_group_members m ON m.user_id = authx_users.id").
-		Where("m.group_id = ?", groupID).Order("authx_users.email").Scan(&rows).Error
+		Where("m.group_id = ?", n).Order("authx_users.email").Scan(&rows).Error
 	if err != nil {
 		return nil, err
 	}
@@ -199,9 +227,13 @@ func (s *Store) ListUsers() ([]authx.AuthUser, error) {
 	return out, nil
 }
 
-func (s *Store) UserByID(id uint) (*authx.AuthUser, error) {
+func (s *Store) UserByID(id string) (*authx.AuthUser, error) {
+	n, ok := parseID(id)
+	if !ok {
+		return nil, authx.ErrNoUser
+	}
 	var u User
-	if err := s.db.First(&u, id).Error; err != nil {
+	if err := s.db.First(&u, n).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, authx.ErrNoUser
 		}
@@ -210,17 +242,25 @@ func (s *Store) UserByID(id uint) (*authx.AuthUser, error) {
 	return toAuthUser(&u), nil
 }
 
-func (s *Store) SetUserDisabled(userID uint, disabled bool) error {
-	return s.db.Model(&User{}).Where("id = ?", userID).Update("disabled", disabled).Error
+func (s *Store) SetUserDisabled(userID string, disabled bool) error {
+	n, ok := parseID(userID)
+	if !ok {
+		return authx.ErrNoUser
+	}
+	return s.db.Model(&User{}).Where("id = ?", n).Update("disabled", disabled).Error
 }
 
-func (s *Store) SetUserBan(userID uint, banned bool, until *time.Time, reason string) error {
+func (s *Store) SetUserBan(userID string, banned bool, until *time.Time, reason string) error {
+	n, ok := parseID(userID)
+	if !ok {
+		return authx.ErrNoUser
+	}
 	updates := map[string]any{"banned": banned, "banned_until": until, "ban_reason": reason}
 	if !banned {
 		updates["banned_until"] = nil
 		updates["ban_reason"] = ""
 	}
-	return s.db.Model(&User{}).Where("id = ?", userID).Updates(updates).Error
+	return s.db.Model(&User{}).Where("id = ?", n).Updates(updates).Error
 }
 
 // UpsertExternalUser provisions a directory-sourced user (LDAP/SCIM) via the safe linking rule.
@@ -266,9 +306,19 @@ func (s *Store) ListAPIKeys() ([]authx.APIKeyInfo, error) {
 	return out, nil
 }
 
-func (s *Store) RevokeAPIKey(id uint) error { return s.db.Delete(&APIKey{}, id).Error }
+func (s *Store) RevokeAPIKey(id string) error {
+	n, ok := parseID(id)
+	if !ok {
+		return nil // idempotent: an ID that can't exist is already revoked
+	}
+	return s.db.Delete(&APIKey{}, n).Error
+}
 
-func (s *Store) TouchAPIKey(id uint) error {
+func (s *Store) TouchAPIKey(id string) error {
+	n, ok := parseID(id)
+	if !ok {
+		return nil // best-effort last-used stamp; an ID that can't exist is a no-op
+	}
 	now := time.Now()
-	return s.db.Model(&APIKey{}).Where("id = ?", id).Update("last_used_at", now).Error
+	return s.db.Model(&APIKey{}).Where("id = ?", n).Update("last_used_at", now).Error
 }

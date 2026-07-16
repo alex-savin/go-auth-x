@@ -20,7 +20,7 @@ func TestLinkingRule(t *testing.T) {
 	_ = s.SetPasswordHash(atk.ID, "attacker-hash", "bcrypt")
 	u, err := s.UpsertUserOnLogin("idp-sub-real", "victim@x.com", "Victim", true)
 	if err != nil || u.Sub != "idp-sub-real" || u.ID == atk.ID {
-		t.Fatalf("verified login should reclaim the email: err=%v user=%+v (squatter id %d)", err, u, atk.ID)
+		t.Fatalf("verified login should reclaim the email: err=%v user=%+v (squatter id %s)", err, u, atk.ID)
 	}
 	if _, _, e := s.PasswordHash(atk.ID); e != authx.ErrNoCredential {
 		t.Fatalf("squatter credentials should be gone after reclaim, got %v", e)

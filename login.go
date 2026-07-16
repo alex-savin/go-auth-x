@@ -71,7 +71,7 @@ func (a *Authenticator) completeLogin(c *reqCtx, id Identity, remember bool, fir
 	if serr != nil {
 		return false, serr
 	}
-	var uid uint
+	var uid string
 	if u != nil {
 		uid = u.ID
 	}

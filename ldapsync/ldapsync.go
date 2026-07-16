@@ -137,8 +137,8 @@ func (s *Syncer) Sync() (*Result, error) {
 	defer conn.Close()
 
 	res := &Result{}
-	userByDN := map[string]uint{}  // DN -> userID (for member=DN groups)
-	userByUID := map[string]uint{} // uid -> userID (for memberUid groups)
+	userByDN := map[string]string{}  // DN -> userID (for member=DN groups)
+	userByUID := map[string]string{} // uid -> userID (for memberUid groups)
 
 	users, err := conn.SearchWithPaging(ldap.NewSearchRequest(
 		s.cfg.UserBaseDN, ldap.ScopeWholeSubtree, ldap.NeverDerefAliases, 0, 0, false,
@@ -239,12 +239,12 @@ func (s *Syncer) getOrCreateGroup(name string) (*authx.Group, error) {
 // resolveMember maps an LDAP group member value (a full DN, or a bare uid for posixGroup) to a user.
 // DNs are normalized before comparison so incidental formatting differences (spacing/case) between a
 // member= value and the entry's DN don't silently drop members.
-func resolveMember(member string, byDN, byUID map[string]uint) (uint, bool) {
+func resolveMember(member string, byDN, byUID map[string]string) (string, bool) {
 	if strings.Contains(member, "=") { // looks like a DN
 		if id, ok := byDN[normalizeDN(member)]; ok {
 			return id, true
 		}
-		return 0, false
+		return "", false
 	}
 	id, ok := byUID[member]
 	return id, ok

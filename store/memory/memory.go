@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -140,8 +141,43 @@ func randID() string {
 	return hex.EncodeToString(b)
 }
 
+// idStr renders an internal numeric key as its opaque public string ID (decimal) — the boundary
+// conversion the opaque string ID prescribes (parity with gormstore). Internal keys are always >= 1,
+// so idStr is only ever handed a real entity id; the no-user token/audit key 0 goes through userIDStr.
+func idStr(id uint) string { return strconv.FormatUint(uint64(id), 10) }
+
+// parseID maps an opaque ID back to its internal numeric key. A malformed/empty/zero ID is simply an
+// ID that cannot exist, so callers treat !ok as the miss sentinel (ErrNoUser/ErrNoGroup/…), or as a
+// no-op for idempotent deletes — never index a map with a coerced 0.
+func parseID(s string) (uint, bool) {
+	n, err := strconv.ParseUint(s, 10, 64)
+	if err != nil || n == 0 {
+		return 0, false
+	}
+	return uint(n), true
+}
+
+// parseUserID parses an OPTIONAL user ID for the token/audit sinks, where "" is the reserved "no user"
+// sentinel (stored as key 0). A non-empty malformed ID also degrades to no-user rather than failing.
+func parseUserID(s string) uint {
+	if s == "" {
+		return 0
+	}
+	n, _ := parseID(s)
+	return n
+}
+
+// userIDStr projects a token/audit user key back to the public string, mapping the no-user key 0 to
+// the reserved "" sentinel.
+func userIDStr(id uint) string {
+	if id == 0 {
+		return ""
+	}
+	return idStr(id)
+}
+
 func view(u *user) *authx.AuthUser {
-	return &authx.AuthUser{ID: u.id, Sub: u.sub, Email: u.email, Name: u.name, EmailVerified: u.emailVerified, Disabled: u.disabled, Banned: u.banned, BannedUntil: u.bannedUntil, BanReason: u.banReason, CreatedAt: u.createdAt, UpdatedAt: u.updatedAt}
+	return &authx.AuthUser{ID: idStr(u.id), Sub: u.sub, Email: u.email, Name: u.name, EmailVerified: u.emailVerified, Disabled: u.disabled, Banned: u.banned, BannedUntil: u.bannedUntil, BanReason: u.banReason, CreatedAt: u.createdAt, UpdatedAt: u.updatedAt}
 }
 
 func (s *Store) findByEmail(email string) *user {
@@ -194,20 +230,28 @@ func (s *Store) CreateLocalUser(email, name string) (*authx.AuthUser, error) {
 	return view(u), nil
 }
 
-func (s *Store) SetEmailVerified(userID uint, verified bool) error {
+func (s *Store) SetEmailVerified(userID string, verified bool) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if u := s.users[userID]; u != nil {
+	n, ok := parseID(userID)
+	if !ok {
+		return nil
+	}
+	if u := s.users[n]; u != nil {
 		u.emailVerified = verified
 		u.updatedAt = time.Now()
 	}
 	return nil
 }
 
-func (s *Store) EnsureWebauthnHandle(userID uint) ([]byte, error) {
+func (s *Store) EnsureWebauthnHandle(userID string) ([]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	u := s.users[userID]
+	n, ok := parseID(userID)
+	if !ok {
+		return nil, authx.ErrNoUser
+	}
+	u := s.users[n]
 	if u == nil {
 		return nil, authx.ErrNoUser
 	}
@@ -230,21 +274,29 @@ func (s *Store) UserByWebauthnHandle(handle []byte) (*authx.AuthUser, error) {
 	return nil, authx.ErrNoUser
 }
 
-func (s *Store) Passkeys(userID uint) ([]authx.Passkey, error) {
+func (s *Store) Passkeys(userID string) ([]authx.Passkey, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	n, ok := parseID(userID)
+	if !ok {
+		return nil, nil
+	}
 	var out []authx.Passkey
 	for _, pk := range s.passkeys {
-		if pk.userID == userID {
+		if pk.userID == n {
 			out = append(out, pk.p)
 		}
 	}
 	return out, nil
 }
 
-func (s *Store) AddPasskey(userID uint, p authx.Passkey) error {
+func (s *Store) AddPasskey(userID string, p authx.Passkey) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	n, ok := parseID(userID)
+	if !ok {
+		return authx.ErrNoUser
+	}
 	// Reject a globally-duplicate credential ID (parity with gormstore's uniqueIndex on CredentialID).
 	for _, pk := range s.passkeys {
 		if string(pk.p.CredentialID) == string(p.CredentialID) {
@@ -252,9 +304,10 @@ func (s *Store) AddPasskey(userID uint, p authx.Passkey) error {
 		}
 	}
 	s.pkSeq++
-	p.ID = s.pkSeq
+	pkID := s.pkSeq
+	p.ID = idStr(pkID)
 	p.CreatedAt, p.LastUsedAt = time.Now(), time.Now()
-	s.passkeys[p.ID] = &passkey{p: p, userID: userID}
+	s.passkeys[pkID] = &passkey{p: p, userID: n}
 	return nil
 }
 
@@ -272,28 +325,41 @@ func (s *Store) TouchPasskey(credentialID []byte, signCount uint32) error {
 	return nil
 }
 
-func (s *Store) RemovePasskey(userID, id uint) error {
+func (s *Store) RemovePasskey(userID, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if pk := s.passkeys[id]; pk != nil && pk.userID == userID {
-		delete(s.passkeys, id)
+	uid, uok := parseID(userID)
+	pid, pok := parseID(id)
+	if !uok || !pok {
+		return nil
+	}
+	if pk := s.passkeys[pid]; pk != nil && pk.userID == uid {
+		delete(s.passkeys, pid)
 	}
 	return nil
 }
 
-func (s *Store) PasswordHash(userID uint) (string, string, error) {
+func (s *Store) PasswordHash(userID string) (string, string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if pc, ok := s.passwords[userID]; ok {
+	n, ok := parseID(userID)
+	if !ok {
+		return "", "", authx.ErrNoCredential
+	}
+	if pc, ok := s.passwords[n]; ok {
 		return pc.hash, pc.algo, nil
 	}
 	return "", "", authx.ErrNoCredential
 }
 
-func (s *Store) SetPasswordHash(userID uint, hash, algo string) error {
+func (s *Store) SetPasswordHash(userID, hash, algo string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.passwords[userID] = struct{ hash, algo string }{hash, algo}
+	n, ok := parseID(userID)
+	if !ok {
+		return nil
+	}
+	s.passwords[n] = struct{ hash, algo string }{hash, algo}
 	return nil
 }
 
@@ -308,19 +374,24 @@ func (s *Store) UserByOAuth(provider, subject string) (*authx.AuthUser, error) {
 	return nil, authx.ErrNoUser
 }
 
-func (s *Store) LinkOAuth(userID uint, provider, subject, email string) error {
+func (s *Store) LinkOAuth(userID, provider, subject, email string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	n, ok := parseID(userID)
+	if !ok {
+		return nil
+	}
 	if _, exists := s.oauth[provider+"|"+subject]; !exists {
-		s.oauth[provider+"|"+subject] = userID
+		s.oauth[provider+"|"+subject] = n
 	}
 	return nil
 }
 
-func (s *Store) CreateToken(purpose string, userID uint, email string, tokenHash []byte, expiresAt time.Time) error {
+func (s *Store) CreateToken(purpose, userID, email string, tokenHash []byte, expiresAt time.Time) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.tokens = append(s.tokens, &token{purpose: purpose, userID: userID, email: norm(email), hash: tokenHash, expiresAt: expiresAt})
+	// userID "" (or any non-user id) is the reserved "no user" sentinel — stored as key 0, not a miss.
+	s.tokens = append(s.tokens, &token{purpose: purpose, userID: parseUserID(userID), email: norm(email), hash: tokenHash, expiresAt: expiresAt})
 	return nil
 }
 
@@ -334,22 +405,26 @@ func (s *Store) ConsumeToken(purpose string, tokenHash []byte) (*authx.TokenClai
 			}
 			now := time.Now()
 			t.consumedAt = &now
-			return &authx.TokenClaim{UserID: t.userID, Email: t.email}, nil
+			return &authx.TokenClaim{UserID: userIDStr(t.userID), Email: t.email}, nil
 		}
 	}
 	return nil, authx.ErrTokenInvalid
 }
 
-func (s *Store) SetEmail(userID uint, newEmail string) error {
+func (s *Store) SetEmail(userID, newEmail string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	n, ok := parseID(userID)
+	if !ok {
+		return nil
+	}
 	ne := norm(newEmail)
 	for _, u := range s.users {
-		if u.email == ne && u.id != userID {
+		if u.email == ne && u.id != n {
 			return authx.ErrEmailConflict
 		}
 	}
-	if u := s.users[userID]; u != nil {
+	if u := s.users[n]; u != nil {
 		u.email = ne
 		u.emailVerified = true
 		u.updatedAt = time.Now()
@@ -359,14 +434,18 @@ func (s *Store) SetEmail(userID uint, newEmail string) error {
 
 // DeleteUser hard-deletes the user + everything keyed to it, drops its email OTPs, and anonymizes its
 // audit rows' email (parity with gormstore's GDPR-erasure behavior). Idempotent.
-func (s *Store) DeleteUser(userID uint) error {
+func (s *Store) DeleteUser(userID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	n, ok := parseID(userID)
+	if !ok {
+		return nil // idempotent: an ID that can't exist is already gone
+	}
 	email := ""
-	if u := s.users[userID]; u != nil {
+	if u := s.users[n]; u != nil {
 		email = u.email
 	}
-	s.deleteUserCascadeLocked(userID)
+	s.deleteUserCascadeLocked(n)
 	if email != "" {
 		for k := range s.otps {
 			if strings.HasSuffix(k, "|"+email) {
@@ -383,40 +462,53 @@ func (s *Store) DeleteUser(userID uint) error {
 	// Anonymize by userID (matching gormstore's key), so audit rows written under a since-changed email
 	// are still scrubbed. memory never stores an IP, so there is nothing else to clear.
 	for _, a := range s.audits {
-		if a.userID == userID {
+		if a.userID == n {
 			a.email = ""
 		}
 	}
 	return nil
 }
 
-func (s *Store) RenamePasskey(userID, id uint, name string) error {
+func (s *Store) RenamePasskey(userID, id, name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if pk := s.passkeys[id]; pk != nil && pk.userID == userID {
+	uid, uok := parseID(userID)
+	pid, pok := parseID(id)
+	if !uok || !pok {
+		return nil
+	}
+	if pk := s.passkeys[pid]; pk != nil && pk.userID == uid {
 		pk.p.Name = name
 	}
 	return nil
 }
 
-func (s *Store) UnlinkOAuth(userID uint, provider string) error {
+func (s *Store) UnlinkOAuth(userID, provider string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	n, ok := parseID(userID)
+	if !ok {
+		return nil
+	}
 	for k, uid := range s.oauth {
-		if uid == userID && strings.HasPrefix(k, provider+"|") {
+		if uid == n && strings.HasPrefix(k, provider+"|") {
 			delete(s.oauth, k)
 		}
 	}
 	return nil
 }
 
-func (s *Store) OAuthIdentities(userID uint) ([]string, error) {
+func (s *Store) OAuthIdentities(userID string) ([]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	n, ok := parseID(userID)
+	if !ok {
+		return nil, nil
+	}
 	seen := map[string]bool{}
 	var out []string
 	for k, uid := range s.oauth {
-		if uid != userID {
+		if uid != n {
 			continue
 		}
 		if i := strings.IndexByte(k, '|'); i > 0 {
@@ -470,16 +562,18 @@ func (s *Store) PeekToken(purpose string, tokenHash []byte) (*authx.TokenClaim, 
 			if t.consumedAt != nil || time.Now().After(t.expiresAt) {
 				return nil, authx.ErrTokenInvalid
 			}
-			return &authx.TokenClaim{UserID: t.userID, Email: t.email}, nil
+			return &authx.TokenClaim{UserID: userIDStr(t.userID), Email: t.email}, nil
 		}
 	}
 	return nil, authx.ErrTokenInvalid
 }
 
-func (s *Store) RecordAudit(userID uint, email, ip, method, event string, success bool, detail string) {
+func (s *Store) RecordAudit(userID, email, ip, method, event string, success bool, detail string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.audits = append(s.audits, &audit{userID: userID, email: norm(email), success: success, createdAt: time.Now()})
+	// userID "" (or any non-user id) records an unlinked audit row (key 0) — a failed login before
+	// the account is resolved, per the CredentialStore contract.
+	s.audits = append(s.audits, &audit{userID: parseUserID(userID), email: norm(email), success: success, createdAt: time.Now()})
 }
 
 func (s *Store) RecentFailures(email string, since time.Time) (int, error) {
@@ -584,7 +678,7 @@ func (s *Store) deleteUserCascadeLocked(id uint) {
 	// after a hard delete — deleting would make an absent SID read as "not revoked". (Reclaim targets
 	// have no sessions, so this is a no-op for the squatter-reclaim caller.)
 	for _, r := range s.sessions {
-		if r.rec.UserID == id {
+		if r.rec.UserID == idStr(id) {
 			r.revoked = true
 		}
 	}

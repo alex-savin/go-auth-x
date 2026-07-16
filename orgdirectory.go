@@ -23,8 +23,8 @@ type OrgDirectoryStore interface {
 	CreateOrgGroup(orgID, name, description string) (*Group, error)
 	OrgGroups(orgID string) ([]Group, error)
 	OrgGroupByName(orgID, name string) (*Group, error)
-	OrgOfGroup(groupID uint) (string, error)
-	UserOrgGroups(orgID string, userID uint) ([]Group, error)
+	OrgOfGroup(groupID string) (string, error)
+	UserOrgGroups(orgID, userID string) ([]Group, error)
 
 	// Org-bound API keys. An org-bound key (OrgID != "") is refused by every GLOBAL surface
 	// (adminGuard, ValidateAPIKeyScope, group merging) and only satisfies ValidateOrgAPIKeyScope
@@ -182,18 +182,18 @@ func (v *orgScopedDir) nsSub(sub string) string {
 }
 
 // memberRole returns the target's role in the view's org, ErrNotOrgMember when absent.
-func (v *orgScopedDir) memberRole(userID uint) (string, error) {
+func (v *orgScopedDir) memberRole(userID string) (string, error) {
 	return v.orgs.OrgRole(v.orgID, userID)
 }
 
-func (v *orgScopedDir) isMember(userID uint) bool {
+func (v *orgScopedDir) isMember(userID string) bool {
 	_, err := v.memberRole(userID)
 	return err == nil
 }
 
 // ensureMember adds the user as a plain member if absent — NEVER touching an existing membership,
 // so a SCIM re-provision can't demote a role granted in-app (owner stays owner).
-func (v *orgScopedDir) ensureMember(userID uint) error {
+func (v *orgScopedDir) ensureMember(userID string) error {
 	_, err := v.memberRole(userID)
 	if errors.Is(err, ErrNotOrgMember) {
 		return v.orgs.SetOrgMember(v.orgID, userID, OrgRoleMember)
@@ -215,7 +215,7 @@ func (v *orgScopedDir) ListUsers() ([]AuthUser, error) {
 	return out, nil
 }
 
-func (v *orgScopedDir) UserByID(id uint) (*AuthUser, error) {
+func (v *orgScopedDir) UserByID(id string) (*AuthUser, error) {
 	u, err := v.dir.UserByID(id)
 	if err != nil {
 		return nil, err
@@ -275,7 +275,7 @@ func (v *orgScopedDir) UpsertExternalUser(sub, email, name string, emailVerified
 // SetUserDisabled carries the org-scoped deprovision semantics: disabling means "remove from this
 // org" (the account stays — it may belong to other orgs), re-enabling a non-member is refused
 // (re-provision instead), and owners can't be deprovisioned by a customer IdP.
-func (v *orgScopedDir) SetUserDisabled(userID uint, disabled bool) error {
+func (v *orgScopedDir) SetUserDisabled(userID string, disabled bool) error {
 	role, err := v.memberRole(userID)
 	if errors.Is(err, ErrNotOrgMember) {
 		if disabled {
@@ -295,7 +295,7 @@ func (v *orgScopedDir) SetUserDisabled(userID uint, disabled bool) error {
 	return v.orgs.RemoveOrgMember(v.orgID, userID)
 }
 
-func (v *orgScopedDir) SetUserBan(uint, bool, *time.Time, string) error { return errOrgView }
+func (v *orgScopedDir) SetUserBan(string, bool, *time.Time, string) error { return errOrgView }
 
 // --- groups (org-scoped) ---
 
@@ -310,7 +310,7 @@ func (v *orgScopedDir) GroupByName(name string) (*Group, error) {
 }
 
 // groupInOrg gates every by-ID group operation on the group actually belonging to this org.
-func (v *orgScopedDir) groupInOrg(groupID uint) error {
+func (v *orgScopedDir) groupInOrg(groupID string) error {
 	org, err := v.od.OrgOfGroup(groupID)
 	if err != nil {
 		return err
@@ -321,14 +321,14 @@ func (v *orgScopedDir) groupInOrg(groupID uint) error {
 	return nil
 }
 
-func (v *orgScopedDir) DeleteGroup(id uint) error {
+func (v *orgScopedDir) DeleteGroup(id string) error {
 	if err := v.groupInOrg(id); err != nil {
 		return err
 	}
 	return v.dir.DeleteGroup(id)
 }
 
-func (v *orgScopedDir) AddUserToGroup(userID, groupID uint) error {
+func (v *orgScopedDir) AddUserToGroup(userID, groupID string) error {
 	if err := v.groupInOrg(groupID); err != nil {
 		return err
 	}
@@ -338,21 +338,21 @@ func (v *orgScopedDir) AddUserToGroup(userID, groupID uint) error {
 	return v.dir.AddUserToGroup(userID, groupID)
 }
 
-func (v *orgScopedDir) RemoveUserFromGroup(userID, groupID uint) error {
+func (v *orgScopedDir) RemoveUserFromGroup(userID, groupID string) error {
 	if err := v.groupInOrg(groupID); err != nil {
 		return err
 	}
 	return v.dir.RemoveUserFromGroup(userID, groupID)
 }
 
-func (v *orgScopedDir) GroupMembers(groupID uint) ([]AuthUser, error) {
+func (v *orgScopedDir) GroupMembers(groupID string) ([]AuthUser, error) {
 	if err := v.groupInOrg(groupID); err != nil {
 		return nil, err
 	}
 	return v.dir.GroupMembers(groupID)
 }
 
-func (v *orgScopedDir) UserGroups(userID uint) ([]Group, error) {
+func (v *orgScopedDir) UserGroups(userID string) ([]Group, error) {
 	return v.od.UserOrgGroups(v.orgID, userID)
 }
 
@@ -363,5 +363,5 @@ func (v *orgScopedDir) CreateAPIKey(string, []string, []string, string, []byte, 
 }
 func (v *orgScopedDir) APIKeyByHash([]byte) (*APIKeyInfo, error) { return nil, ErrNoCredential }
 func (v *orgScopedDir) ListAPIKeys() ([]APIKeyInfo, error)       { return nil, errOrgView }
-func (v *orgScopedDir) RevokeAPIKey(uint) error                  { return errOrgView }
-func (v *orgScopedDir) TouchAPIKey(uint) error                   { return errOrgView }
+func (v *orgScopedDir) RevokeAPIKey(string) error                { return errOrgView }
+func (v *orgScopedDir) TouchAPIKey(string) error                 { return errOrgView }

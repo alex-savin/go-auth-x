@@ -22,6 +22,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -38,7 +39,7 @@ func refHMAC(key, msg string) string {
 // ---- faithful fake of store/memory (avoids the authx<-memory import cycle) ----
 
 type linkFakeUser struct {
-	id            uint
+	id            string
 	sub           string
 	email, name   string
 	emailVerified bool
@@ -48,8 +49,8 @@ type linkFakeUser struct {
 
 type linkFakeStore struct {
 	seq   uint
-	users map[uint]*linkFakeUser
-	oauth map[string]uint // provider|subject -> userID
+	users map[string]*linkFakeUser
+	oauth map[string]string // provider|subject -> userID
 	// counters so tests can assert the exact code path taken.
 	linkCalls   int
 	createCalls int
@@ -57,8 +58,11 @@ type linkFakeStore struct {
 }
 
 func newLinkFakeStore() *linkFakeStore {
-	return &linkFakeStore{users: map[uint]*linkFakeUser{}, oauth: map[string]uint{}}
+	return &linkFakeStore{users: map[string]*linkFakeUser{}, oauth: map[string]string{}}
 }
+
+// nextID mints the fake's opaque string id (mirrors a store converting a numeric PK at its boundary).
+func (s *linkFakeStore) nextID() string { s.seq++; return strconv.FormatUint(uint64(s.seq), 10) }
 
 func lnorm(e string) string { return strings.ToLower(strings.TrimSpace(e)) }
 
@@ -78,15 +82,13 @@ func (s *linkFakeStore) view(u *linkFakeUser) *AuthUser {
 
 // seedUnverifiedLocal mirrors store/memory CreateLocalUser: a local: sub, EmailVerified=false.
 func (s *linkFakeStore) seedUnverifiedLocal(email, name string) *linkFakeUser {
-	s.seq++
-	u := &linkFakeUser{id: s.seq, sub: "local:squatter", email: lnorm(email), name: name, hasPassword: true}
+	u := &linkFakeUser{id: s.nextID(), sub: "local:squatter", email: lnorm(email), name: name, hasPassword: true}
 	s.users[u.id] = u
 	return u
 }
 
 func (s *linkFakeStore) seedVerified(sub, email, name string) *linkFakeUser {
-	s.seq++
-	u := &linkFakeUser{id: s.seq, sub: sub, email: lnorm(email), name: name, emailVerified: true}
+	u := &linkFakeUser{id: s.nextID(), sub: sub, email: lnorm(email), name: name, emailVerified: true}
 	s.users[u.id] = u
 	return u
 }
@@ -116,7 +118,7 @@ func (s *linkFakeStore) UserByOAuth(provider, subject string) (*AuthUser, error)
 	return nil, ErrNoUser
 }
 
-func (s *linkFakeStore) LinkOAuth(userID uint, provider, subject, email string) error {
+func (s *linkFakeStore) LinkOAuth(userID string, provider, subject, email string) error {
 	s.linkCalls++
 	if _, exists := s.oauth[provider+"|"+subject]; !exists {
 		s.oauth[provider+"|"+subject] = userID
@@ -129,13 +131,12 @@ func (s *linkFakeStore) CreateLocalUser(email, name string) (*AuthUser, error) {
 	if s.findByEmail(email) != nil {
 		return nil, ErrEmailConflict
 	}
-	s.seq++
-	u := &linkFakeUser{id: s.seq, sub: "local:new", email: lnorm(email), name: name}
+	u := &linkFakeUser{id: s.nextID(), sub: "local:new", email: lnorm(email), name: name}
 	s.users[u.id] = u
 	return s.view(u), nil
 }
 
-func (s *linkFakeStore) SetEmailVerified(userID uint, verified bool) error {
+func (s *linkFakeStore) SetEmailVerified(userID string, verified bool) error {
 	s.setVerified++
 	if u := s.users[userID]; u != nil {
 		u.emailVerified = verified
@@ -144,15 +145,15 @@ func (s *linkFakeStore) SetEmailVerified(userID uint, verified bool) error {
 }
 
 // Unused CredentialStore methods (present to satisfy the interface).
-func (s *linkFakeStore) EnsureWebauthnHandle(uint) ([]byte, error)      { return nil, ErrNoUser }
+func (s *linkFakeStore) EnsureWebauthnHandle(string) ([]byte, error)    { return nil, ErrNoUser }
 func (s *linkFakeStore) UserByWebauthnHandle([]byte) (*AuthUser, error) { return nil, ErrNoUser }
-func (s *linkFakeStore) Passkeys(uint) ([]Passkey, error)               { return nil, nil }
-func (s *linkFakeStore) AddPasskey(uint, Passkey) error                 { return nil }
+func (s *linkFakeStore) Passkeys(string) ([]Passkey, error)             { return nil, nil }
+func (s *linkFakeStore) AddPasskey(string, Passkey) error               { return nil }
 func (s *linkFakeStore) TouchPasskey([]byte, uint32) error              { return nil }
-func (s *linkFakeStore) RemovePasskey(uint, uint) error                 { return nil }
-func (s *linkFakeStore) PasswordHash(uint) (string, string, error)      { return "", "", ErrNoCredential }
-func (s *linkFakeStore) SetPasswordHash(uint, string, string) error     { return nil }
-func (s *linkFakeStore) CreateToken(string, uint, string, []byte, time.Time) error {
+func (s *linkFakeStore) RemovePasskey(string, string) error             { return nil }
+func (s *linkFakeStore) PasswordHash(string) (string, string, error)    { return "", "", ErrNoCredential }
+func (s *linkFakeStore) SetPasswordHash(string, string, string) error   { return nil }
+func (s *linkFakeStore) CreateToken(string, string, string, []byte, time.Time) error {
 	return nil
 }
 func (s *linkFakeStore) ConsumeToken(string, []byte) (*TokenClaim, error) {
@@ -161,14 +162,14 @@ func (s *linkFakeStore) ConsumeToken(string, []byte) (*TokenClaim, error) {
 func (s *linkFakeStore) PeekToken(string, []byte) (*TokenClaim, error) {
 	return nil, ErrTokenInvalid
 }
-func (s *linkFakeStore) RecordAudit(uint, string, string, string, string, bool, string) {}
-func (s *linkFakeStore) RecentFailures(string, time.Time) (int, error)                  { return 0, nil }
-func (s *linkFakeStore) SetEmail(uint, string) error                                    { return nil }
-func (s *linkFakeStore) DeleteUser(uint) error                                          { return nil }
-func (s *linkFakeStore) RenamePasskey(uint, uint, string) error                         { return nil }
-func (s *linkFakeStore) UnlinkOAuth(uint, string) error                                 { return nil }
-func (s *linkFakeStore) OAuthIdentities(uint) ([]string, error)                         { return nil, nil }
-func (s *linkFakeStore) CreateEmailOTP(string, string, []byte, time.Time, int) error    { return nil }
+func (s *linkFakeStore) RecordAudit(string, string, string, string, string, bool, string) {}
+func (s *linkFakeStore) RecentFailures(string, time.Time) (int, error)                    { return 0, nil }
+func (s *linkFakeStore) SetEmail(string, string) error                                    { return nil }
+func (s *linkFakeStore) DeleteUser(string) error                                          { return nil }
+func (s *linkFakeStore) RenamePasskey(string, string, string) error                       { return nil }
+func (s *linkFakeStore) UnlinkOAuth(string, string) error                                 { return nil }
+func (s *linkFakeStore) OAuthIdentities(string) ([]string, error)                         { return nil, nil }
+func (s *linkFakeStore) CreateEmailOTP(string, string, []byte, time.Time, int) error      { return nil }
 func (s *linkFakeStore) VerifyEmailOTP(string, string, []byte) (*TokenClaim, error) {
 	return nil, ErrTokenInvalid
 }
@@ -230,13 +231,13 @@ func TestResolveSocialUser_VerifiedUser_Linked(t *testing.T) {
 		t.Fatalf("verified user should be linked, got err %v", err)
 	}
 	if u.ID != existing.id {
-		t.Fatalf("returned user id=%d, want existing %d", u.ID, existing.id)
+		t.Fatalf("returned user id=%s, want existing %s", u.ID, existing.id)
 	}
 	if s.linkCalls != 1 {
 		t.Fatalf("LinkOAuth should be called exactly once, got %d", s.linkCalls)
 	}
 	if uid, ok := s.oauth["github|gh-42"]; !ok || uid != existing.id {
-		t.Fatalf("social identity should be linked to the verified user, got %d ok=%v", uid, ok)
+		t.Fatalf("social identity should be linked to the verified user, got %s ok=%v", uid, ok)
 	}
 	if s.createCalls != 0 {
 		t.Fatalf("must not create a new user when a verified one exists")
@@ -288,31 +289,31 @@ type reclaimDir struct {
 func (d *reclaimDir) UpsertExternalUser(sub, email, name string, emailVerified bool) (*AuthUser, error) {
 	d.called++
 	d.sub, d.verified = sub, emailVerified
-	d.upserted = &AuthUser{ID: 999, Sub: sub, Email: lnorm(email), Name: name, EmailVerified: emailVerified}
+	d.upserted = &AuthUser{ID: "999", Sub: sub, Email: lnorm(email), Name: name, EmailVerified: emailVerified}
 	return d.upserted, nil
 }
 
 // The remaining DirectoryStore methods are unused here.
-func (d *reclaimDir) CreateGroup(string, string) (*Group, error)      { return nil, nil }
-func (d *reclaimDir) Groups() ([]Group, error)                        { return nil, nil }
-func (d *reclaimDir) GroupByName(string) (*Group, error)              { return nil, ErrNoGroup }
-func (d *reclaimDir) DeleteGroup(uint) error                          { return nil }
-func (d *reclaimDir) AddUserToGroup(uint, uint) error                 { return nil }
-func (d *reclaimDir) RemoveUserFromGroup(uint, uint) error            { return nil }
-func (d *reclaimDir) UserGroups(uint) ([]Group, error)                { return nil, nil }
-func (d *reclaimDir) GroupMembers(uint) ([]AuthUser, error)           { return nil, nil }
-func (d *reclaimDir) ListUsers() ([]AuthUser, error)                  { return nil, nil }
-func (d *reclaimDir) UserByID(uint) (*AuthUser, error)                { return nil, ErrNoUser }
-func (d *reclaimDir) UserByEmail(string) (*AuthUser, error)           { return nil, ErrNoUser }
-func (d *reclaimDir) SetUserDisabled(uint, bool) error                { return nil }
-func (d *reclaimDir) SetUserBan(uint, bool, *time.Time, string) error { return nil }
+func (d *reclaimDir) CreateGroup(string, string) (*Group, error)        { return nil, nil }
+func (d *reclaimDir) Groups() ([]Group, error)                          { return nil, nil }
+func (d *reclaimDir) GroupByName(string) (*Group, error)                { return nil, ErrNoGroup }
+func (d *reclaimDir) DeleteGroup(string) error                          { return nil }
+func (d *reclaimDir) AddUserToGroup(string, string) error               { return nil }
+func (d *reclaimDir) RemoveUserFromGroup(string, string) error          { return nil }
+func (d *reclaimDir) UserGroups(string) ([]Group, error)                { return nil, nil }
+func (d *reclaimDir) GroupMembers(string) ([]AuthUser, error)           { return nil, nil }
+func (d *reclaimDir) ListUsers() ([]AuthUser, error)                    { return nil, nil }
+func (d *reclaimDir) UserByID(string) (*AuthUser, error)                { return nil, ErrNoUser }
+func (d *reclaimDir) UserByEmail(string) (*AuthUser, error)             { return nil, ErrNoUser }
+func (d *reclaimDir) SetUserDisabled(string, bool) error                { return nil }
+func (d *reclaimDir) SetUserBan(string, bool, *time.Time, string) error { return nil }
 func (d *reclaimDir) CreateAPIKey(string, []string, []string, string, []byte, *time.Time) (*APIKeyInfo, error) {
 	return nil, nil
 }
 func (d *reclaimDir) APIKeyByHash([]byte) (*APIKeyInfo, error) { return nil, ErrNoCredential }
 func (d *reclaimDir) ListAPIKeys() ([]APIKeyInfo, error)       { return nil, nil }
-func (d *reclaimDir) RevokeAPIKey(uint) error                  { return nil }
-func (d *reclaimDir) TouchAPIKey(uint) error                   { return nil }
+func (d *reclaimDir) RevokeAPIKey(string) error                { return nil }
+func (d *reclaimDir) TouchAPIKey(string) error                 { return nil }
 
 var _ DirectoryStore = (*reclaimDir)(nil)
 
@@ -335,7 +336,7 @@ func TestResolveSocialUser_DirectoryReclaimsVerified(t *testing.T) {
 	if dir.sub != "social:facebook:fb-7" {
 		t.Fatalf("reclaim sub should be social:facebook:fb-7, got %q", dir.sub)
 	}
-	if u.ID != 999 {
+	if u.ID != "999" {
 		t.Fatalf("resolve should return the reclaimed directory user, got %+v", u)
 	}
 }
@@ -403,7 +404,7 @@ func TestFacebookIdentity_EmailTreatedAsVerified(t *testing.T) {
 		t.Fatalf("resolveSocialUser with FB identity should link to verified owner, got %v", rerr)
 	}
 	if u.ID != existing.id {
-		t.Fatalf("FB identity should link to existing verified owner id=%d, got %d", existing.id, u.ID)
+		t.Fatalf("FB identity should link to existing verified owner id=%s, got %s", existing.id, u.ID)
 	}
 
 	// appsecret_proof must be the standard HMAC-SHA256 of the ACCESS TOKEN keyed by the APP SECRET.

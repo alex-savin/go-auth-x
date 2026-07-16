@@ -182,7 +182,7 @@ func (a *Authenticator) TwoFactorPending(c *reqCtx) {
 // verifySecondFactor accepts a valid TOTP code (guarding replay atomically via ClaimTOTPStep) OR a
 // single-use recovery code. The replay check + last-step write are one atomic store operation so
 // concurrent requests can't both accept the same code (TOCTOU); a store error fails closed.
-func (a *Authenticator) verifySecondFactor(userID uint, info *TOTPInfo, code string) bool {
+func (a *Authenticator) verifySecondFactor(userID string, info *TOTPInfo, code string) bool {
 	if step, ok := totpValidate(info.Secret, code, time.Now()); ok {
 		claimed, err := a.twoFactor.ClaimTOTPStep(userID, step)
 		return err == nil && claimed

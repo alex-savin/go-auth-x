@@ -53,7 +53,7 @@ type OrgMember struct {
 // token. The raw invite token is emailed once and only its hash is stored; the org + role bind to
 // the RECORD, so nothing security-relevant rides in the accept URL.
 type OrgInvite struct {
-	ID        uint      `json:"id"`
+	ID        string    `json:"id"` // opaque; see AuthUser.ID
 	OrgID     string    `json:"orgId"`
 	Email     string    `json:"email"`
 	Role      string    `json:"role"`
@@ -88,10 +88,10 @@ type OrgStore interface {
 	// groups when the store supports them — org-group membership must not outlive org membership.
 	// OrgRole returns ErrNotOrgMember when there is no membership (ErrNoOrg when the org itself
 	// is absent).
-	SetOrgMember(orgID string, userID uint, role string) error
-	RemoveOrgMember(orgID string, userID uint) error
-	OrgRole(orgID string, userID uint) (string, error)
-	UserOrgs(userID uint) ([]UserOrg, error)
+	SetOrgMember(orgID, userID, role string) error
+	RemoveOrgMember(orgID, userID string) error
+	OrgRole(orgID, userID string) (string, error)
+	UserOrgs(userID string) ([]UserOrg, error)
 	OrgMembers(orgID string) ([]OrgMember, error)
 
 	// Invitations — first-class records (listable + revocable), hashed-at-rest like every other
@@ -102,7 +102,7 @@ type OrgStore interface {
 	// atomically marks it used — both return ErrTokenInvalid on any miss/expiry/revocation.
 	CreateOrgInvite(orgID, email, role, invitedBy string, tokenHash []byte, expiresAt time.Time) (*OrgInvite, error)
 	OrgInvites(orgID string) ([]OrgInvite, error)
-	RevokeOrgInvite(orgID string, id uint) error
+	RevokeOrgInvite(orgID, id string) error
 	PeekOrgInvite(tokenHash []byte) (*OrgInvite, error)
 	ConsumeOrgInvite(tokenHash []byte) (*OrgInvite, error)
 }
@@ -154,7 +154,7 @@ func orgRoleIsManager(role string) bool { return role == OrgRoleOwner || role ==
 // defaultOrgClaims picks the active-org claims stamped on a FRESH session: the user's sole
 // membership, or none when the user belongs to zero or several orgs (the app then prompts and
 // calls POST /auth/org/switch). Deterministic and conservative — never guesses among multiple.
-func (a *Authenticator) defaultOrgClaims(userID uint) (orgID, role string) {
+func (a *Authenticator) defaultOrgClaims(userID string) (orgID, role string) {
 	if a.orgs == nil {
 		return "", ""
 	}

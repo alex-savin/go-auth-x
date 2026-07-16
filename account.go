@@ -2,7 +2,6 @@ package authx
 
 import (
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
@@ -11,7 +10,7 @@ import (
 
 // passkeyView is the JSON-safe projection of a passkey (no credential bytes).
 type passkeyView struct {
-	ID         uint      `json:"id"`
+	ID         string    `json:"id"`
 	Name       string    `json:"name"`
 	CreatedAt  time.Time `json:"createdAt"`
 	LastUsedAt time.Time `json:"lastUsedAt"`
@@ -45,7 +44,7 @@ func (a *Authenticator) AccountInfo(c *reqCtx) {
 
 // signInMethods counts a user's independent sign-in methods: a password, each passkey, and each linked
 // OAuth provider. Used to refuse removing the LAST one (which would lock the user out).
-func (a *Authenticator) signInMethods(userID uint) (total int) {
+func (a *Authenticator) signInMethods(userID string) (total int) {
 	if _, _, perr := a.creds.PasswordHash(userID); perr == nil {
 		total++
 	}
@@ -96,9 +95,8 @@ func (a *Authenticator) PasskeyRemove(c *reqCtx) {
 		c.JSON(http.StatusUnauthorized, H{"error": "unauthenticated"})
 		return
 	}
-	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": "invalid id"})
+	id, ok := paramID(c, "id")
+	if !ok {
 		return
 	}
 	// Refuse to remove the last sign-in method across ALL kinds (password + passkeys + OAuth), not just
@@ -107,7 +105,7 @@ func (a *Authenticator) PasskeyRemove(c *reqCtx) {
 	a.credMu.Lock()
 	last := a.signInMethods(au.ID) <= 1
 	if !last {
-		err = a.creds.RemovePasskey(au.ID, uint(id))
+		err = a.creds.RemovePasskey(au.ID, id)
 	}
 	a.credMu.Unlock()
 	if last {
@@ -129,9 +127,8 @@ func (a *Authenticator) PasskeyRename(c *reqCtx) {
 		c.JSON(http.StatusUnauthorized, H{"error": "unauthenticated"})
 		return
 	}
-	id, err := strconv.ParseUint(c.Param("id"), 10, 64)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, H{"error": "invalid id"})
+	id, ok := paramID(c, "id")
+	if !ok {
 		return
 	}
 	var body struct{ Name string }
@@ -144,7 +141,7 @@ func (a *Authenticator) PasskeyRename(c *reqCtx) {
 		c.JSON(http.StatusBadRequest, H{"error": "name must be 1–64 characters"})
 		return
 	}
-	if err := a.creds.RenamePasskey(au.ID, uint(id), name); err != nil {
+	if err := a.creds.RenamePasskey(au.ID, id, name); err != nil {
 		c.JSON(http.StatusInternalServerError, H{"error": "could not rename passkey"})
 		return
 	}

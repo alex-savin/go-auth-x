@@ -2,7 +2,6 @@ package memory
 
 import (
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -13,27 +12,16 @@ import (
 var _ authx.OrgStore = (*Store)(nil)
 
 // org is the in-memory org record; the public authx.Org.ID is the decimal form of the numeric key
-// (the boundary conversion the opaque string ID prescribes — parity with gormstore).
+// (the boundary conversion the opaque string ID prescribes — parity with gormstore). The idStr /
+// parseID helpers this file shares with the rest of the store live in memory.go.
 type org struct {
 	id                   uint
 	slug, name           string
 	createdAt, updatedAt time.Time
 }
 
-func orgIDString(id uint) string { return strconv.FormatUint(uint64(id), 10) }
-
-// parseOrgID maps an opaque ID back to the numeric key; a malformed/zero ID is simply an ID that
-// cannot exist, so callers treat !ok as ErrNoOrg rather than a distinct error.
-func parseOrgID(s string) (uint, bool) {
-	n, err := strconv.ParseUint(s, 10, 64)
-	if err != nil || n == 0 {
-		return 0, false
-	}
-	return uint(n), true
-}
-
 func (o *org) view() *authx.Org {
-	return &authx.Org{ID: orgIDString(o.id), Slug: o.slug, Name: o.name, CreatedAt: o.createdAt, UpdatedAt: o.updatedAt}
+	return &authx.Org{ID: idStr(o.id), Slug: o.slug, Name: o.name, CreatedAt: o.createdAt, UpdatedAt: o.updatedAt}
 }
 
 func (s *Store) CreateOrg(slug, name string) (*authx.Org, error) {
@@ -55,7 +43,7 @@ func (s *Store) CreateOrg(slug, name string) (*authx.Org, error) {
 func (s *Store) OrgByID(id string) (*authx.Org, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	n, ok := parseOrgID(id)
+	n, ok := parseID(id)
 	if !ok {
 		return nil, authx.ErrNoOrg
 	}
@@ -90,7 +78,7 @@ func (s *Store) Orgs() ([]authx.Org, error) {
 func (s *Store) RenameOrg(id, name string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	n, ok := parseOrgID(id)
+	n, ok := parseID(id)
 	if !ok {
 		return authx.ErrNoOrg
 	}
@@ -106,13 +94,13 @@ func (s *Store) RenameOrg(id, name string) error {
 func (s *Store) DeleteOrg(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	n, ok := parseOrgID(id)
+	n, ok := parseID(id)
 	if !ok {
 		return nil // idempotent: an ID that can't exist is already gone
 	}
 	delete(s.orgs, n)
 	delete(s.orgMembers, n)
-	canonical := orgIDString(n)
+	canonical := idStr(n)
 	// Everything the org owned dies with it: its groups (and their memberships), its pending
 	// invites, and any API keys bound to it. Match on the canonical id (see RemoveOrgMember).
 	for gid, g := range s.groups {
@@ -136,41 +124,46 @@ func (s *Store) DeleteOrg(id string) error {
 	return nil
 }
 
-func (s *Store) SetOrgMember(orgID string, userID uint, role string) error {
+func (s *Store) SetOrgMember(orgID, userID, role string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	n, ok := parseOrgID(orgID)
+	n, ok := parseID(orgID)
 	if !ok || s.orgs[n] == nil {
 		return authx.ErrNoOrg
 	}
 	// Refuse a membership for a nonexistent user — a dangling row would be invisible in
 	// OrgMembers yet inherited (role and all) by the future user assigned this ID.
-	if s.users[userID] == nil {
+	uid, uok := parseID(userID)
+	if !uok || s.users[uid] == nil {
 		return authx.ErrNoUser
 	}
 	if s.orgMembers[n] == nil {
 		s.orgMembers[n] = map[uint]string{}
 	}
-	s.orgMembers[n][userID] = role
+	s.orgMembers[n][uid] = role
 	return nil
 }
 
-func (s *Store) RemoveOrgMember(orgID string, userID uint) error {
+func (s *Store) RemoveOrgMember(orgID, userID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	n, ok := parseOrgID(orgID)
+	n, ok := parseID(orgID)
 	if !ok {
 		return nil
 	}
+	uid, uok := parseID(userID)
+	if !uok {
+		return nil
+	}
 	if set := s.orgMembers[n]; set != nil {
-		delete(set, userID)
+		delete(set, uid)
 	}
 	// Org-group membership dies with org membership (the OrgStore contract): a former member must
 	// not linger in the org's group lists. Match by parsed id, not raw string, so a non-canonical
 	// orgID ("01") can't remove the membership yet orphan the group rows (gormstore normalizes too).
 	for gid, g := range s.groups {
-		if gn, gok := parseOrgID(g.OrgID); gok && gn == n {
-			if set := s.memberships[userID]; set != nil {
+		if gn, gok := parseID(g.OrgID); gok && gn == n {
+			if set := s.memberships[uid]; set != nil {
 				delete(set, gid)
 			}
 		}
@@ -178,25 +171,33 @@ func (s *Store) RemoveOrgMember(orgID string, userID uint) error {
 	return nil
 }
 
-func (s *Store) OrgRole(orgID string, userID uint) (string, error) {
+func (s *Store) OrgRole(orgID, userID string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	n, ok := parseOrgID(orgID)
+	n, ok := parseID(orgID)
 	if !ok || s.orgs[n] == nil {
 		return "", authx.ErrNoOrg
 	}
-	if role, is := s.orgMembers[n][userID]; is {
+	uid, uok := parseID(userID)
+	if !uok {
+		return "", authx.ErrNotOrgMember
+	}
+	if role, is := s.orgMembers[n][uid]; is {
 		return role, nil
 	}
 	return "", authx.ErrNotOrgMember
 }
 
-func (s *Store) UserOrgs(userID uint) ([]authx.UserOrg, error) {
+func (s *Store) UserOrgs(userID string) ([]authx.UserOrg, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	uid, ok := parseID(userID)
+	if !ok {
+		return nil, nil
+	}
 	var out []authx.UserOrg
 	for oid, members := range s.orgMembers {
-		if role, is := members[userID]; is {
+		if role, is := members[uid]; is {
 			if o := s.orgs[oid]; o != nil {
 				out = append(out, authx.UserOrg{Org: *o.view(), Role: role})
 			}
@@ -209,7 +210,7 @@ func (s *Store) UserOrgs(userID uint) ([]authx.UserOrg, error) {
 func (s *Store) OrgMembers(orgID string) ([]authx.OrgMember, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	n, ok := parseOrgID(orgID)
+	n, ok := parseID(orgID)
 	if !ok || s.orgs[n] == nil {
 		return nil, authx.ErrNoOrg
 	}
@@ -237,7 +238,7 @@ type orgInvite struct {
 func (s *Store) CreateOrgInvite(orgID, email, role, invitedBy string, tokenHash []byte, expiresAt time.Time) (*authx.OrgInvite, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	n, ok := parseOrgID(orgID)
+	n, ok := parseID(orgID)
 	if !ok || s.orgs[n] == nil {
 		return nil, authx.ErrNoOrg
 	}
@@ -248,14 +249,15 @@ func (s *Store) CreateOrgInvite(orgID, email, role, invitedBy string, tokenHash 
 		}
 	}
 	s.inviteSeq++
+	iid := s.inviteSeq
 	rec := &orgInvite{
 		inv: authx.OrgInvite{
-			ID: s.inviteSeq, OrgID: orgID, Email: email, Role: role, InvitedBy: invitedBy,
+			ID: idStr(iid), OrgID: orgID, Email: email, Role: role, InvitedBy: invitedBy,
 			ExpiresAt: expiresAt, CreatedAt: time.Now(),
 		},
 		hash: string(tokenHash),
 	}
-	s.orgInvites[rec.inv.ID] = rec
+	s.orgInvites[iid] = rec
 	cp := rec.inv
 	return &cp, nil
 }
@@ -263,7 +265,7 @@ func (s *Store) CreateOrgInvite(orgID, email, role, invitedBy string, tokenHash 
 func (s *Store) OrgInvites(orgID string) ([]authx.OrgInvite, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	n, ok := parseOrgID(orgID)
+	n, ok := parseID(orgID)
 	if !ok || s.orgs[n] == nil {
 		return nil, authx.ErrNoOrg
 	}
@@ -274,15 +276,19 @@ func (s *Store) OrgInvites(orgID string) ([]authx.OrgInvite, error) {
 			out = append(out, rec.inv)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	sort.Slice(out, func(i, j int) bool { return idLess(out[i].ID, out[j].ID) })
 	return out, nil
 }
 
-func (s *Store) RevokeOrgInvite(orgID string, id uint) error {
+func (s *Store) RevokeOrgInvite(orgID, id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if rec := s.orgInvites[id]; rec != nil && rec.inv.OrgID == orgID {
-		delete(s.orgInvites, id)
+	iid, ok := parseID(id)
+	if !ok {
+		return nil
+	}
+	if rec := s.orgInvites[iid]; rec != nil && rec.inv.OrgID == orgID {
+		delete(s.orgInvites, iid)
 	}
 	return nil
 }
@@ -326,12 +332,12 @@ func (s *Store) ConsumeOrgInvite(tokenHash []byte) (*authx.OrgInvite, error) {
 func (s *Store) CreateOrgGroup(orgID, name, description string) (*authx.Group, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	n, ok := parseOrgID(orgID)
+	n, ok := parseID(orgID)
 	if !ok || s.orgs[n] == nil {
 		return nil, authx.ErrNoOrg
 	}
 	trimmed := strings.TrimSpace(name)
-	canonical := orgIDString(n) // store the canonical id so every OrgID comparison is stable
+	canonical := idStr(n) // store the canonical id so every OrgID comparison is stable
 	// Names are unique per (org, name) — a global "engineering" and two orgs' "engineering" coexist.
 	for _, g := range s.groups {
 		if g.OrgID == canonical && g.Name == trimmed {
@@ -339,8 +345,9 @@ func (s *Store) CreateOrgGroup(orgID, name, description string) (*authx.Group, e
 		}
 	}
 	s.groupSeq++
-	g := &authx.Group{ID: s.groupSeq, Name: trimmed, Description: description, OrgID: canonical, CreatedAt: time.Now(), UpdatedAt: time.Now()}
-	s.groups[g.ID] = g
+	gid := s.groupSeq
+	g := &authx.Group{ID: idStr(gid), Name: trimmed, Description: description, OrgID: canonical, CreatedAt: time.Now(), UpdatedAt: time.Now()}
+	s.groups[gid] = g
 	cp := *g
 	return &cp, nil
 }
@@ -371,20 +378,28 @@ func (s *Store) OrgGroupByName(orgID, name string) (*authx.Group, error) {
 	return nil, authx.ErrNoGroup
 }
 
-func (s *Store) OrgOfGroup(groupID uint) (string, error) {
+func (s *Store) OrgOfGroup(groupID string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if g := s.groups[groupID]; g != nil {
+	n, ok := parseID(groupID)
+	if !ok {
+		return "", authx.ErrNoGroup
+	}
+	if g := s.groups[n]; g != nil {
 		return g.OrgID, nil
 	}
 	return "", authx.ErrNoGroup
 }
 
-func (s *Store) UserOrgGroups(orgID string, userID uint) ([]authx.Group, error) {
+func (s *Store) UserOrgGroups(orgID, userID string) ([]authx.Group, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := []authx.Group{}
-	for gid := range s.memberships[userID] {
+	uid, ok := parseID(userID)
+	if !ok {
+		return out, nil
+	}
+	for gid := range s.memberships[uid] {
 		if g := s.groups[gid]; g != nil && g.OrgID == orgID {
 			out = append(out, *g)
 		}
@@ -398,13 +413,14 @@ func (s *Store) UserOrgGroups(orgID string, userID uint) ([]authx.Group, error) 
 func (s *Store) CreateOrgAPIKey(orgID, name string, groups, scopes []string, prefix string, hash []byte, expiresAt *time.Time) (*authx.APIKeyInfo, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	n, ok := parseOrgID(orgID)
+	n, ok := parseID(orgID)
 	if !ok || s.orgs[n] == nil {
 		return nil, authx.ErrNoOrg
 	}
 	s.apiSeq++
-	info := authx.APIKeyInfo{ID: s.apiSeq, Name: name, Prefix: prefix, Groups: groups, Scopes: scopes, ExpiresAt: expiresAt, CreatedAt: time.Now(), OrgID: orgID}
-	s.apikeys[info.ID] = &apiKey{info: info, hash: string(hash)}
+	kid := s.apiSeq
+	info := authx.APIKeyInfo{ID: idStr(kid), Name: name, Prefix: prefix, Groups: groups, Scopes: scopes, ExpiresAt: expiresAt, CreatedAt: time.Now(), OrgID: orgID}
+	s.apikeys[kid] = &apiKey{info: info, hash: string(hash)}
 	cp := info
 	return &cp, nil
 }
@@ -418,6 +434,6 @@ func (s *Store) ListOrgAPIKeys(orgID string) ([]authx.APIKeyInfo, error) {
 			out = append(out, k.info)
 		}
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].ID > out[j].ID })
+	sort.Slice(out, func(i, j int) bool { return idLess(out[j].ID, out[i].ID) })
 	return out, nil
 }

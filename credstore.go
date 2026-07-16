@@ -19,8 +19,13 @@ var (
 )
 
 // AuthUser is the auth package's storage-agnostic view of a control-plane user.
+//
+// ID is an OPAQUE string: the auth package never parses it or does arithmetic on it, it only passes
+// it back to the store. A store keyed by uuid/ULID/KSUID returns those verbatim; the reference
+// stores keep numeric PKs and convert to/from decimal strings at their boundary (no DB migration).
+// Empty ("") is the reserved "no user" sentinel — a store must never mint it as a real ID.
 type AuthUser struct {
-	ID            uint
+	ID            string
 	Sub           string
 	Email         string
 	Name          string
@@ -57,13 +62,13 @@ func (u *AuthUser) loginBlocked() (bool, string) {
 
 // TokenClaim is what a redeemed single-use token resolves to.
 type TokenClaim struct {
-	UserID uint
+	UserID string // opaque; see AuthUser.ID
 	Email  string
 }
 
 // Passkey is the auth package's storage-agnostic view of a registered WebAuthn credential.
 type Passkey struct {
-	ID              uint
+	ID              string // opaque; see AuthUser.ID
 	CredentialID    []byte
 	PublicKey       []byte
 	AttestationType string
@@ -86,38 +91,38 @@ type CredentialStore interface {
 	UserByEmail(email string) (*AuthUser, error)
 	UserBySub(sub string) (*AuthUser, error)
 	CreateLocalUser(email, name string) (*AuthUser, error) // Sub="local:<uuid>", EmailVerified=false
-	SetEmailVerified(userID uint, verified bool) error
+	SetEmailVerified(userID string, verified bool) error
 	// SetEmail changes a user's email (used by the verified change-email flow AFTER the new address is
 	// proven). It must uphold the one-user-per-email invariant, returning ErrEmailConflict if another
 	// user already owns newEmail.
-	SetEmail(userID uint, newEmail string) error
+	SetEmail(userID, newEmail string) error
 	// DeleteUser hard-deletes a user and everything keyed to it (credentials, passkeys, tokens, OAuth
 	// links, 2FA, group memberships). Audit rows are retained but any PII (email/IP) is anonymized, so
 	// the forensic count survives an erasure. Idempotent: deleting an absent user is not an error.
-	DeleteUser(userID uint) error
+	DeleteUser(userID string) error
 
 	// Passkeys (WebAuthn)
-	EnsureWebauthnHandle(userID uint) ([]byte, error)      // get-or-create the stable user handle
+	EnsureWebauthnHandle(userID string) ([]byte, error)    // get-or-create the stable user handle
 	UserByWebauthnHandle(handle []byte) (*AuthUser, error) // resolve a discoverable login
-	Passkeys(userID uint) ([]Passkey, error)
-	AddPasskey(userID uint, p Passkey) error
+	Passkeys(userID string) ([]Passkey, error)
+	AddPasskey(userID string, p Passkey) error
 	TouchPasskey(credentialID []byte, signCount uint32) error // update sign count + last-used
-	RemovePasskey(userID, id uint) error
-	RenamePasskey(userID, id uint, name string) error // relabel a passkey; no-op if not the user's
+	RemovePasskey(userID, id string) error
+	RenamePasskey(userID, id, name string) error // relabel a passkey; no-op if not the user's
 
 	// Password
-	PasswordHash(userID uint) (hash, algo string, err error) // ErrNoCredential if unset
-	SetPasswordHash(userID uint, hash, algo string) error
+	PasswordHash(userID string) (hash, algo string, err error) // ErrNoCredential if unset
+	SetPasswordHash(userID, hash, algo string) error
 
 	// Social (OAuth) identities — natural key (provider, subject), NOT email, so an upstream
 	// email change doesn't fork the account.
-	UserByOAuth(provider, subject string) (*AuthUser, error)      // ErrNoUser if unlinked
-	LinkOAuth(userID uint, provider, subject, email string) error // idempotent per (provider,subject)
-	UnlinkOAuth(userID uint, provider string) error               // remove the user's link to a provider
-	OAuthIdentities(userID uint) ([]string, error)                // provider slugs the user has linked
+	UserByOAuth(provider, subject string) (*AuthUser, error) // ErrNoUser if unlinked
+	LinkOAuth(userID, provider, subject, email string) error // idempotent per (provider,subject)
+	UnlinkOAuth(userID, provider string) error               // remove the user's link to a provider
+	OAuthIdentities(userID string) ([]string, error)         // provider slugs the user has linked
 
 	// Single-use, hashed-at-rest email tokens (magic-link, verify-email, password-reset, invite)
-	CreateToken(purpose string, userID uint, email string, tokenHash []byte, expiresAt time.Time) error
+	CreateToken(purpose, userID, email string, tokenHash []byte, expiresAt time.Time) error
 	ConsumeToken(purpose string, tokenHash []byte) (*TokenClaim, error) // marks consumed atomically; ErrTokenInvalid
 	// PeekToken validates a token (exists, unconsumed, unexpired) and returns its claim WITHOUT consuming
 	// it, so a caller can validate downstream input (e.g. the new password) before burning a single-use
@@ -132,8 +137,9 @@ type CredentialStore interface {
 	CreateEmailOTP(purpose, email string, codeHash []byte, expiresAt time.Time, maxAttempts int) error
 	VerifyEmailOTP(purpose, email string, codeHash []byte) (*TokenClaim, error)
 
-	// Audit + lockout
-	RecordAudit(userID uint, email, ip, method, event string, success bool, detail string)
+	// Audit + lockout. A userID of "" means "no user" (e.g. a failed login before resolution) —
+	// the store records the row without keying it to an account.
+	RecordAudit(userID, email, ip, method, event string, success bool, detail string)
 	RecentFailures(email string, since time.Time) (int, error)
 }
 

@@ -227,7 +227,7 @@ func (a *Authenticator) Callback(c *reqCtx) {
 		return
 	}
 	// Record before the cookie (see completeLogin) so a lost session-store write fails the login.
-	if rerr := a.recordSession(c.Request, sid, idToken.Subject, 0, sessionTTL); rerr != nil {
+	if rerr := a.recordSession(c.Request, sid, idToken.Subject, "", sessionTTL); rerr != nil {
 		c.JSON(http.StatusInternalServerError, H{"error": "session creation failed"})
 		return
 	}

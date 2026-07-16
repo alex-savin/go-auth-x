@@ -34,8 +34,11 @@ func (Session) TableName() string { return "authx_sessions" }
 func (s *Store) migrateSessions() error { return s.db.AutoMigrate(&Session{}) }
 
 func (s *Store) RecordSession(rec authx.SessionRecord) error {
+	// UserID is stored data, not a query key: "" (a session not tied to a stored user) and any
+	// unparseable ID record no linkage (user_id 0), while SID-keyed revocation still works.
+	uid, _ := userPK(rec.UserID)
 	return s.db.Create(&Session{
-		SID: rec.SID, Sub: rec.Subject, UserID: rec.UserID,
+		SID: rec.SID, Sub: rec.Subject, UserID: uid,
 		UserAgent: rec.UserAgent, IP: rec.IP,
 		CreatedAt: rec.CreatedAt, ExpiresAt: rec.ExpiresAt,
 	}).Error
@@ -78,7 +81,7 @@ func (s *Store) ListSessionsForUser(subject string) ([]authx.SessionRecord, erro
 	out := make([]authx.SessionRecord, 0, len(rows))
 	for i := range rows {
 		out = append(out, authx.SessionRecord{
-			SID: rows[i].SID, Subject: rows[i].Sub, UserID: rows[i].UserID,
+			SID: rows[i].SID, Subject: rows[i].Sub, UserID: userIDStr(rows[i].UserID),
 			UserAgent: rows[i].UserAgent, IP: rows[i].IP,
 			CreatedAt: rows[i].CreatedAt, ExpiresAt: rows[i].ExpiresAt,
 		})

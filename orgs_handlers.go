@@ -213,7 +213,7 @@ func (a *Authenticator) OrgMemberList(c *reqCtx) {
 // demote/remove from leaving the org unmanageable. Callers hold a.orgMu so a concurrent pair of
 // removals can't both pass (process-local, like credMu; a multi-replica deployment wanting
 // cross-node atomicity should also enforce this in its store).
-func (a *Authenticator) soleOwner(orgID string, userID uint) (bool, error) {
+func (a *Authenticator) soleOwner(orgID, userID string) (bool, error) {
 	members, err := a.orgs.OrgMembers(orgID)
 	if err != nil {
 		return false, err
@@ -238,7 +238,7 @@ func (a *Authenticator) OrgMemberSetRole(c *reqCtx) {
 	if !ok {
 		return
 	}
-	uid, ok := paramUint(c, "userId")
+	uid, ok := paramID(c, "userId")
 	if !ok {
 		return
 	}
@@ -294,7 +294,7 @@ func (a *Authenticator) OrgMemberRemove(c *reqCtx) {
 	if !ok {
 		return
 	}
-	uid, ok := paramUint(c, "userId")
+	uid, ok := paramID(c, "userId")
 	if !ok {
 		return
 	}
@@ -346,7 +346,7 @@ func (a *Authenticator) OrgMemberRemove(c *reqCtx) {
 // --- invites ---
 
 // orgAudit writes an org event to the audit trail (best-effort, creds is non-nil when orgs are on).
-func (a *Authenticator) orgAudit(c *reqCtx, userID uint, event, detail string) {
+func (a *Authenticator) orgAudit(c *reqCtx, userID string, event, detail string) {
 	a.creds.RecordAudit(userID, "", c.ClientIP(), "org", event, true, detail)
 }
 
@@ -446,7 +446,7 @@ func (a *Authenticator) OrgInviteRevoke(c *reqCtx) {
 	if !ok {
 		return
 	}
-	id, ok := paramUint(c, "id")
+	id, ok := paramID(c, "id")
 	if !ok {
 		return
 	}

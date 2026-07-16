@@ -553,6 +553,13 @@ the optional `TwoFactorStore`, `SessionStore`, and `OrgStore`):
 The interfaces are deliberately small and return storage-agnostic DTOs, so `authx` never imports your
 ORM. Compile-time conformance: `var _ authx.CredentialStore = (*MyStore)(nil)`.
 
+**Entity IDs are opaque `string`s.** `AuthUser.ID`, `Group.ID`, `APIKeyInfo.ID`, and every id
+parameter are opaque — `authx` never parses one or does arithmetic on it, it only hands it back to
+you — so a store keyed by **uuid / ULID / KSUID** returns its native IDs verbatim. The reference GORM
+store keeps `uint` primary keys and converts to/from decimal strings at its boundary (no DB
+migration). Treat an unknown/unparseable id as a normal miss (`ErrNoUser` / `ErrNoGroup` / a no-op
+delete); `""` is the reserved "no user" sentinel.
+
 ---
 
 ## Security model
@@ -657,7 +664,9 @@ See **[ROADMAP.md](./ROADMAP.md)** for the full list and **[CHANGELOG.md](./CHAN
 - **v0.1.x**: pure **net/http**; OIDC, password, passkey (+ QR), magic-link, Google/GitHub social;
   GORM + in-memory stores; SMTP mailer; groups + per-group access control; API keys with
   **deny-by-default scopes** + admin REST API; LDAP sync; SCIM 2.0; the **squatter-reclaim** path.
-- **Planned**: **opaque entity IDs** (uuid-friendly stores) — deferred, breaking; land pre-v1.0.
+- **Landed (unreleased, breaking)**: **opaque entity IDs** — every public id is now an opaque
+  `string`, so uuid/ULID/KSUID-keyed stores pass their IDs straight through (no DB migration for the
+  reference GORM store).
 
 ---
 

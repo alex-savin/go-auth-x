@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed — BREAKING
+
+- **Public entity IDs are now opaque `string`s** across every store interface (issue #2). `AuthUser.ID`,
+  `Group.ID`, `APIKeyInfo.ID`, `Passkey.ID`, `OrgInvite.ID`, `TokenClaim.UserID`, and
+  `SessionRecord.UserID` changed from `uint` to `string`, and every `CredentialStore` /
+  `DirectoryStore` / `TwoFactorStore` / `SessionStore` / `OrgStore` / `OrgDirectoryStore` method that
+  took or returned a `uint` id now uses `string`. IDs are treated as opaque — the auth package never
+  parses or does arithmetic on them — so a store keyed by uuid/ULID/KSUID passes its IDs straight
+  through. Empty (`""`) is the reserved "no user" sentinel (e.g. a pre-resolution audit row).
+  - **Migration for consumers of the reference stores: none.** `gormstore` keeps its `uint` primary
+    keys and converts to/from decimal strings at its boundary — **no database migration**, IDs render
+    identically (`"1"`, `"2"`, …). `memory` likewise keeps `uint` keys internally.
+  - **Migration for custom store implementers:** change your method signatures to the `string` id
+    types (the compiler points at each one) and treat an unparseable/unknown id as the method's
+    documented miss (`ErrNoUser` / `ErrNoGroup` / a no-op delete) rather than coercing it to a real
+    key. SCIM member `value`s and the `{id}` path segment are now passed through verbatim.
+
 ### Added
 
 - **Organizations (tenant/org layer).** A fourth optional capability store, `OrgStore` (wire with

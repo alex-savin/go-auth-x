@@ -10,6 +10,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
+	"strconv"
 	"strings"
 	"time"
 
@@ -168,8 +169,43 @@ func newPrincipalID() string {
 	return hex.EncodeToString(b)
 }
 
+// --- opaque-ID boundary helpers ---
+//
+// Every public entity ID is an opaque string, but the reference store keeps numeric PKs and converts
+// at this boundary (no uuid migration; see authx.AuthUser.ID). idStr renders a PK; parseID maps an
+// opaque ID back to its PK. A malformed or zero ID is an ID that cannot exist, so callers treat !ok
+// as the relevant miss (ErrNoUser / ErrNoGroup / ErrNoOrg / …) or a no-op — NEVER as PK 0.
+
+func idStr(id uint) string { return strconv.FormatUint(uint64(id), 10) }
+
+func parseID(s string) (uint, bool) {
+	n, err := strconv.ParseUint(s, 10, 64)
+	if err != nil || n == 0 {
+		return 0, false
+	}
+	return uint(n), true
+}
+
+// userIDStr renders a stored user-linkage PK as its opaque ID, mapping the 0 "no user" sentinel (an
+// audit row / token / session not tied to an account) to the reserved empty string.
+func userIDStr(id uint) string {
+	if id == 0 {
+		return ""
+	}
+	return idStr(id)
+}
+
+// userPK maps an opaque user ID to its storage PK for a user LINKAGE that may be absent. The reserved
+// "" means "no user" (stored as 0); a non-empty but unparseable ID cannot exist (ok=false).
+func userPK(id string) (uint, bool) {
+	if id == "" {
+		return 0, true
+	}
+	return parseID(id)
+}
+
 func toAuthUser(u *User) *authx.AuthUser {
-	au := &authx.AuthUser{ID: u.ID, Sub: u.Sub, Email: u.Email, Name: u.Name, EmailVerified: u.EmailVerified, Disabled: u.Disabled, Banned: u.Banned, BanReason: u.BanReason, CreatedAt: u.CreatedAt, UpdatedAt: u.UpdatedAt}
+	au := &authx.AuthUser{ID: idStr(u.ID), Sub: u.Sub, Email: u.Email, Name: u.Name, EmailVerified: u.EmailVerified, Disabled: u.Disabled, Banned: u.Banned, BanReason: u.BanReason, CreatedAt: u.CreatedAt, UpdatedAt: u.UpdatedAt}
 	if u.BannedUntil != nil {
 		au.BannedUntil = *u.BannedUntil
 	}
@@ -217,13 +253,24 @@ func (s *Store) CreateLocalUser(email, name string) (*authx.AuthUser, error) {
 	return toAuthUser(&u), nil
 }
 
-func (s *Store) SetEmailVerified(userID uint, verified bool) error {
-	return s.db.Model(&User{}).Where("id = ?", userID).Update("email_verified", verified).Error
+func (s *Store) SetEmailVerified(userID string, verified bool) error {
+	n, ok := parseID(userID)
+	if !ok {
+		return authx.ErrNoUser
+	}
+	return s.db.Model(&User{}).Where("id = ?", n).Update("email_verified", verified).Error
 }
 
-func (s *Store) EnsureWebauthnHandle(userID uint) ([]byte, error) {
+func (s *Store) EnsureWebauthnHandle(userID string) ([]byte, error) {
+	n, ok := parseID(userID)
+	if !ok {
+		return nil, authx.ErrNoUser
+	}
 	var u User
-	if err := s.db.First(&u, userID).Error; err != nil {
+	if err := s.db.First(&u, n).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, authx.ErrNoUser
+		}
 		return nil, err
 	}
 	if len(u.WebauthnHandle) > 0 {
@@ -233,7 +280,7 @@ func (s *Store) EnsureWebauthnHandle(userID uint) ([]byte, error) {
 	if _, err := rand.Read(h); err != nil {
 		return nil, err
 	}
-	if err := s.db.Model(&User{}).Where("id = ?", userID).Update("webauthn_handle", h).Error; err != nil {
+	if err := s.db.Model(&User{}).Where("id = ?", n).Update("webauthn_handle", h).Error; err != nil {
 		return nil, err
 	}
 	return h, nil
@@ -252,16 +299,20 @@ func (s *Store) UserByWebauthnHandle(handle []byte) (*authx.AuthUser, error) {
 
 func toPasskey(w *WebauthnCredential) authx.Passkey {
 	return authx.Passkey{
-		ID: w.ID, CredentialID: w.CredentialID, PublicKey: w.PublicKey, AttestationType: w.AttestationType,
+		ID: idStr(w.ID), CredentialID: w.CredentialID, PublicKey: w.PublicKey, AttestationType: w.AttestationType,
 		AAGUID: w.AAGUID, SignCount: w.SignCount, Transports: w.Transports,
 		BackupEligible: w.BackupEligible, BackupState: w.BackupState, Name: w.Name,
 		CreatedAt: w.CreatedAt, LastUsedAt: w.LastUsedAt,
 	}
 }
 
-func (s *Store) Passkeys(userID uint) ([]authx.Passkey, error) {
+func (s *Store) Passkeys(userID string) ([]authx.Passkey, error) {
+	n, ok := parseID(userID)
+	if !ok {
+		return []authx.Passkey{}, nil
+	}
 	var rows []WebauthnCredential
-	if err := s.db.Where("user_id = ?", userID).Order("created_at").Find(&rows).Error; err != nil {
+	if err := s.db.Where("user_id = ?", n).Order("created_at").Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	out := make([]authx.Passkey, 0, len(rows))
@@ -271,10 +322,14 @@ func (s *Store) Passkeys(userID uint) ([]authx.Passkey, error) {
 	return out, nil
 }
 
-func (s *Store) AddPasskey(userID uint, p authx.Passkey) error {
+func (s *Store) AddPasskey(userID string, p authx.Passkey) error {
+	n, ok := parseID(userID)
+	if !ok {
+		return authx.ErrNoUser
+	}
 	now := time.Now()
 	return s.db.Create(&WebauthnCredential{
-		UserID: userID, CredentialID: p.CredentialID, PublicKey: p.PublicKey, AttestationType: p.AttestationType,
+		UserID: n, CredentialID: p.CredentialID, PublicKey: p.PublicKey, AttestationType: p.AttestationType,
 		AAGUID: p.AAGUID, SignCount: p.SignCount, Transports: p.Transports,
 		BackupEligible: p.BackupEligible, BackupState: p.BackupState, Name: p.Name,
 		CreatedAt: now, LastUsedAt: now,
@@ -291,13 +346,25 @@ func (s *Store) TouchPasskey(credentialID []byte, signCount uint32) error {
 		}).Error
 }
 
-func (s *Store) RemovePasskey(userID, id uint) error {
-	return s.db.Where("id = ? AND user_id = ?", id, userID).Delete(&WebauthnCredential{}).Error
+func (s *Store) RemovePasskey(userID, id string) error {
+	uid, ok := parseID(userID)
+	if !ok {
+		return nil
+	}
+	kid, ok := parseID(id)
+	if !ok {
+		return nil
+	}
+	return s.db.Where("id = ? AND user_id = ?", kid, uid).Delete(&WebauthnCredential{}).Error
 }
 
-func (s *Store) PasswordHash(userID uint) (string, string, error) {
+func (s *Store) PasswordHash(userID string) (string, string, error) {
+	n, ok := parseID(userID)
+	if !ok {
+		return "", "", authx.ErrNoCredential
+	}
 	var pc PasswordCredential
-	if err := s.db.Where("user_id = ?", userID).First(&pc).Error; err != nil {
+	if err := s.db.Where("user_id = ?", n).First(&pc).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return "", "", authx.ErrNoCredential
 		}
@@ -306,12 +373,16 @@ func (s *Store) PasswordHash(userID uint) (string, string, error) {
 	return pc.Hash, pc.Algo, nil
 }
 
-func (s *Store) SetPasswordHash(userID uint, hash, algo string) error {
+func (s *Store) SetPasswordHash(userID, hash, algo string) error {
+	n, ok := parseID(userID)
+	if !ok {
+		return authx.ErrNoUser
+	}
 	now := time.Now()
 	return s.db.Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "user_id"}},
 		DoUpdates: clause.AssignmentColumns([]string{"hash", "algo", "updated_at"}),
-	}).Create(&PasswordCredential{UserID: userID, Hash: hash, Algo: algo, CreatedAt: now, UpdatedAt: now}).Error
+	}).Create(&PasswordCredential{UserID: n, Hash: hash, Algo: algo, CreatedAt: now, UpdatedAt: now}).Error
 }
 
 func (s *Store) UserByOAuth(provider, subject string) (*authx.AuthUser, error) {
@@ -329,16 +400,25 @@ func (s *Store) UserByOAuth(provider, subject string) (*authx.AuthUser, error) {
 	return toAuthUser(&u), nil
 }
 
-func (s *Store) LinkOAuth(userID uint, provider, subject, email string) error {
+func (s *Store) LinkOAuth(userID, provider, subject, email string) error {
+	n, ok := parseID(userID)
+	if !ok {
+		return authx.ErrNoUser
+	}
 	return s.db.Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "provider"}, {Name: "subject"}},
 		DoNothing: true,
-	}).Create(&OAuthIdentity{UserID: userID, Provider: provider, Subject: subject, Email: normalizeEmail(email), CreatedAt: time.Now()}).Error
+	}).Create(&OAuthIdentity{UserID: n, Provider: provider, Subject: subject, Email: normalizeEmail(email), CreatedAt: time.Now()}).Error
 }
 
-func (s *Store) CreateToken(purpose string, userID uint, email string, tokenHash []byte, expiresAt time.Time) error {
+func (s *Store) CreateToken(purpose, userID, email string, tokenHash []byte, expiresAt time.Time) error {
+	// "" is the reserved "no user" token (magic-link/verify keyed by email); store it as user_id 0.
+	n, ok := userPK(userID)
+	if !ok {
+		return authx.ErrNoUser
+	}
 	return s.db.Create(&AuthToken{
-		Purpose: purpose, UserID: userID, Email: normalizeEmail(email),
+		Purpose: purpose, UserID: n, Email: normalizeEmail(email),
 		TokenHash: tokenHash, ExpiresAt: expiresAt, CreatedAt: time.Now(),
 	}).Error
 }
@@ -364,7 +444,7 @@ func (s *Store) ConsumeToken(purpose string, tokenHash []byte) (*authx.TokenClai
 		if err := tx.Model(&AuthToken{}).Where("id = ?", t.ID).Update("consumed_at", now).Error; err != nil {
 			return err
 		}
-		claim = &authx.TokenClaim{UserID: t.UserID, Email: t.Email}
+		claim = &authx.TokenClaim{UserID: userIDStr(t.UserID), Email: t.Email}
 		return nil
 	})
 	if err != nil {
@@ -373,33 +453,41 @@ func (s *Store) ConsumeToken(purpose string, tokenHash []byte) (*authx.TokenClai
 	return claim, nil
 }
 
-func (s *Store) SetEmail(userID uint, newEmail string) error {
+func (s *Store) SetEmail(userID, newEmail string) error {
+	n, ok := parseID(userID)
+	if !ok {
+		return authx.ErrNoUser
+	}
 	newEmail = normalizeEmail(newEmail)
 	// Uphold one-user-per-email (the unique index is the backstop; this gives a clean typed error).
 	var other User
-	err := s.db.Where("email = ? AND id <> ?", newEmail, userID).First(&other).Error
+	err := s.db.Where("email = ? AND id <> ?", newEmail, n).First(&other).Error
 	if err == nil {
 		return authx.ErrEmailConflict
 	}
 	if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return err
 	}
-	return s.db.Model(&User{}).Where("id = ?", userID).
+	return s.db.Model(&User{}).Where("id = ?", n).
 		Updates(map[string]any{"email": newEmail, "email_verified": true}).Error
 }
 
 // DeleteUser hard-deletes the user + everything keyed to it, deletes its email OTPs, and anonymizes
 // its retained audit rows (GDPR erasure of PII while keeping the forensic count). Idempotent.
-func (s *Store) DeleteUser(userID uint) error {
+func (s *Store) DeleteUser(userID string) error {
+	n, ok := parseID(userID)
+	if !ok {
+		return nil // idempotent: an ID that can't exist is already gone
+	}
 	return s.db.Transaction(func(tx *gorm.DB) error {
 		var u User
-		if err := tx.First(&u, userID).Error; err != nil {
+		if err := tx.First(&u, n).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return nil
 			}
 			return err
 		}
-		if err := cascadeDeletes(tx, userID); err != nil {
+		if err := cascadeDeletes(tx, n); err != nil {
 			return err
 		}
 		if u.Email != "" { // OTPs and org invites are keyed by email, not user_id
@@ -413,27 +501,43 @@ func (s *Store) DeleteUser(userID uint) error {
 		}
 		// Tombstone (not delete) live sessions so IsRevoked keeps denying the deleted user on other
 		// devices until the cookie expires; null the PII for GDPR erasure but retain the revoked marker.
-		if err := tx.Model(&Session{}).Where("user_id = ? AND revoked_at IS NULL", userID).
+		if err := tx.Model(&Session{}).Where("user_id = ? AND revoked_at IS NULL", n).
 			Updates(map[string]any{"revoked_at": time.Now(), "user_agent": "", "ip": ""}).Error; err != nil {
 			return err
 		}
-		return tx.Model(&LoginAudit{}).Where("user_id = ?", userID).
+		return tx.Model(&LoginAudit{}).Where("user_id = ?", n).
 			Updates(map[string]any{"email": "", "ip": ""}).Error
 	})
 }
 
-func (s *Store) RenamePasskey(userID, id uint, name string) error {
-	return s.db.Model(&WebauthnCredential{}).Where("id = ? AND user_id = ?", id, userID).
+func (s *Store) RenamePasskey(userID, id, name string) error {
+	uid, ok := parseID(userID)
+	if !ok {
+		return nil
+	}
+	kid, ok := parseID(id)
+	if !ok {
+		return nil
+	}
+	return s.db.Model(&WebauthnCredential{}).Where("id = ? AND user_id = ?", kid, uid).
 		Update("name", name).Error
 }
 
-func (s *Store) UnlinkOAuth(userID uint, provider string) error {
-	return s.db.Where("user_id = ? AND provider = ?", userID, provider).Delete(&OAuthIdentity{}).Error
+func (s *Store) UnlinkOAuth(userID, provider string) error {
+	n, ok := parseID(userID)
+	if !ok {
+		return nil
+	}
+	return s.db.Where("user_id = ? AND provider = ?", n, provider).Delete(&OAuthIdentity{}).Error
 }
 
-func (s *Store) OAuthIdentities(userID uint) ([]string, error) {
+func (s *Store) OAuthIdentities(userID string) ([]string, error) {
+	n, ok := parseID(userID)
+	if !ok {
+		return []string{}, nil
+	}
 	var rows []OAuthIdentity
-	if err := s.db.Where("user_id = ?", userID).Order("provider").Find(&rows).Error; err != nil {
+	if err := s.db.Where("user_id = ?", n).Order("provider").Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	out := make([]string, 0, len(rows))
@@ -518,12 +622,14 @@ func (s *Store) PeekToken(purpose string, tokenHash []byte) (*authx.TokenClaim, 
 	if t.ConsumedAt != nil || time.Now().After(t.ExpiresAt) {
 		return nil, authx.ErrTokenInvalid
 	}
-	return &authx.TokenClaim{UserID: t.UserID, Email: t.Email}, nil
+	return &authx.TokenClaim{UserID: userIDStr(t.UserID), Email: t.Email}, nil
 }
 
-func (s *Store) RecordAudit(userID uint, email, ip, method, event string, success bool, detail string) {
+func (s *Store) RecordAudit(userID, email, ip, method, event string, success bool, detail string) {
+	// "" (a failed login before user resolution) and any unparseable ID record no account linkage.
+	n, _ := userPK(userID)
 	_ = s.db.Create(&LoginAudit{
-		UserID: userID, Email: normalizeEmail(email), IP: ip, Method: method,
+		UserID: n, Email: normalizeEmail(email), IP: ip, Method: method,
 		Event: event, Success: success, Detail: detail, CreatedAt: time.Now(),
 	}).Error
 }

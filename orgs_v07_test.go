@@ -50,7 +50,7 @@ func TestOrgScopedDirectoryView(t *testing.T) {
 	_ = a
 	owner := seedUser(t, s, "owner@a.com", "hunter2hunter2", true)
 	outsider := seedUser(t, s, "outsider@x.com", "hunter2hunter2", true)
-	orgA := seedOrg(t, s, "acme", map[uint]string{owner.ID: authx.OrgRoleOwner})
+	orgA := seedOrg(t, s, "acme", map[string]string{owner.ID: authx.OrgRoleOwner})
 	orgB := seedOrg(t, s, "globex", nil)
 
 	viewA, err := authx.NewOrgScopedDirectory(s, s, orgA.ID)
@@ -179,7 +179,7 @@ func TestOrgScopedDirectoryView(t *testing.T) {
 func TestOrgScopedView_NoGlobalIdentityRebind(t *testing.T) {
 	_, s, _ := newOrgAuth(t)
 	bob := seedUser(t, s, "bob@corp.com", "hunter2hunter2", true) // global "local:" account
-	org := seedOrg(t, s, "acme", map[uint]string{bob.ID: authx.OrgRoleMember})
+	org := seedOrg(t, s, "acme", map[string]string{bob.ID: authx.OrgRoleMember})
 	view, err := authx.NewOrgScopedDirectory(s, s, org.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -261,8 +261,8 @@ func TestOrgScopedSCIM_HTTPIsolation(t *testing.T) {
 	a, s, _ := newOrgAuth(t)
 	ownerA := seedUser(t, s, "owner@a.com", "hunter2hunter2", true)
 	ownerB := seedUser(t, s, "owner@b.com", "hunter2hunter2", true)
-	orgA := seedOrg(t, s, "acme", map[uint]string{ownerA.ID: authx.OrgRoleOwner})
-	orgB := seedOrg(t, s, "globex", map[uint]string{ownerB.ID: authx.OrgRoleOwner})
+	orgA := seedOrg(t, s, "acme", map[string]string{ownerA.ID: authx.OrgRoleOwner})
+	orgB := seedOrg(t, s, "globex", map[string]string{ownerB.ID: authx.OrgRoleOwner})
 
 	keyA := orgScimKey(t, s, orgA.ID, "scim-a")
 	keyB := orgScimKey(t, s, orgB.ID, "scim-b")
@@ -302,7 +302,7 @@ func TestOrgScopedSCIM_HTTPIsolation(t *testing.T) {
 	}
 
 	// Deprovision via PATCH active=false removes the membership, not the account.
-	if w := scimDo(t, srvA, keyA, "PATCH", "/Users/"+itoa(uA.ID),
+	if w := scimDo(t, srvA, keyA, "PATCH", "/Users/"+uA.ID,
 		`{"Operations":[{"op":"replace","path":"active","value":false}]}`); w.Code >= 300 {
 		t.Fatalf("PATCH deprovision = %d: %s", w.Code, w.Body.String())
 	}
@@ -315,11 +315,11 @@ func TestOrgScopedSCIM_HTTPIsolation(t *testing.T) {
 
 	// Deprovisioning an org OWNER via SCIM is refused with 403 (not a silent 200 that would fake
 	// offboarding, nor a 500 an IdP retries forever). ownerA is org A's owner.
-	if w := scimDo(t, srvA, keyA, "PATCH", "/Users/"+itoa(ownerA.ID),
+	if w := scimDo(t, srvA, keyA, "PATCH", "/Users/"+ownerA.ID,
 		`{"Operations":[{"op":"replace","path":"active","value":false}]}`); w.Code != http.StatusForbidden {
 		t.Fatalf("PATCH-deprovision of an owner = %d, want 403: %s", w.Code, w.Body.String())
 	}
-	if w := scimDo(t, srvA, keyA, "DELETE", "/Users/"+itoa(ownerA.ID), ""); w.Code != http.StatusForbidden {
+	if w := scimDo(t, srvA, keyA, "DELETE", "/Users/"+ownerA.ID, ""); w.Code != http.StatusForbidden {
 		t.Fatalf("DELETE-deprovision of an owner = %d, want 403", w.Code)
 	}
 	if role, err := s.OrgRole(orgA.ID, ownerA.ID); err != nil || role != authx.OrgRoleOwner {
@@ -328,7 +328,7 @@ func TestOrgScopedSCIM_HTTPIsolation(t *testing.T) {
 
 	// Groups: both orgs own "engineering"; each mount lists only its own. A member list on a
 	// group created with a FOREIGN member value silently drops the non-member (the view refuses).
-	if w := scimDo(t, srvA, keyA, "POST", "/Groups", `{"displayName":"engineering","members":[{"value":"`+itoa(uB.ID)+`"}]}`); w.Code != http.StatusCreated {
+	if w := scimDo(t, srvA, keyA, "POST", "/Groups", `{"displayName":"engineering","members":[{"value":"`+uB.ID+`"}]}`); w.Code != http.StatusCreated {
 		t.Fatalf("group create A = %d: %s", w.Code, w.Body.String())
 	}
 	if w := scimDo(t, srvB, keyB, "POST", "/Groups", `{"displayName":"engineering"}`); w.Code != http.StatusCreated {
@@ -343,7 +343,7 @@ func TestOrgScopedSCIM_HTTPIsolation(t *testing.T) {
 	}
 	// Org B's mount can't reach org A's group: DELETE is a 404 (not a 500 retry-storm), and org A's
 	// group survives.
-	if w := scimDo(t, srvB, keyB, "DELETE", "/Groups/"+itoa(gA.ID), ""); w.Code != http.StatusNotFound {
+	if w := scimDo(t, srvB, keyB, "DELETE", "/Groups/"+gA.ID, ""); w.Code != http.StatusNotFound {
 		t.Fatalf("cross-org group DELETE = %d, want 404: %s", w.Code, w.Body.String())
 	}
 	if _, err := s.OrgGroupByName(orgA.ID, "engineering"); err != nil {
@@ -357,7 +357,7 @@ func TestOrgBoundAPIKeys_GlobalRefusals(t *testing.T) {
 	a, s, _ := newOrgAuth(t)
 	seedUser(t, s, "owner@example.com", "hunter2hunter2", true)
 	u := seedUser(t, s, "u@x.com", "hunter2hunter2", true)
-	org := seedOrg(t, s, "acme", map[uint]string{u.ID: authx.OrgRoleOwner})
+	org := seedOrg(t, s, "acme", map[string]string{u.ID: authx.OrgRoleOwner})
 	other := seedOrg(t, s, "globex", nil)
 
 	// Admin REST mints an org-bound key (org by slug), carrying even the "admin" scope.
@@ -408,7 +408,7 @@ func TestOrgGroups_CookieExclusionAndLiveGate(t *testing.T) {
 	a, s, _ := newOrgAuth(t)
 	u := seedUser(t, s, "u@x.com", "hunter2hunter2", true)
 	peer := seedUser(t, s, "p@x.com", "hunter2hunter2", true)
-	org := seedOrg(t, s, "acme", map[uint]string{u.ID: authx.OrgRoleMember, peer.ID: authx.OrgRoleMember})
+	org := seedOrg(t, s, "acme", map[string]string{u.ID: authx.OrgRoleMember, peer.ID: authx.OrgRoleMember})
 
 	global, _ := s.CreateGroup("staff", "")
 	if err := s.AddUserToGroup(u.ID, global.ID); err != nil {
@@ -462,7 +462,7 @@ func TestAdminOrgGroupVerbs(t *testing.T) {
 	seedUser(t, s, "owner@example.com", "hunter2hunter2", true)
 	member := seedUser(t, s, "m@x.com", "hunter2hunter2", true)
 	outsider := seedUser(t, s, "o@x.com", "hunter2hunter2", true)
-	org := seedOrg(t, s, "acme", map[uint]string{member.ID: authx.OrgRoleMember})
+	org := seedOrg(t, s, "acme", map[string]string{member.ID: authx.OrgRoleMember})
 
 	c := newClient(t, a)
 	c.login("owner@example.com", "hunter2hunter2")
@@ -472,27 +472,27 @@ func TestAdminOrgGroupVerbs(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("create org group = %d: %s", w.Code, w.Body.String())
 	}
-	gid := uint(decode(t, w)["id"].(float64))
+	gid := decode(t, w)["id"].(string)
 	if w := c.do("POST", base, map[string]any{"name": "eng"}); w.Code != http.StatusConflict {
 		t.Fatalf("dup org group = %d, want 409", w.Code)
 	}
 	// Members: org members only; outsiders are a 409.
-	if w := c.do("POST", base+"/"+itoa(gid)+"/members/"+itoa(outsider.ID), nil); w.Code != http.StatusConflict {
+	if w := c.do("POST", base+"/"+gid+"/members/"+outsider.ID, nil); w.Code != http.StatusConflict {
 		t.Fatalf("outsider into org group = %d, want 409", w.Code)
 	}
-	if w := c.do("POST", base+"/"+itoa(gid)+"/members/"+itoa(member.ID), nil); w.Code != 200 {
+	if w := c.do("POST", base+"/"+gid+"/members/"+member.ID, nil); w.Code != 200 {
 		t.Fatalf("member into org group = %d", w.Code)
 	}
-	lst := decode(t, c.do("GET", base+"/"+itoa(gid)+"/members", nil))
+	lst := decode(t, c.do("GET", base+"/"+gid+"/members", nil))
 	if members, _ := lst["members"].([]any); len(members) != 1 {
 		t.Fatalf("group members = %v", lst)
 	}
 	// A global group's ID under an org path is a 404 (no cross-namespace reach).
 	gg, _ := s.CreateGroup("staff", "")
-	if w := c.do("DELETE", base+"/"+itoa(gg.ID), nil); w.Code != http.StatusNotFound {
+	if w := c.do("DELETE", base+"/"+gg.ID, nil); w.Code != http.StatusNotFound {
 		t.Fatalf("global group via org path = %d, want 404", w.Code)
 	}
-	if w := c.do("DELETE", base+"/"+itoa(gid), nil); w.Code != 200 {
+	if w := c.do("DELETE", base+"/"+gid, nil); w.Code != 200 {
 		t.Fatalf("delete org group = %d", w.Code)
 	}
 }
@@ -508,7 +508,7 @@ func TestOrgStore_Memory_V07Conformance(t *testing.T) {
 	// Invite lifecycle: create → peek (non-destructive) → consume (single-use) → gone.
 	h1 := sha256.Sum256([]byte("tok1"))
 	inv, err := store.CreateOrgInvite(o.ID, "new@x.com", "member", "m@x.com", h1[:], time.Now().Add(time.Hour))
-	if err != nil || inv.ID == 0 {
+	if err != nil || inv.ID == "" {
 		t.Fatalf("CreateOrgInvite = %v, %v", inv, err)
 	}
 	if _, err := store.PeekOrgInvite(h1[:]); err != nil {

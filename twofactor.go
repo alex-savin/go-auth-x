@@ -31,19 +31,19 @@ type TOTPInfo struct {
 // unaffected. User ids match CredentialStore. Recovery codes are stored as sha256 hashes; consuming
 // one removes it. Secrets should be encrypted at rest by the implementation.
 type TwoFactorStore interface {
-	TOTP(userID uint) (*TOTPInfo, error)            // ErrNoCredential if the user has no TOTP
-	SetTOTPSecret(userID uint, secret string) error // (re)enroll: store secret, Enabled=false, LastStep=0
-	EnableTOTP(userID uint) error                   // confirm enrollment
-	DisableTOTP(userID uint) error                  // remove TOTP + all recovery codes
-	SetTOTPLastStep(userID uint, step uint64) error // set the enrollment step (no concurrency concern)
+	TOTP(userID string) (*TOTPInfo, error)            // ErrNoCredential if the user has no TOTP
+	SetTOTPSecret(userID, secret string) error        // (re)enroll: store secret, Enabled=false, LastStep=0
+	EnableTOTP(userID string) error                   // confirm enrollment
+	DisableTOTP(userID string) error                  // remove TOTP + all recovery codes
+	SetTOTPLastStep(userID string, step uint64) error // set the enrollment step (no concurrency concern)
 	// ClaimTOTPStep atomically records a just-verified time-step ONLY if it advances past LastStep,
 	// returning true iff it did. This is the replay guard for login verification: the compare and the
 	// write must be one atomic step so two concurrent requests can't both accept the same code.
-	ClaimTOTPStep(userID uint, step uint64) (bool, error)
+	ClaimTOTPStep(userID string, step uint64) (bool, error)
 
-	ReplaceRecoveryCodes(userID uint, hashes [][]byte) error    // set at enrollment (replaces any existing)
-	ConsumeRecoveryCode(userID uint, hash []byte) (bool, error) // true if it existed and was removed
-	RecoveryCodesRemaining(userID uint) (int, error)
+	ReplaceRecoveryCodes(userID string, hashes [][]byte) error    // set at enrollment (replaces any existing)
+	ConsumeRecoveryCode(userID string, hash []byte) (bool, error) // true if it existed and was removed
+	RecoveryCodesRemaining(userID string) (int, error)
 }
 
 // SetTwoFactorStore enables optional TOTP two-factor auth + recovery codes. It also installs the
@@ -59,7 +59,7 @@ func (a *Authenticator) SetTwoFactorStore(s TwoFactorStore) {
 func (a *Authenticator) TwoFactorEnabled() bool { return a != nil && a.twoFactor != nil }
 
 // userHasTOTP reports whether the user has CONFIRMED TOTP (so login must challenge for a code).
-func (a *Authenticator) userHasTOTP(userID uint) bool {
+func (a *Authenticator) userHasTOTP(userID string) bool {
 	if a.twoFactor == nil {
 		return false
 	}
@@ -129,7 +129,7 @@ func (a *Authenticator) completePendingLogin(c *reqCtx, pc *pendingClaims) error
 	if pc.Remember {
 		ttl = rememberTTL
 	}
-	var uid uint
+	var uid string
 	if a.creds != nil {
 		if u, e := a.creds.UserBySub(pc.Subject); e == nil {
 			uid = u.ID
@@ -138,7 +138,7 @@ func (a *Authenticator) completePendingLogin(c *reqCtx, pc *pendingClaims) error
 	// Active-org enrichment (see completeLogin) — re-derived here because the pending cookie
 	// deliberately carries only the half-authenticated identity, not org state.
 	var orgID, orgRole string
-	if a.orgs != nil && uid != 0 {
+	if a.orgs != nil && uid != "" {
 		orgID, orgRole = a.defaultOrgClaims(uid)
 	}
 	sid := a.newSessionID()

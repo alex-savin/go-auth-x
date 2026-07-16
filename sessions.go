@@ -14,7 +14,7 @@ var errRevokedSession = errors.New("authx: session revoked")
 type SessionRecord struct {
 	SID       string    `json:"id"`
 	Subject   string    `json:"-"`
-	UserID    uint      `json:"-"`
+	UserID    string    `json:"-"` // opaque; see AuthUser.ID ("" when the session isn't tied to a stored user)
 	UserAgent string    `json:"userAgent,omitempty"`
 	IP        string    `json:"ip,omitempty"`
 	CreatedAt time.Time `json:"createdAt"`
@@ -60,7 +60,7 @@ func (a *Authenticator) newSessionID() string {
 // would be rejected on its very next request (a "logged in, then instantly logged out" lockout). So a
 // record failure must fail the login rather than hand out an un-usable cookie — callers record BEFORE
 // setting the cookie and abort on error. Returns nil when no store is wired (the stateless default).
-func (a *Authenticator) recordSession(r *http.Request, sid, subject string, userID uint, ttl time.Duration) error {
+func (a *Authenticator) recordSession(r *http.Request, sid, subject, userID string, ttl time.Duration) error {
 	if a.sessions == nil || sid == "" {
 		return nil
 	}

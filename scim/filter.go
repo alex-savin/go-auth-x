@@ -38,7 +38,9 @@ func (e elem) asResource() resource {
 	}
 }
 
-func toID(id uint) string { return strconv.FormatUint(uint64(id), 10) }
+// toID renders an opaque entity id for SCIM (id/externalId filtering + sorting). Ids are already
+// strings; this is the single spot that would change if a store's ids needed normalizing.
+func toID(id string) string { return id }
 
 // --- attribute getters (users + groups) ---
 

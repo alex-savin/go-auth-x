@@ -11,18 +11,18 @@ type fakeTOTP struct {
 	recov map[string]bool
 }
 
-func (f *fakeTOTP) TOTP(uint) (*TOTPInfo, error) {
+func (f *fakeTOTP) TOTP(string) (*TOTPInfo, error) {
 	if f.info == nil {
 		return nil, ErrNoCredential
 	}
 	cp := *f.info
 	return &cp, nil
 }
-func (f *fakeTOTP) SetTOTPSecret(_ uint, s string) error   { f.info = &TOTPInfo{Secret: s}; return nil }
-func (f *fakeTOTP) EnableTOTP(uint) error                  { f.info.Enabled = true; return nil }
-func (f *fakeTOTP) DisableTOTP(uint) error                 { f.info, f.recov = nil, nil; return nil }
-func (f *fakeTOTP) SetTOTPLastStep(_ uint, s uint64) error { f.info.LastStep = s; return nil }
-func (f *fakeTOTP) ClaimTOTPStep(_ uint, s uint64) (bool, error) {
+func (f *fakeTOTP) SetTOTPSecret(_ string, s string) error   { f.info = &TOTPInfo{Secret: s}; return nil }
+func (f *fakeTOTP) EnableTOTP(string) error                  { f.info.Enabled = true; return nil }
+func (f *fakeTOTP) DisableTOTP(string) error                 { f.info, f.recov = nil, nil; return nil }
+func (f *fakeTOTP) SetTOTPLastStep(_ string, s uint64) error { f.info.LastStep = s; return nil }
+func (f *fakeTOTP) ClaimTOTPStep(_ string, s uint64) (bool, error) {
 	if f.info == nil {
 		return false, ErrNoCredential
 	}
@@ -32,28 +32,28 @@ func (f *fakeTOTP) ClaimTOTPStep(_ uint, s uint64) (bool, error) {
 	f.info.LastStep = s
 	return true, nil
 }
-func (f *fakeTOTP) ReplaceRecoveryCodes(_ uint, hs [][]byte) error {
+func (f *fakeTOTP) ReplaceRecoveryCodes(_ string, hs [][]byte) error {
 	f.recov = map[string]bool{}
 	for _, h := range hs {
 		f.recov[string(h)] = true
 	}
 	return nil
 }
-func (f *fakeTOTP) ConsumeRecoveryCode(_ uint, h []byte) (bool, error) {
+func (f *fakeTOTP) ConsumeRecoveryCode(_ string, h []byte) (bool, error) {
 	if f.recov[string(h)] {
 		delete(f.recov, string(h))
 		return true, nil
 	}
 	return false, nil
 }
-func (f *fakeTOTP) RecoveryCodesRemaining(uint) (int, error) { return len(f.recov), nil }
+func (f *fakeTOTP) RecoveryCodesRemaining(string) (int, error) { return len(f.recov), nil }
 
 func TestVerifySecondFactor_TOTPReplayAndRecovery(t *testing.T) {
 	f := &fakeTOTP{}
 	a := &Authenticator{twoFactor: f}
 	secret, _ := newTOTPSecret()
-	_ = f.SetTOTPSecret(1, secret)
-	_ = f.EnableTOTP(1)
+	_ = f.SetTOTPSecret("1", secret)
+	_ = f.EnableTOTP("1")
 
 	raw, _ := b32.DecodeString(secret)
 	now := time.Now()
@@ -61,34 +61,34 @@ func TestVerifySecondFactor_TOTPReplayAndRecovery(t *testing.T) {
 	code := hotp(raw, step)
 
 	// A valid current TOTP verifies and advances the replay guard.
-	info, _ := f.TOTP(1)
-	if !a.verifySecondFactor(1, info, code) {
+	info, _ := f.TOTP("1")
+	if !a.verifySecondFactor("1", info, code) {
 		t.Fatal("a valid current TOTP should verify")
 	}
-	info2, _ := f.TOTP(1)
+	info2, _ := f.TOTP("1")
 	if info2.LastStep != step {
 		t.Fatalf("lastStep should advance to %d, got %d", step, info2.LastStep)
 	}
 	// Replaying the same code (same step) is now rejected.
-	if a.verifySecondFactor(1, info2, code) {
+	if a.verifySecondFactor("1", info2, code) {
 		t.Fatal("a replayed TOTP (same step) must be rejected")
 	}
 
 	// Recovery codes are single-use.
 	codes, hashes, _ := newRecoveryCodes(3)
-	_ = f.ReplaceRecoveryCodes(1, hashes)
-	info3, _ := f.TOTP(1)
-	if !a.verifySecondFactor(1, info3, codes[0]) {
+	_ = f.ReplaceRecoveryCodes("1", hashes)
+	info3, _ := f.TOTP("1")
+	if !a.verifySecondFactor("1", info3, codes[0]) {
 		t.Fatal("a valid recovery code should verify")
 	}
-	if a.verifySecondFactor(1, info3, codes[0]) {
+	if a.verifySecondFactor("1", info3, codes[0]) {
 		t.Fatal("a recovery code must be single-use")
 	}
-	if !a.verifySecondFactor(1, info3, codes[1]) {
+	if !a.verifySecondFactor("1", info3, codes[1]) {
 		t.Fatal("a different recovery code should still work")
 	}
 	// A bad code fails.
-	if a.verifySecondFactor(1, info3, "000000") {
+	if a.verifySecondFactor("1", info3, "000000") {
 		t.Fatal("a wrong code must not verify")
 	}
 }

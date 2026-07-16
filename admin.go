@@ -4,7 +4,6 @@ import (
 	"errors"
 	"log"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -182,15 +181,16 @@ func (a *Authenticator) adminRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /auth/admin/apikeys/{id}", a.wrap(a.adminRevokeKey))
 }
 
-// paramUint parses a positive uint path parameter; on a missing/malformed/zero value it writes a 400
-// and returns ok=false so the caller stops (rather than silently coercing to id 0).
-func paramUint(c *reqCtx, name string) (uint, bool) {
-	n, err := strconv.ParseUint(c.Param(name), 10, 64)
-	if err != nil || n == 0 {
+// paramID reads an opaque entity-id path parameter; on a missing/blank value it writes a 400 and
+// returns ok=false so the caller stops. The id is passed to the store verbatim (the store validates
+// its own key format) — the auth package never parses it (see AuthUser.ID).
+func paramID(c *reqCtx, name string) (string, bool) {
+	id := strings.TrimSpace(c.Param(name))
+	if id == "" {
 		c.JSON(http.StatusBadRequest, H{"error": "invalid " + name})
-		return 0, false
+		return "", false
 	}
-	return uint(n), true
+	return id, true
 }
 
 // adminFail logs the internal error (for the operator) and returns a generic message to the client,
@@ -243,7 +243,7 @@ func (a *Authenticator) adminDeleteGroup(c *reqCtx) {
 	if !a.adminGuard(c) {
 		return
 	}
-	id, ok := paramUint(c, "id")
+	id, ok := paramID(c, "id")
 	if !ok {
 		return
 	}
@@ -258,8 +258,8 @@ func (a *Authenticator) adminAddMember(c *reqCtx) {
 	if !a.adminGuard(c) {
 		return
 	}
-	uid, ok := paramUint(c, "userId")
-	gid, ok2 := paramUint(c, "id")
+	uid, ok := paramID(c, "userId")
+	gid, ok2 := paramID(c, "id")
 	if !ok || !ok2 {
 		return
 	}
@@ -274,8 +274,8 @@ func (a *Authenticator) adminRemoveMember(c *reqCtx) {
 	if !a.adminGuard(c) {
 		return
 	}
-	uid, ok := paramUint(c, "userId")
-	gid, ok2 := paramUint(c, "id")
+	uid, ok := paramID(c, "userId")
+	gid, ok2 := paramID(c, "id")
 	if !ok || !ok2 {
 		return
 	}
@@ -290,7 +290,7 @@ func (a *Authenticator) adminGroupMembers(c *reqCtx) {
 	if !a.adminGuard(c) {
 		return
 	}
-	id, ok := paramUint(c, "id")
+	id, ok := paramID(c, "id")
 	if !ok {
 		return
 	}
@@ -318,7 +318,7 @@ func (a *Authenticator) adminSetDisabled(c *reqCtx) {
 	if !a.adminGuard(c) {
 		return
 	}
-	id, ok := paramUint(c, "id")
+	id, ok := paramID(c, "id")
 	if !ok {
 		return
 	}
@@ -410,7 +410,7 @@ func (a *Authenticator) adminRevokeKey(c *reqCtx) {
 	if !a.adminGuard(c) {
 		return
 	}
-	id, ok := paramUint(c, "id")
+	id, ok := paramID(c, "id")
 	if !ok {
 		return
 	}

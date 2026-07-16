@@ -39,19 +39,19 @@ func (a *Authenticator) adminOrgDir(c *reqCtx) (OrgDirectoryStore, bool) {
 
 // orgGroupInOrg verifies group {groupId} belongs to org {id} (admin paths name both, so a
 // mismatched pair must 404 rather than silently operate on another org's — or a global — group).
-func (a *Authenticator) orgGroupInOrg(c *reqCtx, od OrgDirectoryStore, orgID string) (uint, bool) {
-	gid, ok := paramUint(c, "groupId")
+func (a *Authenticator) orgGroupInOrg(c *reqCtx, od OrgDirectoryStore, orgID string) (string, bool) {
+	gid, ok := paramID(c, "groupId")
 	if !ok {
-		return 0, false
+		return "", false
 	}
 	owner, err := od.OrgOfGroup(gid)
 	if errors.Is(err, ErrNoGroup) || (err == nil && owner != orgID) {
 		c.JSON(http.StatusNotFound, H{"error": "no such group in this organization"})
-		return 0, false
+		return "", false
 	}
 	if err != nil {
 		a.adminFail(c, http.StatusInternalServerError, "could not resolve group", err)
-		return 0, false
+		return "", false
 	}
 	return gid, true
 }
@@ -176,7 +176,7 @@ func (a *Authenticator) adminAddOrgGroupMember(c *reqCtx) {
 	if !ok {
 		return
 	}
-	uid, ok := paramUint(c, "userId")
+	uid, ok := paramID(c, "userId")
 	if !ok {
 		return
 	}
@@ -211,7 +211,7 @@ func (a *Authenticator) adminRemoveOrgGroupMember(c *reqCtx) {
 	if !ok {
 		return
 	}
-	uid, ok := paramUint(c, "userId")
+	uid, ok := paramID(c, "userId")
 	if !ok {
 		return
 	}
@@ -346,7 +346,7 @@ func (a *Authenticator) adminSetOrgMember(c *reqCtx) {
 	if !ok {
 		return
 	}
-	uid, ok := paramUint(c, "userId")
+	uid, ok := paramID(c, "userId")
 	if !ok {
 		return
 	}
@@ -380,7 +380,7 @@ func (a *Authenticator) adminRemoveOrgMember(c *reqCtx) {
 	if !ok {
 		return
 	}
-	uid, ok := paramUint(c, "userId")
+	uid, ok := paramID(c, "userId")
 	if !ok {
 		return
 	}

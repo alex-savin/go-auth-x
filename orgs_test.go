@@ -26,7 +26,7 @@ func newOrgAuth(t *testing.T) (*authx.Authenticator, *memory.Store, *capMailer) 
 	return a, s, m
 }
 
-func seedOrg(t *testing.T, s *memory.Store, slug string, members map[uint]string) *authx.Org {
+func seedOrg(t *testing.T, s *memory.Store, slug string, members map[string]string) *authx.Org {
 	t.Helper()
 	o, err := s.CreateOrg(slug, strings.ToUpper(slug))
 	if err != nil {
@@ -92,10 +92,10 @@ func TestOrgStore_Memory_Conformance(t *testing.T) {
 	}
 	// A membership for a nonexistent user is refused — a dangling row would be inherited by the
 	// future user assigned that ID.
-	if err := store.SetOrgMember(o.ID, 4242, authx.OrgRoleOwner); !errors.Is(err, authx.ErrNoUser) {
+	if err := store.SetOrgMember(o.ID, "4242", authx.OrgRoleOwner); !errors.Is(err, authx.ErrNoUser) {
 		t.Fatalf("membership for a missing user must be ErrNoUser, got %v", err)
 	}
-	if _, err := store.OrgRole(o.ID, 4242); !errors.Is(err, authx.ErrNotOrgMember) {
+	if _, err := store.OrgRole(o.ID, "4242"); !errors.Is(err, authx.ErrNotOrgMember) {
 		t.Fatalf("non-member must be ErrNotOrgMember, got %v", err)
 	}
 	if ms, _ := store.UserOrgs(u.ID); len(ms) != 1 || ms[0].Org.ID != o.ID || ms[0].Role != authx.OrgRoleOwner {
@@ -135,7 +135,7 @@ func TestOrgStore_Memory_Conformance(t *testing.T) {
 func TestOrgLogin_SoleMembershipBecomesActive(t *testing.T) {
 	a, s, _ := newOrgAuth(t)
 	u := seedUser(t, s, "u@x.com", "hunter2hunter2", true)
-	o := seedOrg(t, s, "acme", map[uint]string{u.ID: authx.OrgRoleOwner})
+	o := seedOrg(t, s, "acme", map[string]string{u.ID: authx.OrgRoleOwner})
 
 	c := newClient(t, a)
 	c.login("u@x.com", "hunter2hunter2")
@@ -152,8 +152,8 @@ func TestOrgLogin_SoleMembershipBecomesActive(t *testing.T) {
 func TestOrgLogin_MultipleMembershipsMeansNoActiveOrg(t *testing.T) {
 	a, s, _ := newOrgAuth(t)
 	u := seedUser(t, s, "u@x.com", "hunter2hunter2", true)
-	seedOrg(t, s, "acme", map[uint]string{u.ID: authx.OrgRoleOwner})
-	seedOrg(t, s, "globex", map[uint]string{u.ID: authx.OrgRoleMember})
+	seedOrg(t, s, "acme", map[string]string{u.ID: authx.OrgRoleOwner})
+	seedOrg(t, s, "globex", map[string]string{u.ID: authx.OrgRoleMember})
 
 	c := newClient(t, a)
 	c.login("u@x.com", "hunter2hunter2")
@@ -187,8 +187,8 @@ func cookieClaims(t *testing.T, tok string) map[string]any {
 func TestOrgSwitch(t *testing.T) {
 	a, s, _ := newOrgAuth(t)
 	u := seedUser(t, s, "u@x.com", "hunter2hunter2", true)
-	acme := seedOrg(t, s, "acme", map[uint]string{u.ID: authx.OrgRoleAdmin})
-	seedOrg(t, s, "globex", map[uint]string{u.ID: authx.OrgRoleMember})
+	acme := seedOrg(t, s, "acme", map[string]string{u.ID: authx.OrgRoleAdmin})
+	seedOrg(t, s, "globex", map[string]string{u.ID: authx.OrgRoleMember})
 	stranger := seedOrg(t, s, "stranger", nil)
 
 	c := newClient(t, a)
@@ -260,7 +260,7 @@ func TestRequireOrgHTTP_LiveReverification(t *testing.T) {
 	a, s, _ := newOrgAuth(t)
 	owner := seedUser(t, s, "o@x.com", "hunter2hunter2", true)
 	member := seedUser(t, s, "m@x.com", "hunter2hunter2", true)
-	o := seedOrg(t, s, "acme", map[uint]string{owner.ID: authx.OrgRoleOwner, member.ID: authx.OrgRoleMember})
+	o := seedOrg(t, s, "acme", map[string]string{owner.ID: authx.OrgRoleOwner, member.ID: authx.OrgRoleMember})
 
 	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
 	ownerGate := a.GateHTTP(a.RequireOrgHTTP(authx.OrgRoleOwner)(inner))
@@ -320,7 +320,7 @@ func inviteLink(t *testing.T, m *capMailer, needle string) string {
 func TestOrgInvite_EndToEnd(t *testing.T) {
 	a, s, mailer := newOrgAuth(t)
 	owner := seedUser(t, s, "o@x.com", "hunter2hunter2", true)
-	o := seedOrg(t, s, "acme", map[uint]string{owner.ID: authx.OrgRoleOwner})
+	o := seedOrg(t, s, "acme", map[string]string{owner.ID: authx.OrgRoleOwner})
 
 	oc := newClient(t, a)
 	oc.login("o@x.com", "hunter2hunter2") // sole membership → acme is active
@@ -376,7 +376,7 @@ func TestOrgInvite_EndToEnd(t *testing.T) {
 func TestOrgInvite_WrongAccountDoesNotBurnToken(t *testing.T) {
 	a, s, mailer := newOrgAuth(t)
 	owner := seedUser(t, s, "o@x.com", "hunter2hunter2", true)
-	o := seedOrg(t, s, "acme", map[uint]string{owner.ID: authx.OrgRoleOwner})
+	o := seedOrg(t, s, "acme", map[string]string{owner.ID: authx.OrgRoleOwner})
 	oc := newClient(t, a)
 	oc.login("o@x.com", "hunter2hunter2")
 	if w := oc.do("POST", "/auth/org/invites", map[string]any{"email": "right@x.com"}); w.Code != 200 {
@@ -407,7 +407,7 @@ func TestOrgInvite_WrongAccountDoesNotBurnToken(t *testing.T) {
 func TestOrgInvite_RecordsListRevokeAndReplace(t *testing.T) {
 	a, s, mailer := newOrgAuth(t)
 	owner := seedUser(t, s, "o@x.com", "hunter2hunter2", true)
-	o := seedOrg(t, s, "acme", map[uint]string{owner.ID: authx.OrgRoleOwner})
+	o := seedOrg(t, s, "acme", map[string]string{owner.ID: authx.OrgRoleOwner})
 	oc := newClient(t, a)
 	oc.login("o@x.com", "hunter2hunter2")
 
@@ -441,8 +441,8 @@ func TestOrgInvite_RecordsListRevokeAndReplace(t *testing.T) {
 	}
 
 	// Revoke kills the pending invite before redemption.
-	id := int(first["id"].(float64))
-	if w := oc.do("DELETE", "/auth/org/invites/"+itoa(uint(id)), nil); w.Code != 200 {
+	id := first["id"].(string)
+	if w := oc.do("DELETE", "/auth/org/invites/"+id, nil); w.Code != 200 {
 		t.Fatalf("revoke = %d: %s", w.Code, w.Body.String())
 	}
 	link2 := inviteLink(t, mailer, "invited you to join") // the re-invite email
@@ -462,7 +462,7 @@ func TestOrgInvite_RequiresManagerAndOwnerForOwner(t *testing.T) {
 	a, s, _ := newOrgAuth(t)
 	admin := seedUser(t, s, "a@x.com", "hunter2hunter2", true)
 	member := seedUser(t, s, "m@x.com", "hunter2hunter2", true)
-	seedOrg(t, s, "acme", map[uint]string{admin.ID: authx.OrgRoleAdmin, member.ID: authx.OrgRoleMember})
+	seedOrg(t, s, "acme", map[string]string{admin.ID: authx.OrgRoleAdmin, member.ID: authx.OrgRoleMember})
 
 	mc := newClient(t, a)
 	mc.login("m@x.com", "hunter2hunter2")
@@ -483,7 +483,7 @@ func TestOrgMembers_LastOwnerGuardAndLeave(t *testing.T) {
 	owner := seedUser(t, s, "o@x.com", "hunter2hunter2", true)
 	admin := seedUser(t, s, "a@x.com", "hunter2hunter2", true)
 	member := seedUser(t, s, "m@x.com", "hunter2hunter2", true)
-	o := seedOrg(t, s, "acme", map[uint]string{
+	o := seedOrg(t, s, "acme", map[string]string{
 		owner.ID: authx.OrgRoleOwner, admin.ID: authx.OrgRoleAdmin, member.ID: authx.OrgRoleMember,
 	})
 
@@ -494,7 +494,7 @@ func TestOrgMembers_LastOwnerGuardAndLeave(t *testing.T) {
 	mc := newClient(t, a)
 	mc.login("m@x.com", "hunter2hunter2")
 
-	uidPath := func(id uint) string { return "/auth/org/members/" + itoa(id) }
+	uidPath := func(id string) string { return "/auth/org/members/" + id }
 
 	// Any member may list; the view carries no operator-only fields.
 	lst := decode(t, mc.do("GET", "/auth/org/members", nil))
@@ -574,7 +574,7 @@ func TestAdminOrgVerbs(t *testing.T) {
 	if w := c.do("POST", "/auth/admin/orgs/"+id+"/members/9999", map[string]any{"role": "owner"}); w.Code != http.StatusNotFound {
 		t.Fatalf("admin add missing user = %d, want 404", w.Code)
 	}
-	if w := c.do("POST", "/auth/admin/orgs/"+id+"/members/"+itoa(u.ID), map[string]any{"role": "owner"}); w.Code != 200 {
+	if w := c.do("POST", "/auth/admin/orgs/"+id+"/members/"+u.ID, map[string]any{"role": "owner"}); w.Code != 200 {
 		t.Fatalf("admin add member = %d: %s", w.Code, w.Body.String())
 	}
 	lst := decode(t, c.do("GET", "/auth/admin/orgs/"+id+"/members", nil))
@@ -582,7 +582,7 @@ func TestAdminOrgVerbs(t *testing.T) {
 		t.Fatalf("members = %v", lst)
 	}
 	// The ADMIN api skips the last-owner guard (operator recovery path).
-	if w := c.do("DELETE", "/auth/admin/orgs/"+id+"/members/"+itoa(u.ID), nil); w.Code != 200 {
+	if w := c.do("DELETE", "/auth/admin/orgs/"+id+"/members/"+u.ID, nil); w.Code != 200 {
 		t.Fatalf("admin remove sole owner = %d (admin must bypass the guard)", w.Code)
 	}
 

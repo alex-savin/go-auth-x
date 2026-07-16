@@ -49,7 +49,7 @@ func TestOIDCEmailVerifiedGatingViaAuthorizer(t *testing.T) {
 		t.Fatalf("squatter should still exist after refused takeover: %v", gerr)
 	}
 	if got.ID != squatter.ID {
-		t.Fatalf("squatter id changed (silent takeover!): was %d now %d", squatter.ID, got.ID)
+		t.Fatalf("squatter id changed (silent takeover!): was %s now %s", squatter.ID, got.ID)
 	}
 	if got.Sub == "oidc:abc" {
 		t.Fatalf("squatter Sub was adopted by unverified oidc identity (takeover!): %q", got.Sub)

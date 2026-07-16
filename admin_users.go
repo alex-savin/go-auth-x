@@ -3,7 +3,6 @@ package authx
 import (
 	"errors"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 )
@@ -73,7 +72,7 @@ func (a *Authenticator) adminSetPassword(c *reqCtx) {
 		a.adminFail(c, http.StatusNotImplemented, "local credential store not configured", nil)
 		return
 	}
-	id, ok := paramUint(c, "id")
+	id, ok := paramID(c, "id")
 	if !ok {
 		return
 	}
@@ -107,7 +106,7 @@ func (a *Authenticator) adminDeleteUser(c *reqCtx) {
 		a.adminFail(c, http.StatusNotImplemented, "local credential store not configured", nil)
 		return
 	}
-	id, ok := paramUint(c, "id")
+	id, ok := paramID(c, "id")
 	if !ok {
 		return
 	}
@@ -128,7 +127,7 @@ func (a *Authenticator) adminSetBan(c *reqCtx) {
 	if !a.adminGuard(c) {
 		return
 	}
-	id, ok := paramUint(c, "id")
+	id, ok := paramID(c, "id")
 	if !ok {
 		return
 	}
@@ -176,7 +175,7 @@ func (a *Authenticator) adminImpersonate(c *reqCtx) {
 	if !a.adminGuard(c) {
 		return
 	}
-	id, ok := paramUint(c, "id")
+	id, ok := paramID(c, "id")
 	if !ok {
 		return
 	}
@@ -197,7 +196,7 @@ func (a *Authenticator) adminImpersonate(c *reqCtx) {
 		adminSub = sc.Subject
 	} else if key := bearerToken(c.GetHeader("Authorization")); key != "" {
 		if info, ok := a.ValidateAPIKey(key); ok {
-			adminSub = "apikey:" + strconv.FormatUint(uint64(info.ID), 10)
+			adminSub = "apikey:" + info.ID
 		}
 	}
 	if adminSub == "" {
@@ -249,7 +248,7 @@ func (a *Authenticator) StopImpersonating(c *reqCtx) {
 		_ = a.sessions.RevokeSession(sc.SID)
 	}
 	if a.creds != nil { // record the end of the impersonation for a complete accountability trail
-		a.creds.RecordAudit(0, sc.Email, c.ClientIP(), "admin", "impersonate_stop", true, sc.ImpersonatedBy)
+		a.creds.RecordAudit("", sc.Email, c.ClientIP(), "admin", "impersonate_stop", true, sc.ImpersonatedBy)
 	}
 	a.clearCookie(c, sessionCookie)
 	a.clearCookie(c, csrfCookie)
@@ -265,7 +264,7 @@ func (a *Authenticator) adminListUserSessions(c *reqCtx) {
 		c.JSON(http.StatusNotImplemented, H{"error": "session management not available"})
 		return
 	}
-	id, ok := paramUint(c, "id")
+	id, ok := paramID(c, "id")
 	if !ok {
 		return
 	}
@@ -291,7 +290,7 @@ func (a *Authenticator) adminRevokeUserSessions(c *reqCtx) {
 		c.JSON(http.StatusNotImplemented, H{"error": "session management not available"})
 		return
 	}
-	id, ok := paramUint(c, "id")
+	id, ok := paramID(c, "id")
 	if !ok {
 		return
 	}

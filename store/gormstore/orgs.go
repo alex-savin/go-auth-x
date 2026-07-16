@@ -2,7 +2,6 @@ package gormstore
 
 import (
 	"errors"
-	"strconv"
 	"strings"
 	"time"
 
@@ -43,20 +42,8 @@ func (s *Store) migrateOrgs() error {
 	return s.db.AutoMigrate(&Org{}, &OrgMembership{}, &OrgInvite{})
 }
 
-func orgIDString(id uint) string { return strconv.FormatUint(uint64(id), 10) }
-
-// parseOrgID maps the opaque ID back to the PK; a malformed/zero ID is an ID that cannot exist,
-// so callers treat !ok as ErrNoOrg.
-func parseOrgID(s string) (uint, bool) {
-	n, err := strconv.ParseUint(s, 10, 64)
-	if err != nil || n == 0 {
-		return 0, false
-	}
-	return uint(n), true
-}
-
 func toOrg(o *Org) authx.Org {
-	return authx.Org{ID: orgIDString(o.ID), Slug: o.Slug, Name: o.Name, CreatedAt: o.CreatedAt, UpdatedAt: o.UpdatedAt}
+	return authx.Org{ID: idStr(o.ID), Slug: o.Slug, Name: o.Name, CreatedAt: o.CreatedAt, UpdatedAt: o.UpdatedAt}
 }
 
 // --- orgs ---
@@ -71,7 +58,7 @@ func (s *Store) CreateOrg(slug, name string) (*authx.Org, error) {
 }
 
 func (s *Store) OrgByID(id string) (*authx.Org, error) {
-	n, ok := parseOrgID(id)
+	n, ok := parseID(id)
 	if !ok {
 		return nil, authx.ErrNoOrg
 	}
@@ -121,7 +108,7 @@ func orgExists(db *gorm.DB, n uint) (bool, error) {
 }
 
 func (s *Store) RenameOrg(id, name string) error {
-	n, ok := parseOrgID(id)
+	n, ok := parseID(id)
 	if !ok {
 		return authx.ErrNoOrg
 	}
@@ -139,7 +126,7 @@ func (s *Store) RenameOrg(id, name string) error {
 }
 
 func (s *Store) DeleteOrg(id string) error {
-	n, ok := parseOrgID(id)
+	n, ok := parseID(id)
 	if !ok {
 		return nil // idempotent: an ID that can't exist is already gone
 	}
@@ -168,10 +155,14 @@ func (s *Store) DeleteOrg(id string) error {
 
 // --- membership ---
 
-func (s *Store) SetOrgMember(orgID string, userID uint, role string) error {
-	n, ok := parseOrgID(orgID)
+func (s *Store) SetOrgMember(orgID, userID, role string) error {
+	n, ok := parseID(orgID)
 	if !ok {
 		return authx.ErrNoOrg
+	}
+	uid, ok := parseID(userID)
+	if !ok {
+		return authx.ErrNoUser // an ID that can't exist has no user to make a member
 	}
 	// Select-then-write rather than a composite-key ON CONFLICT (which does not resolve uniformly
 	// across drivers) or an UPDATE-RowsAffected probe (MySQL reports 0 for a same-value update,
@@ -186,48 +177,62 @@ func (s *Store) SetOrgMember(orgID string, userID uint, role string) error {
 		// Refuse a membership for a nonexistent user — a dangling row would be invisible in
 		// OrgMembers yet inherited (role and all) by the future user assigned this ID.
 		var users int64
-		if err := tx.Model(&User{}).Where("id = ?", userID).Count(&users).Error; err != nil {
+		if err := tx.Model(&User{}).Where("id = ?", uid).Count(&users).Error; err != nil {
 			return err
 		}
 		if users == 0 {
 			return authx.ErrNoUser
 		}
 		var m OrgMembership
-		err := tx.Where("org_id = ? AND user_id = ?", n, userID).First(&m).Error
+		err := tx.Where("org_id = ? AND user_id = ?", n, uid).First(&m).Error
 		switch {
 		case err == nil:
 			return tx.Model(&OrgMembership{}).Where("id = ?", m.ID).Update("role", role).Error
 		case errors.Is(err, gorm.ErrRecordNotFound):
-			return tx.Create(&OrgMembership{OrgID: n, UserID: userID, Role: role, CreatedAt: time.Now()}).Error
+			return tx.Create(&OrgMembership{OrgID: n, UserID: uid, Role: role, CreatedAt: time.Now()}).Error
 		default:
 			return err
 		}
 	})
 }
 
-func (s *Store) RemoveOrgMember(orgID string, userID uint) error {
-	n, ok := parseOrgID(orgID)
+func (s *Store) RemoveOrgMember(orgID, userID string) error {
+	n, ok := parseID(orgID)
 	if !ok {
 		return nil
+	}
+	uid, ok := parseID(userID)
+	if !ok {
+		return nil // an ID that can't exist is already not a member
 	}
 	// Org-group membership dies with org membership (the OrgStore contract): a former member must
 	// not linger in the org's group lists.
 	return s.db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Where("user_id = ? AND group_id IN (?)", userID,
+		if err := tx.Where("user_id = ? AND group_id IN (?)", uid,
 			tx.Model(&Group{}).Select("id").Where("org_id = ?", n)).Delete(&GroupMembership{}).Error; err != nil {
 			return err
 		}
-		return tx.Where("org_id = ? AND user_id = ?", n, userID).Delete(&OrgMembership{}).Error
+		return tx.Where("org_id = ? AND user_id = ?", n, uid).Delete(&OrgMembership{}).Error
 	})
 }
 
-func (s *Store) OrgRole(orgID string, userID uint) (string, error) {
-	n, ok := parseOrgID(orgID)
+func (s *Store) OrgRole(orgID, userID string) (string, error) {
+	n, ok := parseID(orgID)
 	if !ok {
 		return "", authx.ErrNoOrg
 	}
+	uid, ok := parseID(userID)
+	if !ok {
+		// A user ID that cannot exist is not a member; still distinguish a missing org.
+		if exists, cerr := orgExists(s.db, n); cerr != nil {
+			return "", cerr
+		} else if !exists {
+			return "", authx.ErrNoOrg
+		}
+		return "", authx.ErrNotOrgMember
+	}
 	var m OrgMembership
-	err := s.db.Where("org_id = ? AND user_id = ?", n, userID).First(&m).Error
+	err := s.db.Where("org_id = ? AND user_id = ?", n, uid).First(&m).Error
 	if err == nil {
 		return m.Role, nil
 	}
@@ -243,7 +248,11 @@ func (s *Store) OrgRole(orgID string, userID uint) (string, error) {
 	return "", authx.ErrNotOrgMember
 }
 
-func (s *Store) UserOrgs(userID uint) ([]authx.UserOrg, error) {
+func (s *Store) UserOrgs(userID string) ([]authx.UserOrg, error) {
+	uid, ok := parseID(userID)
+	if !ok {
+		return []authx.UserOrg{}, nil
+	}
 	var rows []struct {
 		ID        uint
 		Slug      string
@@ -255,14 +264,14 @@ func (s *Store) UserOrgs(userID uint) ([]authx.UserOrg, error) {
 	err := s.db.Table("authx_orgs").
 		Select("authx_orgs.id, authx_orgs.slug, authx_orgs.name, authx_orgs.created_at, authx_orgs.updated_at, m.role").
 		Joins("JOIN authx_org_members m ON m.org_id = authx_orgs.id").
-		Where("m.user_id = ?", userID).Order("authx_orgs.slug").Scan(&rows).Error
+		Where("m.user_id = ?", uid).Order("authx_orgs.slug").Scan(&rows).Error
 	if err != nil {
 		return nil, err
 	}
 	out := make([]authx.UserOrg, 0, len(rows))
 	for _, r := range rows {
 		out = append(out, authx.UserOrg{
-			Org:  authx.Org{ID: orgIDString(r.ID), Slug: r.Slug, Name: r.Name, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt},
+			Org:  authx.Org{ID: idStr(r.ID), Slug: r.Slug, Name: r.Name, CreatedAt: r.CreatedAt, UpdatedAt: r.UpdatedAt},
 			Role: r.Role,
 		})
 	}
@@ -270,7 +279,7 @@ func (s *Store) UserOrgs(userID uint) ([]authx.UserOrg, error) {
 }
 
 func (s *Store) OrgMembers(orgID string) ([]authx.OrgMember, error) {
-	n, ok := parseOrgID(orgID)
+	n, ok := parseID(orgID)
 	if !ok {
 		return nil, authx.ErrNoOrg
 	}
@@ -328,13 +337,13 @@ func (OrgInvite) TableName() string { return "authx_org_invites" }
 
 func toOrgInvite(i *OrgInvite) authx.OrgInvite {
 	return authx.OrgInvite{
-		ID: i.ID, OrgID: orgIDString(i.OrgID), Email: i.Email, Role: i.Role, InvitedBy: i.InvitedBy,
+		ID: idStr(i.ID), OrgID: idStr(i.OrgID), Email: i.Email, Role: i.Role, InvitedBy: i.InvitedBy,
 		ExpiresAt: i.ExpiresAt, CreatedAt: i.CreatedAt,
 	}
 }
 
 func (s *Store) CreateOrgInvite(orgID, email, role, invitedBy string, tokenHash []byte, expiresAt time.Time) (*authx.OrgInvite, error) {
-	n, ok := parseOrgID(orgID)
+	n, ok := parseID(orgID)
 	if !ok {
 		return nil, authx.ErrNoOrg
 	}
@@ -359,7 +368,7 @@ func (s *Store) CreateOrgInvite(orgID, email, role, invitedBy string, tokenHash 
 }
 
 func (s *Store) OrgInvites(orgID string) ([]authx.OrgInvite, error) {
-	n, ok := parseOrgID(orgID)
+	n, ok := parseID(orgID)
 	if !ok {
 		return nil, authx.ErrNoOrg
 	}
@@ -380,12 +389,16 @@ func (s *Store) OrgInvites(orgID string) ([]authx.OrgInvite, error) {
 	return out, nil
 }
 
-func (s *Store) RevokeOrgInvite(orgID string, id uint) error {
-	n, ok := parseOrgID(orgID)
+func (s *Store) RevokeOrgInvite(orgID, id string) error {
+	n, ok := parseID(orgID)
 	if !ok {
 		return nil
 	}
-	return s.db.Where("org_id = ? AND id = ?", n, id).Delete(&OrgInvite{}).Error
+	iid, ok := parseID(id)
+	if !ok {
+		return nil // idempotent: an ID that can't exist is already gone
+	}
+	return s.db.Where("org_id = ? AND id = ?", n, iid).Delete(&OrgInvite{}).Error
 }
 
 func (s *Store) PeekOrgInvite(tokenHash []byte) (*authx.OrgInvite, error) {
@@ -431,7 +444,7 @@ func (s *Store) ConsumeOrgInvite(tokenHash []byte) (*authx.OrgInvite, error) {
 // --- org-scoped groups (OrgDirectoryStore) ---
 
 func (s *Store) CreateOrgGroup(orgID, name, description string) (*authx.Group, error) {
-	n, ok := parseOrgID(orgID)
+	n, ok := parseID(orgID)
 	if !ok {
 		return nil, authx.ErrNoOrg
 	}
@@ -449,7 +462,7 @@ func (s *Store) CreateOrgGroup(orgID, name, description string) (*authx.Group, e
 }
 
 func (s *Store) OrgGroups(orgID string) ([]authx.Group, error) {
-	n, ok := parseOrgID(orgID)
+	n, ok := parseID(orgID)
 	if !ok {
 		return nil, authx.ErrNoOrg
 	}
@@ -465,7 +478,7 @@ func (s *Store) OrgGroups(orgID string) ([]authx.Group, error) {
 }
 
 func (s *Store) OrgGroupByName(orgID, name string) (*authx.Group, error) {
-	n, ok := parseOrgID(orgID)
+	n, ok := parseID(orgID)
 	if !ok {
 		return nil, authx.ErrNoOrg
 	}
@@ -480,9 +493,13 @@ func (s *Store) OrgGroupByName(orgID, name string) (*authx.Group, error) {
 	return &ag, nil
 }
 
-func (s *Store) OrgOfGroup(groupID uint) (string, error) {
+func (s *Store) OrgOfGroup(groupID string) (string, error) {
+	n, ok := parseID(groupID)
+	if !ok {
+		return "", authx.ErrNoGroup
+	}
 	var g Group
-	if err := s.db.Select("id, org_id").First(&g, groupID).Error; err != nil {
+	if err := s.db.Select("id, org_id").First(&g, n).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return "", authx.ErrNoGroup
 		}
@@ -491,18 +508,22 @@ func (s *Store) OrgOfGroup(groupID uint) (string, error) {
 	if g.OrgID == 0 {
 		return "", nil
 	}
-	return orgIDString(g.OrgID), nil
+	return idStr(g.OrgID), nil
 }
 
-func (s *Store) UserOrgGroups(orgID string, userID uint) ([]authx.Group, error) {
-	n, ok := parseOrgID(orgID)
+func (s *Store) UserOrgGroups(orgID, userID string) ([]authx.Group, error) {
+	n, ok := parseID(orgID)
 	if !ok {
 		return nil, authx.ErrNoOrg
+	}
+	uid, ok := parseID(userID)
+	if !ok {
+		return []authx.Group{}, nil
 	}
 	var rows []Group
 	err := s.db.Table("authx_groups").
 		Joins("JOIN authx_group_members m ON m.group_id = authx_groups.id").
-		Where("m.user_id = ? AND authx_groups.org_id = ?", userID, n).
+		Where("m.user_id = ? AND authx_groups.org_id = ?", uid, n).
 		Order("authx_groups.name").Scan(&rows).Error
 	if err != nil {
 		return nil, err
@@ -517,7 +538,7 @@ func (s *Store) UserOrgGroups(orgID string, userID uint) ([]authx.Group, error) 
 // --- org-bound API keys (OrgDirectoryStore) ---
 
 func (s *Store) CreateOrgAPIKey(orgID, name string, groups, scopes []string, prefix string, hash []byte, expiresAt *time.Time) (*authx.APIKeyInfo, error) {
-	n, ok := parseOrgID(orgID)
+	n, ok := parseID(orgID)
 	if !ok {
 		return nil, authx.ErrNoOrg
 	}
@@ -538,7 +559,7 @@ func (s *Store) CreateOrgAPIKey(orgID, name string, groups, scopes []string, pre
 }
 
 func (s *Store) ListOrgAPIKeys(orgID string) ([]authx.APIKeyInfo, error) {
-	n, ok := parseOrgID(orgID)
+	n, ok := parseID(orgID)
 	if !ok {
 		return nil, authx.ErrNoOrg
 	}

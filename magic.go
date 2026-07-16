@@ -33,7 +33,7 @@ func (a *Authenticator) AuthConfig(c *reqCtx) {
 }
 
 // sendVerifyEmail mints a verify-email token and emails the confirmation link (best-effort).
-func (a *Authenticator) sendVerifyEmail(userID uint, email string) {
+func (a *Authenticator) sendVerifyEmail(userID, email string) {
 	raw, hash := newToken()
 	if a.creds.CreateToken(purposeVerifyEmail, userID, email, hash, time.Now().Add(ttlVerifyEmail)) != nil {
 		return

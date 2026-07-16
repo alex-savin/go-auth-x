@@ -162,7 +162,7 @@ func (a *Authenticator) PasswordLogin(c *reqCtx) {
 	u, err := a.creds.UserByEmail(email)
 	if errors.Is(err, ErrNoUser) {
 		_ = bcrypt.CompareHashAndPassword(dummyHash, []byte(body.Password))
-		a.creds.RecordAudit(0, email, ip, "password", "login", false, "no_user")
+		a.creds.RecordAudit("", email, ip, "password", "login", false, "no_user")
 		invalid()
 		return
 	}

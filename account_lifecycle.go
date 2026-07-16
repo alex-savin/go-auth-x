@@ -15,7 +15,7 @@ const accountStepUpMaxAge = 10 * time.Minute
 // verify — a password or enabled TOTP. A purely passwordless (social/OIDC-only) user has neither, so a
 // step-up gate would lock them out permanently; it is not a net protection loss for them, since their
 // session already permits setting a password (i.e. self-service takeover) without a prior factor.
-func (a *Authenticator) hasReauthFactor(userID uint) bool {
+func (a *Authenticator) hasReauthFactor(userID string) bool {
 	if _, _, err := a.creds.PasswordHash(userID); err == nil {
 		return true
 	}

@@ -22,7 +22,7 @@ func (f *scopeFakeDir) APIKeyByHash(hash []byte) (*APIKeyInfo, error) {
 	}
 	return nil, ErrNoCredential
 }
-func (f *scopeFakeDir) TouchAPIKey(uint) error { return nil }
+func (f *scopeFakeDir) TouchAPIKey(string) error { return nil }
 
 // TestScopeDenyByDefaultUnit nails the pure KeyHasScope contract under adversarial inputs.
 func TestScopeDenyByDefaultUnit(t *testing.T) {
@@ -91,7 +91,7 @@ func TestScopelessKeyCannotActAsAdmin(t *testing.T) {
 
 	// --- Scopeless key: VALID key material, but zero scopes. Must NOT be admin anywhere. ---
 	rawEmpty, prefixEmpty, hashEmpty := generateAPIKey()
-	aEmpty := newAuth(APIKeyInfo{ID: 1, Prefix: prefixEmpty, Groups: []string{"team"}, Scopes: nil}, hashEmpty)
+	aEmpty := newAuth(APIKeyInfo{ID: "1", Prefix: prefixEmpty, Groups: []string{"team"}, Scopes: nil}, hashEmpty)
 
 	// Sanity: the key itself is valid (resolves), proving the denial is about SCOPE, not bad material.
 	if _, ok := aEmpty.ValidateAPIKey(rawEmpty); !ok {
@@ -112,14 +112,14 @@ func TestScopelessKeyCannotActAsAdmin(t *testing.T) {
 
 	// Also assert explicit-empty-slice (not just nil) is denied through the full integration path.
 	rawEmpty2, prefix2, hash2 := generateAPIKey()
-	aEmpty2 := newAuth(APIKeyInfo{ID: 2, Prefix: prefix2, Scopes: []string{}}, hash2)
+	aEmpty2 := newAuth(APIKeyInfo{ID: "2", Prefix: prefix2, Scopes: []string{}}, hash2)
 	if aEmpty2.ValidateAPIKeyScope(rawEmpty2, "admin") || aEmpty2.adminGuard(bearerCtx(aEmpty2, rawEmpty2)) {
 		t.Fatal("DEFECT: empty-slice-scoped key acted as admin")
 	}
 
 	// --- A key scoped ONLY to ["scim"] must not reach admin either. ---
 	rawScim, prefixScim, hashScim := generateAPIKey()
-	aScim := newAuth(APIKeyInfo{ID: 3, Prefix: prefixScim, Scopes: []string{"scim"}}, hashScim)
+	aScim := newAuth(APIKeyInfo{ID: "3", Prefix: prefixScim, Scopes: []string{"scim"}}, hashScim)
 	if !aScim.ValidateAPIKeyScope(rawScim, "scim") {
 		t.Fatal("scim-scoped key should pass ValidateAPIKeyScope('scim')")
 	}
@@ -132,7 +132,7 @@ func TestScopelessKeyCannotActAsAdmin(t *testing.T) {
 
 	// --- Positive control: ["*"] root key passes ValidateAPIKeyScope('admin') AND adminGuard. ---
 	rawStar, prefixStar, hashStar := generateAPIKey()
-	aStar := newAuth(APIKeyInfo{ID: 4, Prefix: prefixStar, Scopes: []string{"*"}}, hashStar)
+	aStar := newAuth(APIKeyInfo{ID: "4", Prefix: prefixStar, Scopes: []string{"*"}}, hashStar)
 	if !aStar.ValidateAPIKeyScope(rawStar, "admin") {
 		t.Fatal("['*'] key should pass ValidateAPIKeyScope('admin')")
 	}

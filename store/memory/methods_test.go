@@ -60,7 +60,7 @@ func TestSessionStore_RecordRevokeList(t *testing.T) {
 	s := New()
 	now := time.Now()
 	rec := func(sid string) authx.SessionRecord {
-		return authx.SessionRecord{SID: sid, Subject: "sub1", UserID: 1, CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
+		return authx.SessionRecord{SID: sid, Subject: "sub1", UserID: "1", CreatedAt: now, ExpiresAt: now.Add(time.Hour)}
 	}
 	_ = s.RecordSession(rec("sid1"))
 	_ = s.RecordSession(rec("sid2"))
@@ -229,7 +229,7 @@ func TestEmailOTP_SingleAttempt(t *testing.T) {
 
 func TestDeleteUser_Idempotent(t *testing.T) {
 	s := New()
-	if err := s.DeleteUser(999); err != nil {
+	if err := s.DeleteUser("999"); err != nil {
 		t.Fatalf("deleting an absent user must be a no-op, got %v", err)
 	}
 	u, _ := s.CreateLocalUser("a@x.com", "A")
@@ -254,7 +254,7 @@ func TestRenamePasskey_WrongUser(t *testing.T) {
 	u, _ := s.CreateLocalUser("a@x.com", "A")
 	_ = s.AddPasskey(u.ID, authx.Passkey{CredentialID: []byte("c"), Name: "keep"})
 	pks, _ := s.Passkeys(u.ID)
-	_ = s.RenamePasskey(u.ID+1, pks[0].ID, "hijack") // different user
+	_ = s.RenamePasskey("999", pks[0].ID, "hijack") // different user (u.ID is "1")
 	pks, _ = s.Passkeys(u.ID)
 	if pks[0].Name != "keep" {
 		t.Fatalf("another user must not rename this passkey, got %q", pks[0].Name)

@@ -263,7 +263,7 @@ func paginate[T any](all []T, startIndex, count int) ([]T, int) {
 }
 
 func (s *Server) toSCIMUser(u *authx.AuthUser) scimUser {
-	id := strconv.FormatUint(uint64(u.ID), 10)
+	id := u.ID
 	return scimUser{
 		Schemas: []string{schemaUser}, ID: id, UserName: u.Email,
 		Name:   &scimName{Formatted: u.Name},
@@ -277,10 +277,10 @@ func (s *Server) toSCIMUser(u *authx.AuthUser) scimUser {
 }
 
 func (s *Server) toSCIMGroup(g authx.Group, members []authx.AuthUser) scimGroup {
-	id := strconv.FormatUint(uint64(g.ID), 10)
+	id := g.ID
 	ms := make([]scimMember, 0, len(members))
 	for _, m := range members {
-		ms = append(ms, scimMember{Value: strconv.FormatUint(uint64(m.ID), 10), Display: m.Email})
+		ms = append(ms, scimMember{Value: m.ID, Display: m.Email})
 	}
 	return scimGroup{Schemas: []string{schemaGroup}, ID: id, DisplayName: g.Name, Members: ms, Meta: scimMeta{
 		ResourceType: "Group", Created: scimTime(g.CreatedAt),
@@ -289,10 +289,9 @@ func (s *Server) toSCIMGroup(g authx.Group, members []authx.AuthUser) scimGroup 
 	}}
 }
 
-func pathID(r *http.Request) uint {
-	n, _ := strconv.ParseUint(r.PathValue("id"), 10, 64)
-	return uint(n)
-}
+// pathID returns the opaque {id} path segment verbatim — the store owns its key format, and the
+// SCIM server never parses it (empty is simply a not-found lookup).
+func pathID(r *http.Request) string { return r.PathValue("id") }
 
 // --- Users ---
 
@@ -577,8 +576,8 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, m := range in.Members {
-		if uid, e := strconv.ParseUint(m.Value, 10, 64); e == nil {
-			_ = s.dir.AddUserToGroup(uint(uid), g.ID)
+		if m.Value != "" {
+			_ = s.dir.AddUserToGroup(m.Value, g.ID)
 		}
 	}
 	members, _ := s.dir.GroupMembers(g.ID)
@@ -590,7 +589,7 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
 }
 
 // groupByID finds a group + its members by id (the DirectoryStore has no GroupByID lookup).
-func (s *Server) groupByID(id uint) (authx.Group, []authx.AuthUser, bool) {
+func (s *Server) groupByID(id string) (authx.Group, []authx.AuthUser, bool) {
 	gs, _ := s.dir.Groups()
 	for _, g := range gs {
 		if g.ID == id {
@@ -638,10 +637,10 @@ func (s *Server) putGroup(w http.ResponseWriter, r *http.Request) {
 		scimError(w, http.StatusBadRequest, "invalid Group")
 		return
 	}
-	want := map[uint]bool{}
+	want := map[string]bool{}
 	for _, m := range in.Members {
-		if uid, e := strconv.ParseUint(m.Value, 10, 64); e == nil {
-			want[uint(uid)] = true
+		if m.Value != "" {
+			want[m.Value] = true
 		}
 	}
 	current, _ := s.dir.GroupMembers(id)
@@ -702,7 +701,7 @@ func (s *Server) patchGroup(w http.ResponseWriter, r *http.Request) {
 			}
 		case "replace":
 			// Replace the ENTIRE membership set with the provided one (not merely additive).
-			want := map[uint]bool{}
+			want := map[string]bool{}
 			for _, uid := range memberValues(op.Value) {
 				want[uid] = true
 			}
@@ -926,30 +925,30 @@ func activeFromOp(path string, value json.RawMessage) (bool, bool) {
 	return false, false
 }
 
-// memberIDFromValuePath extracts the user id from a valuePath like `members[value eq "42"]`
-// (the Okta/Azure member-removal form). Returns false if it can't be parsed.
-func memberIDFromValuePath(path string) (uint, bool) {
+// memberIDFromValuePath extracts the (opaque) user id from a valuePath like `members[value eq "42"]`
+// (the Okta/Azure member-removal form). Returns false if no quoted value is present.
+func memberIDFromValuePath(path string) (string, bool) {
 	l, r := strings.Index(path, "["), strings.LastIndex(path, "]")
 	if l < 0 || r <= l {
-		return 0, false
+		return "", false
 	}
 	inner := path[l+1 : r] // e.g. value eq "42"
 	q1 := strings.Index(inner, `"`)
 	if q1 < 0 {
-		return 0, false
+		return "", false
 	}
 	q2 := strings.Index(inner[q1+1:], `"`)
 	if q2 < 0 {
-		return 0, false
+		return "", false
 	}
-	if uid, err := strconv.ParseUint(inner[q1+1:q1+1+q2], 10, 64); err == nil {
-		return uint(uid), true
+	if v := inner[q1+1 : q1+1+q2]; v != "" {
+		return v, true
 	}
-	return 0, false
+	return "", false
 }
 
-// memberValues extracts user ids from a members patch value ([{value:"1"}] or {value:"1"}).
-func memberValues(value json.RawMessage) []uint {
+// memberValues extracts the (opaque) user ids from a members patch value ([{value:"1"}] or {value:"1"}).
+func memberValues(value json.RawMessage) []string {
 	var arr []scimMember
 	if json.Unmarshal(value, &arr) == nil && len(arr) > 0 {
 		return idsOf(arr)
@@ -961,11 +960,11 @@ func memberValues(value json.RawMessage) []uint {
 	return nil
 }
 
-func idsOf(ms []scimMember) []uint {
-	var out []uint
+func idsOf(ms []scimMember) []string {
+	var out []string
 	for _, m := range ms {
-		if id, err := strconv.ParseUint(m.Value, 10, 64); err == nil {
-			out = append(out, uint(id))
+		if m.Value != "" {
+			out = append(out, m.Value)
 		}
 	}
 	return out

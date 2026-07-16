@@ -21,12 +21,12 @@ func (f *fakeDir) APIKeyByHash(hash []byte) (*APIKeyInfo, error) {
 	}
 	return nil, ErrNoCredential
 }
-func (f *fakeDir) TouchAPIKey(uint) error { return nil }
+func (f *fakeDir) TouchAPIKey(string) error { return nil }
 
 func TestAdminGuardScopesAndGroups(t *testing.T) {
 	raw, prefix, hash := generateAPIKey()
 	a := &Authenticator{cfg: Config{SessionSecret: []byte("0123456789abcdef0123456789abcdef"), OwnerEmail: "owner@x.com"}}
-	a.dir = &fakeDir{hash: string(hash), info: APIKeyInfo{ID: 1, Prefix: prefix, Groups: []string{"team"}, Scopes: []string{"admin"}}}
+	a.dir = &fakeDir{hash: string(hash), info: APIKeyInfo{ID: "1", Prefix: prefix, Groups: []string{"team"}, Scopes: []string{"admin"}}}
 
 	bearer := func(key string) *reqCtx {
 		req := httptest.NewRequest(http.MethodGet, "/auth/admin/groups", nil)

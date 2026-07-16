@@ -5,6 +5,16 @@ Direction and planned work for the library. Authoritative usage/feature docs liv
 
 ## Shipped
 
+### Opaque entity IDs (uuid-friendly stores) — [#2](https://github.com/alex-savin/go-auth-x/issues/2) · _unreleased_ · **BREAKING**
+
+Every public entity ID is now an opaque `string` across the store interfaces — `AuthUser.ID`,
+`Group.ID`, `APIKeyInfo.ID`, `Passkey.ID`, `OrgInvite.ID`, `TokenClaim.UserID`,
+`SessionRecord.UserID`, and every `uint` id parameter/return on the six store interfaces. The auth
+package never parses or does arithmetic on an ID, so a uuid/ULID/KSUID-keyed store passes its IDs
+straight through; the reference GORM store keeps its `uint` PKs and converts at its boundary (**no
+DB migration**), and SCIM passes member values / the `{id}` path segment through verbatim. Custom
+store implementers update their signatures to the `string` id types (see CHANGELOG migration notes).
+
 ### v0.7.0 — organizations: org-scoped resources · _unreleased ([PR #8](https://github.com/alex-savin/go-auth-x/pull/8))_ · additive
 
 - **First-class invite records** (`OrgInvite`) — pending invites are listable + revocable; org + role
@@ -109,16 +119,6 @@ Direction and planned work for the library. Authoritative usage/feature docs liv
   account-linking + squatter-reclaim rule; `SESSION_SECRET` ≥ 32-byte enforcement.
 
 ## Planned
-
-### Opaque entity IDs (uuid-friendly stores) — [#2](https://github.com/alex-savin/go-auth-x/issues/2) · breaking · deferred
-
-Make the public user/group/API-key ID type an opaque `string` across the store interfaces so
-uuid/ULID/KSUID consumers pass their IDs straight through (the reference GORM store keeps its `uint`
-PKs and converts at its boundary — no DB migration). Verified safe (the IDs are never used
-arithmetically). **Deferred past v0.2.0** — no current consumer needs it, and it's cheapest to land as
-a pre-v1.0 breaking change if/when a uuid-keyed consumer adopts the library or the API is frozen for 1.0.
-**Partially landed:** the org surface (`Org.ID`, and `OrgID` on groups/API keys/invites) already uses
-opaque `string` IDs, so this now covers only the pre-existing `uint` user / group / API-key ID type.
 
 ### Organizations — per-org SSO · deferred
 

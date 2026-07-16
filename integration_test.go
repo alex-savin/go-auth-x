@@ -300,7 +300,7 @@ func TestOAuthUnlinkAndPasskeyRename_HTTP(t *testing.T) {
 	}
 	// Rename the passkey.
 	pks, _ := s.Passkeys(u.ID)
-	if w := c.do("POST", "/auth/api/passkeys/"+itoa(pks[0].ID), map[string]any{"name": "new"}); w.Code != 200 {
+	if w := c.do("POST", "/auth/api/passkeys/"+pks[0].ID, map[string]any{"name": "new"}); w.Code != 200 {
 		t.Fatalf("rename = %d: %s", w.Code, w.Body.String())
 	}
 	pks, _ = s.Passkeys(u.ID)
@@ -356,7 +356,7 @@ func TestAdminCreateBanAndLoginGate(t *testing.T) {
 
 	// Ban the member; a ban blocks a fresh login.
 	mu, _ := s.UserByEmail("member@x.com")
-	if w := admin.do("POST", "/auth/admin/users/"+itoa(mu.ID)+"/ban", map[string]any{"banned": true, "reason": "spam"}); w.Code != 200 {
+	if w := admin.do("POST", "/auth/admin/users/"+mu.ID+"/ban", map[string]any{"banned": true, "reason": "spam"}); w.Code != 200 {
 		t.Fatalf("ban = %d: %s", w.Code, w.Body.String())
 	}
 	banned := newClient(t, a)
@@ -376,7 +376,7 @@ func TestAdminImpersonation(t *testing.T) {
 	admin := newClient(t, a)
 	admin.login("owner@example.com", "owner-horse-9!")
 
-	if w := admin.do("POST", "/auth/admin/users/"+itoa(target.ID)+"/impersonate", nil); w.Code != 200 {
+	if w := admin.do("POST", "/auth/admin/users/"+target.ID+"/impersonate", nil); w.Code != 200 {
 		t.Fatalf("impersonate = %d: %s", w.Code, w.Body.String())
 	}
 	me := decode(t, admin.do("GET", "/auth/me", nil))
@@ -500,7 +500,7 @@ func TestAdminSetPasswordThenLogin(t *testing.T) {
 	admin := newClient(t, a)
 	admin.login("owner@example.com", "owner-horse-9!")
 
-	if w := admin.do("POST", "/auth/admin/users/"+itoa(m.ID)+"/password", map[string]any{"password": "brand-new-passphrase-2"}); w.Code != 200 {
+	if w := admin.do("POST", "/auth/admin/users/"+m.ID+"/password", map[string]any{"password": "brand-new-passphrase-2"}); w.Code != 200 {
 		t.Fatalf("admin set-password = %d: %s", w.Code, w.Body.String())
 	}
 	newClient(t, a).login("m@x.com", "brand-new-passphrase-2")
@@ -512,7 +512,7 @@ func TestAdminHardDelete(t *testing.T) {
 	m := seedUser(t, s, "m@x.com", "", true)
 	admin := newClient(t, a)
 	admin.login("owner@example.com", "owner-horse-9!")
-	if w := admin.do("DELETE", "/auth/admin/users/"+itoa(m.ID), nil); w.Code != 200 {
+	if w := admin.do("DELETE", "/auth/admin/users/"+m.ID, nil); w.Code != 200 {
 		t.Fatalf("admin delete = %d: %s", w.Code, w.Body.String())
 	}
 	if _, err := s.UserBySub(m.Sub); err != authx.ErrNoUser {
@@ -529,11 +529,11 @@ func TestAdminListAndRevokeUserSessions(t *testing.T) {
 	admin := newClient(t, a)
 	admin.login("owner@example.com", "owner-horse-9!")
 
-	list := decode(t, admin.do("GET", "/auth/admin/users/"+itoa(m.ID)+"/sessions", nil))
+	list := decode(t, admin.do("GET", "/auth/admin/users/"+m.ID+"/sessions", nil))
 	if sess, _ := list["sessions"].([]any); len(sess) != 1 {
 		t.Fatalf("admin must see 1 member session, got %v", list["sessions"])
 	}
-	if w := admin.do("POST", "/auth/admin/users/"+itoa(m.ID)+"/sessions/revoke", nil); w.Code != 200 {
+	if w := admin.do("POST", "/auth/admin/users/"+m.ID+"/sessions/revoke", nil); w.Code != 200 {
 		t.Fatalf("admin revoke = %d", w.Code)
 	}
 	if me := decode(t, member.do("GET", "/auth/me", nil)); me["authenticated"] != false {
@@ -681,19 +681,4 @@ func TestDeleteAccount_PasswordlessSkipsStepUp(t *testing.T) {
 	if _, err := s.UserBySub(u.Sub); err != authx.ErrNoUser {
 		t.Fatal("user must be gone")
 	}
-}
-
-// itoa avoids importing strconv just for the id path segments.
-func itoa(u uint) string {
-	if u == 0 {
-		return "0"
-	}
-	var b [20]byte
-	i := len(b)
-	for u > 0 {
-		i--
-		b[i] = byte('0' + u%10)
-		u /= 10
-	}
-	return string(b[i:])
 }

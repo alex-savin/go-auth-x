@@ -64,14 +64,14 @@ func TestOrgs_Conformance(t *testing.T) {
 		t.Fatalf("upsert must update the role, got %q", role)
 	}
 	// A membership for a nonexistent user is refused (no dangling rows for future IDs).
-	if err := store.SetOrgMember(o.ID, 4242, authx.OrgRoleOwner); !errors.Is(err, authx.ErrNoUser) {
+	if err := store.SetOrgMember(o.ID, "4242", authx.OrgRoleOwner); !errors.Is(err, authx.ErrNoUser) {
 		t.Fatalf("membership for a missing user must be ErrNoUser, got %v", err)
 	}
 	// A same-name rename is not misread as ErrNoOrg (explicit existence probe, not RowsAffected).
 	if err := store.RenameOrg(o.ID, "Acme Inc"); err != nil {
 		t.Fatalf("same-name rename must succeed, got %v", err)
 	}
-	if _, err := store.OrgRole(o.ID, 4242); !errors.Is(err, authx.ErrNotOrgMember) {
+	if _, err := store.OrgRole(o.ID, "4242"); !errors.Is(err, authx.ErrNotOrgMember) {
 		t.Fatalf("non-member must be ErrNotOrgMember, got %v", err)
 	}
 	if _, err := store.OrgRole("999", u.ID); !errors.Is(err, authx.ErrNoOrg) {

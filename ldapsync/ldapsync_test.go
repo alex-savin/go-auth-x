@@ -32,14 +32,14 @@ func TestNormalizeDN(t *testing.T) {
 }
 
 func TestResolveMember(t *testing.T) {
-	byDN := map[string]uint{normalizeDN("cn=alice,dc=x"): 1}
-	byUID := map[string]uint{"bob": 2}
+	byDN := map[string]string{normalizeDN("cn=alice,dc=x"): "1"}
+	byUID := map[string]string{"bob": "2"}
 
-	if id, ok := resolveMember("CN=Alice, DC=X", byDN, byUID); !ok || id != 1 {
-		t.Fatalf("a DN member must resolve via byDN (normalized), got id=%d ok=%v", id, ok)
+	if id, ok := resolveMember("CN=Alice, DC=X", byDN, byUID); !ok || id != "1" {
+		t.Fatalf("a DN member must resolve via byDN (normalized), got id=%s ok=%v", id, ok)
 	}
-	if id, ok := resolveMember("bob", byDN, byUID); !ok || id != 2 {
-		t.Fatalf("a bare uid (posixGroup) must resolve via byUID, got id=%d ok=%v", id, ok)
+	if id, ok := resolveMember("bob", byDN, byUID); !ok || id != "2" {
+		t.Fatalf("a bare uid (posixGroup) must resolve via byUID, got id=%s ok=%v", id, ok)
 	}
 	if _, ok := resolveMember("cn=ghost,dc=x", byDN, byUID); ok {
 		t.Fatal("an unknown DN must not resolve")

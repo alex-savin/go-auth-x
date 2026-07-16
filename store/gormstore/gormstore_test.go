@@ -121,13 +121,13 @@ func TestPasskeys(t *testing.T) {
 	}
 	// Rename (and reject a wrong-user rename).
 	_ = s.RenamePasskey(u.ID, pks[0].ID, "desktop")
-	_ = s.RenamePasskey(u.ID+999, pks[0].ID, "hijack")
+	_ = s.RenamePasskey("999999", pks[0].ID, "hijack")
 	pks, _ = s.Passkeys(u.ID)
 	if pks[0].Name != "desktop" {
 		t.Fatalf("rename wrong: %q", pks[0].Name)
 	}
 	// Remove (wrong user is a no-op, right user deletes).
-	_ = s.RemovePasskey(u.ID+999, pks[0].ID)
+	_ = s.RemovePasskey("999999", pks[0].ID)
 	if pks2, _ := s.Passkeys(u.ID); len(pks2) != 1 {
 		t.Fatal("wrong-user remove must be a no-op")
 	}
@@ -268,7 +268,7 @@ func TestDeleteUser_CascadeAndAuditAnonymization(t *testing.T) {
 	}
 }
 
-func subOf(t *testing.T, s *Store, id uint) string {
+func subOf(t *testing.T, s *Store, id string) string {
 	t.Helper()
 	u, err := s.UserByID(id)
 	if err != nil {
@@ -415,7 +415,7 @@ func TestSessionStore(t *testing.T) {
 	s := newStore(t)
 	now := time.Now()
 	mk := func(sid string, exp time.Duration) authx.SessionRecord {
-		return authx.SessionRecord{SID: sid, Subject: "sub1", UserID: 1, CreatedAt: now, ExpiresAt: now.Add(exp)}
+		return authx.SessionRecord{SID: sid, Subject: "sub1", UserID: "1", CreatedAt: now, ExpiresAt: now.Add(exp)}
 	}
 	_ = s.RecordSession(mk("sid1", time.Hour))
 	_ = s.RecordSession(mk("sid2", time.Hour))
