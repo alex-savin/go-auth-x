@@ -642,7 +642,18 @@ go-auth-x/
 
 See **[ROADMAP.md](./ROADMAP.md)** for the full list and **[CHANGELOG.md](./CHANGELOG.md)** for details.
 
-- **v0.5.0** (latest): **self-service, session management, admin, and hardening** — HIBP breach check,
+- **v0.8.0** (latest): **opaque entity IDs** (issue #2) — every public entity ID is now an opaque
+  `string` across the store interfaces, so uuid/ULID/KSUID-keyed stores pass their IDs straight
+  through. **Breaking**, but no DB migration and no change for consumers of the reference stores (they
+  keep `uint` PKs and convert at the boundary); custom store implementers update signatures to the
+  `string` id types.
+- **v0.7.0**: **organizations — org-scoped resources** — first-class listable/revocable invite
+  records, per-org **groups** + **API keys** (via the optional `OrgDirectoryStore`), and **per-customer
+  SCIM** (`NewOrgScopedDirectory`) with a namespaced, no-cross-tenant-rebind trust boundary.
+- **v0.6.0**: **organizations — core** — an optional `OrgStore` (users stay global; per-org roles),
+  an active-org session claim + `POST /auth/org/switch`, `RequireOrgHTTP` (live re-verification),
+  email invites, self-service member management (last-owner guard), and admin org verbs. Additive.
+- **v0.5.0**: **self-service, session management, admin, and hardening** — HIBP breach check,
   `SESSION_SECRET` rotation, email OTP, an optional `SessionStore` (server-side revocation / device
   list / sign-out-everywhere), self-service delete-account + verified change-email + OAuth unlink +
   passkey rename, and admin verbs (create / set-password / ban / hard-delete / impersonate). Plus two
@@ -664,9 +675,6 @@ See **[ROADMAP.md](./ROADMAP.md)** for the full list and **[CHANGELOG.md](./CHAN
 - **v0.1.x**: pure **net/http**; OIDC, password, passkey (+ QR), magic-link, Google/GitHub social;
   GORM + in-memory stores; SMTP mailer; groups + per-group access control; API keys with
   **deny-by-default scopes** + admin REST API; LDAP sync; SCIM 2.0; the **squatter-reclaim** path.
-- **Landed (unreleased, breaking)**: **opaque entity IDs** — every public id is now an opaque
-  `string`, so uuid/ULID/KSUID-keyed stores pass their IDs straight through (no DB migration for the
-  reference GORM store).
 
 ---
 

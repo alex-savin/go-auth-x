@@ -5,7 +5,7 @@ Direction and planned work for the library. Authoritative usage/feature docs liv
 
 ## Shipped
 
-### Opaque entity IDs (uuid-friendly stores) — [#2](https://github.com/alex-savin/go-auth-x/issues/2) · _unreleased_ · **BREAKING**
+### v0.8.0 — opaque entity IDs (uuid-friendly stores) · [#2](https://github.com/alex-savin/go-auth-x/issues/2) · **BREAKING**
 
 Every public entity ID is now an opaque `string` across the store interfaces — `AuthUser.ID`,
 `Group.ID`, `APIKeyInfo.ID`, `Passkey.ID`, `OrgInvite.ID`, `TokenClaim.UserID`,
@@ -15,7 +15,7 @@ straight through; the reference GORM store keeps its `uint` PKs and converts at 
 DB migration**), and SCIM passes member values / the `{id}` path segment through verbatim. Custom
 store implementers update their signatures to the `string` id types (see CHANGELOG migration notes).
 
-### v0.7.0 — organizations: org-scoped resources · _unreleased ([PR #8](https://github.com/alex-savin/go-auth-x/pull/8))_ · additive
+### v0.7.0 — organizations: org-scoped resources · additive
 
 - **First-class invite records** (`OrgInvite`) — pending invites are listable + revocable; org + role
   bind to the record (nothing tamperable in the accept URL), and re-inviting replaces the pending one.
@@ -32,7 +32,7 @@ store implementers update their signatures to the `string` id types (see CHANGEL
 - **Review-hardened** — closed a cross-tenant SCIM email-rebind takeover, the org-key global-gate gap,
   and the owner-deprovision / out-of-scope-group SCIM status codes.
 
-### v0.6.0 — organizations: core · _unreleased ([PR #8](https://github.com/alex-savin/go-auth-x/pull/8))_ · additive
+### v0.6.0 — organizations: core · additive
 
 - **`OrgStore`** (fourth optional capability store, `SetOrgStore`; nil = off, zero behavior change) —
   `Org` + per-org role memberships (reserved `owner`/`admin`/`member`, app-extensible). **Users stay

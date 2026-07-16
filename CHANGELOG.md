@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-07-16
+
 ### Changed — BREAKING
 
 - **Public entity IDs are now opaque `string`s** across every store interface (issue #2). `AuthUser.ID`,
@@ -24,38 +26,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     documented miss (`ErrNoUser` / `ErrNoGroup` / a no-op delete) rather than coercing it to a real
     key. SCIM member `value`s and the `{id}` path segment are now passed through verbatim.
 
+## [0.7.0] — 2026-07-16
+
+Org-scoped resources — the enterprise slice on top of the v0.6 org core, unlocking per-customer SCIM.
+
 ### Added
 
-- **Organizations (tenant/org layer).** A fourth optional capability store, `OrgStore` (wire with
-  `SetOrgStore`; nil = feature off, zero behavior change), implemented by both reference stores:
-  - **Model** — `Org` + per-org role memberships (reserved `owner`/`admin`/`member`, app-extensible).
-    Users stay global (one account, many orgs); email uniqueness and the safe account-linking rule are
-    untouched. Org IDs are **opaque strings** from day one (roadmap #2 shape) — the reference stores
-    keep numeric PKs and convert at the boundary.
-  - **Sessions** — additive `org`/`orgRole` claims carry the ACTIVE org only (a sole membership is
-    auto-activated at login; several = none until the app switches). `POST /auth/org/switch` re-mints
-    the cookie after a live membership check, preserving SID and remaining lifetime. `/auth/me` gains
-    `org`, `orgRole` (live), and `orgs`; `/auth/config` reports `orgs`.
-  - **`RequireOrgHTTP(roles...)`** middleware — re-verifies membership/role against the store per
-    request, so an org removal or demotion takes effect immediately instead of at cookie expiry.
-  - **Email invites — first-class records** (`OrgInvite`): `POST /auth/org/invites` (owner/admin;
-    only owners may invite owners) emails a single-use, hashed-at-rest token; the org + role bind
-    to the stored RECORD, so nothing in the accept URL can be tampered with. Pending invites are
-    **listable** (`GET /auth/org/invites`) and **revocable** (`DELETE /auth/org/invites/{id}`);
-    re-inviting an address replaces its pending invite. Accepting requires a session whose email
-    MATCHES the invited address; the wrong account can't burn the token (peek-before-consume), and
-    redemption marks the email verified.
-  - **Self-service member management** — `GET/POST/DELETE /auth/org/members[/{userId}]` with a
-    serialized last-owner guard (can't demote/remove the final owner) and self-removal (leave).
-  - **Admin verbs** — org CRUD + membership under `/auth/admin/orgs` (admin API deliberately bypasses
-    the last-owner guard as the recovery path).
-  - **GDPR parity** — `DeleteUser` cascades org memberships (and pending invites to the erased
-    email) in both reference stores; `DeleteOrg` cascades its memberships, groups, invites, and
-    org-bound API keys.
-
-- **Org-scoped resources (the v0.7 phase)** — groups and API keys can now be BOUND to one org via
-  the optional `OrgDirectoryStore` upgrade interface (detected by type assertion; custom
-  `DirectoryStore`s keep compiling unchanged, the features just 501), unlocking per-customer SCIM:
+- **First-class invite records** — org invites became listable + revocable `OrgInvite` records:
+  `GET /auth/org/invites` lists pending invites and `DELETE /auth/org/invites/{id}` revokes one;
+  re-inviting an address replaces its pending invite. The org + role bind to the stored RECORD (not
+  the URL), so nothing in the accept link can be tampered with; a failed invitation email leaves the
+  valid, listable record in place to resend/revoke rather than deleting it.
+- **Org-scoped groups and API keys** via the optional `OrgDirectoryStore` upgrade interface (detected
+  by type assertion; a `DirectoryStore` that doesn't implement it keeps compiling — the features just
+  501):
   - **Org-scoped groups** — `Group.OrgID` ("" = global); names unique per (org, name), so two orgs
     both own "engineering". The GLOBAL verbs (`Groups`/`GroupByName`) never see them, and they
     never ride in the session cookie (names collide across orgs) — **`RequireOrgGroupsHTTP`** gates
@@ -63,31 +47,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     member out of the org's groups. Admin CRUD under `/auth/admin/orgs/{id}/groups`.
   - **Org-bound API keys** — `APIKeyInfo.OrgID`; minted via the admin API (`POST /auth/admin/apikeys`
     with `"org"`). An org-bound key is refused by EVERY global surface — `adminGuard` (even with the
-    `admin` scope), `ValidateAPIKeyScope`, group merging — and only satisfies the new
-    **`ValidateOrgAPIKeyScope(raw, scope, orgID)`** for its own org.
-  - **Org-scoped SCIM** — **`NewOrgScopedDirectory(dir, orgs, orgID)`** wraps a `DirectoryStore` in
-    a view confined to one org, mountable per customer with `scim.NewServer` + an org-bound key.
-    The trust boundary is enforced in the view: provisioned subjects are **namespaced per org**
-    (two customers' "jdoe" are two accounts), an existing outside account's email is **never
-    adopted or rebound** (`ErrEmailConflict` → SCIM 409 — existing users join via the consent-based
-    invite flow), deprovision (`active=false`/DELETE) **removes the user from the org** — never the
-    global account — and org owners can't be deprovisioned by a customer IdP.
-  - **SCIM server hardening** — `PATCH`/`PUT /Users/{id}` no longer dereference a post-update
-    refetch miss (an org-scoped deprovision removes the user from view mid-request); an
-    owner-deprovision refusal renders as **403** (not a silent 200 that fakes offboarding, nor a
-    retryable 500), and group `PUT`/`PATCH`/`DELETE` on an out-of-scope id returns **404** instead
-    of fabricating a 200 or 500.
-  - **Review hardening** (from an adversarial pass over the slice):
-    - The org-scoped view **never rebinds the global identity** of an account its org's IdP didn't
-      provision — a customer IdP can only create/update accounts under its own subject namespace,
-      closing a cross-tenant account-takeover (a SCIM `PUT` rewriting an invited member's login
-      email with no mailbox proof).
-    - **Org-bound keys are now refused at `GateHTTP` and the empty-groups `RequireGroupsHTTP`** too,
-      matching the "refused by every global surface" contract (they previously authenticated a
-      global request gate).
-    - A failed invitation email **leaves the (valid, listable) invite in place** to resend/revoke
-      rather than deleting it — re-inviting had already replaced any prior invite, so the rollback
-      could strand the invitee.
+    `admin` scope), `ValidateAPIKeyScope`, group merging, `GateHTTP`, and the empty-groups
+    `RequireGroupsHTTP` — and only satisfies the new **`ValidateOrgAPIKeyScope(raw, scope, orgID)`**
+    for its own org.
+- **Org-scoped SCIM** — **`NewOrgScopedDirectory(dir, orgs, orgID)`** wraps a `DirectoryStore` in a
+  view confined to one org, mountable per customer with `scim.NewServer` + an org-bound key. The
+  trust boundary is enforced in the view: provisioned subjects are **namespaced per org** (two
+  customers' "jdoe" are two accounts), an existing outside account's email/identity is **never
+  adopted or rebound** (`ErrEmailConflict` → SCIM 409 — existing users join via the consent-based
+  invite flow), deprovision (`active=false`/DELETE) **removes the user from the org** — never the
+  global account — and org owners can't be deprovisioned by a customer IdP.
+
+### Fixed / Security
+
+- **SCIM server hardening** — `PATCH`/`PUT /Users/{id}` no longer dereference a post-update refetch
+  miss (an org-scoped deprovision removes the user from view mid-request); an owner-deprovision
+  refusal renders as **403** (not a silent 200 that fakes offboarding, nor a retryable 500), and
+  group `PUT`/`PATCH`/`DELETE` on an out-of-scope id returns **404** instead of fabricating a 200/500.
+- **Cross-tenant takeover closed** (adversarial review) — the org-scoped view never rebinds the
+  global identity of an account its org's IdP didn't provision, so a customer IdP's SCIM `PUT` can no
+  longer rewrite an invited member's login email (verified, no mailbox proof).
+
+## [0.6.0] — 2026-07-16
+
+Organizations (tenant/org layer) — a first-class org concept for B2B-shaped apps.
+
+### Added
+
+- **Organizations.** A fourth optional capability store, `OrgStore` (wire with `SetOrgStore`; nil =
+  feature off, zero behavior change), implemented by both reference stores:
+  - **Model** — `Org` + per-org role memberships (reserved `owner`/`admin`/`member`, app-extensible).
+    Users stay global (one account, many orgs); email uniqueness and the safe account-linking rule are
+    untouched. Org IDs are **opaque strings** — the reference stores keep numeric PKs and convert at
+    the boundary.
+  - **Sessions** — additive `org`/`orgRole` claims carry the ACTIVE org only (a sole membership is
+    auto-activated at login; several = none until the app switches). `POST /auth/org/switch` re-mints
+    the cookie after a live membership check, preserving SID and remaining lifetime. `/auth/me` gains
+    `org`, `orgRole` (live), and `orgs`; `/auth/config` reports `orgs`.
+  - **`RequireOrgHTTP(roles...)`** middleware — re-verifies membership/role against the store per
+    request, so an org removal or demotion takes effect immediately instead of at cookie expiry.
+  - **Email invites** — `POST /auth/org/invites` (owner/admin; only owners may invite owners) emails a
+    single-use, hashed-at-rest token bound to org + role, redeemed through the login funnel. Accepting
+    requires a session whose email MATCHES the invited address; the wrong account can't burn the token
+    (peek-before-consume), and redemption marks the email verified. (Invites become listable/revocable
+    first-class records in v0.7.0.)
+  - **Self-service member management** — `GET/POST/DELETE /auth/org/members[/{userId}]` with a
+    serialized last-owner guard (can't demote/remove the final owner) and self-removal (leave).
+  - **Admin verbs** — org CRUD + membership under `/auth/admin/orgs` (admin API deliberately bypasses
+    the last-owner guard as the recovery path).
+  - **GDPR parity** — `DeleteUser` cascades org memberships (and pending invites to the erased email);
+    `DeleteOrg` cascades its memberships.
 
 ## [0.5.1] — 2026-07-15
 
