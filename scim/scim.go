@@ -432,7 +432,10 @@ func (s *Server) patchUser(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, op := range p.Operations {
 		if active, ok := activeFromOp(op.Path, op.Value); ok {
-			_ = s.dir.SetUserDisabled(id, !active)
+			if derr := s.dir.SetUserDisabled(id, !active); errors.Is(derr, authx.ErrOrgOwnerDeprovision) {
+				scimError(w, http.StatusForbidden, derr.Error())
+				return
+			}
 		}
 	}
 	u, uerr := s.dir.UserByID(id)
@@ -483,7 +486,10 @@ func (s *Server) putUser(w http.ResponseWriter, r *http.Request) {
 		scimInternal(w, "putUser", uerr)
 		return
 	}
-	_ = s.dir.SetUserDisabled(cur.ID, !activeWithDefault(raw)) // absent → true
+	if derr := s.dir.SetUserDisabled(cur.ID, !activeWithDefault(raw)); errors.Is(derr, authx.ErrOrgOwnerDeprovision) {
+		scimError(w, http.StatusForbidden, derr.Error())
+		return
+	}
 	u, uerr := s.dir.UserByID(cur.ID)
 	if uerr != nil {
 		// See patchUser: an org-scoped directory removes a deprovisioned user from view — render
@@ -504,6 +510,10 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
 	}
 	// SCIM DELETE = deprovision; we soft-disable (safer than a hard delete of audit history).
 	if err := s.dir.SetUserDisabled(id, true); err != nil {
+		if errors.Is(err, authx.ErrOrgOwnerDeprovision) {
+			scimError(w, http.StatusForbidden, err.Error())
+			return
+		}
 		scimInternal(w, "deleteUser", err)
 		return
 	}
@@ -610,6 +620,13 @@ func (s *Server) getGroup(w http.ResponseWriter, r *http.Request) {
 // PUT). Group rename isn't persisted (the directory has no rename); displayName is echoed back.
 func (s *Server) putGroup(w http.ResponseWriter, r *http.Request) {
 	id := pathID(r)
+	// The group must be visible to THIS directory before we mutate its membership — otherwise an
+	// out-of-scope id (another org's / a global group through an org-scoped view, where every write
+	// silently no-ops) would fabricate a 200 and hide that nothing was applied.
+	if _, _, ok := s.groupByID(id); !ok {
+		scimError(w, http.StatusNotFound, "group not found")
+		return
+	}
 	if r.Header.Get("If-Match") != "" {
 		if g, members, ok := s.groupByID(id); ok && ifMatchFails(r, groupVersion(g, members)) {
 			scimError(w, http.StatusPreconditionFailed, "ETag precondition failed")
@@ -636,16 +653,17 @@ func (s *Server) putGroup(w http.ResponseWriter, r *http.Request) {
 	for uid := range want { // add the desired set (idempotent)
 		_ = s.dir.AddUserToGroup(uid, id)
 	}
-	g, members, ok := s.groupByID(id)
-	if !ok {
-		g, members = authx.Group{ID: id, Name: in.DisplayName}, nil
-	}
+	g, members, _ := s.groupByID(id) // still present — membership edits don't delete the group
 	writeResource(w, http.StatusOK, s.toSCIMGroup(g, members), groupVersion(g, members))
 }
 
 // patchGroup handles membership add/remove operations.
 func (s *Server) patchGroup(w http.ResponseWriter, r *http.Request) {
 	id := pathID(r)
+	if _, _, ok := s.groupByID(id); !ok { // see putGroup — refuse an out-of-scope group id
+		scimError(w, http.StatusNotFound, "group not found")
+		return
+	}
 	if r.Header.Get("If-Match") != "" {
 		if g, members, ok := s.groupByID(id); ok && ifMatchFails(r, groupVersion(g, members)) {
 			scimError(w, http.StatusPreconditionFailed, "ETag precondition failed")
@@ -711,20 +729,22 @@ func (s *Server) patchGroup(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	g, members, ok := s.groupByID(id)
-	if !ok {
-		g, members = authx.Group{ID: id}, nil
-	}
+	g, members, _ := s.groupByID(id) // still present — membership edits don't delete the group
 	writeResource(w, http.StatusOK, s.toSCIMGroup(g, members), groupVersion(g, members))
 }
 
 func (s *Server) deleteGroup(w http.ResponseWriter, r *http.Request) {
 	id := pathID(r)
-	if r.Header.Get("If-Match") != "" { // optimistic-concurrency precondition
-		if g, members, ok := s.groupByID(id); ok && ifMatchFails(r, groupVersion(g, members)) {
-			scimError(w, http.StatusPreconditionFailed, "ETag precondition failed")
-			return
-		}
+	// Resolve first so a missing / out-of-scope id is an RFC-correct 404 rather than a 500 (the
+	// org-scoped view returns ErrNoGroup for a foreign group; an IdP would retry a 5xx forever).
+	g, members, ok := s.groupByID(id)
+	if !ok {
+		scimError(w, http.StatusNotFound, "group not found")
+		return
+	}
+	if r.Header.Get("If-Match") != "" && ifMatchFails(r, groupVersion(g, members)) { // optimistic-concurrency precondition
+		scimError(w, http.StatusPreconditionFailed, "ETag precondition failed")
+		return
 	}
 	if err := s.dir.DeleteGroup(id); err != nil {
 		scimInternal(w, "deleteGroup", err)

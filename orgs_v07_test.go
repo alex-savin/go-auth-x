@@ -173,6 +173,88 @@ func TestOrgScopedDirectoryView(t *testing.T) {
 	}
 }
 
+// TestOrgScopedView_NoGlobalIdentityRebind is the regression for the cross-tenant takeover: a
+// customer IdP must never rewrite the GLOBAL login identity of an account it did not provision
+// (an invited "local:" member, or another org's / the global mount's account).
+func TestOrgScopedView_NoGlobalIdentityRebind(t *testing.T) {
+	_, s, _ := newOrgAuth(t)
+	bob := seedUser(t, s, "bob@corp.com", "hunter2hunter2", true) // global "local:" account
+	org := seedOrg(t, s, "acme", map[uint]string{bob.ID: authx.OrgRoleMember})
+	view, err := authx.NewOrgScopedDirectory(s, s, org.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// PUT-style update of an invited member to an UNOWNED address would, unguarded, rebind bob's
+	// global email (verified, no mailbox proof) → password-reset/magic-link hijack. Must be refused.
+	if _, err := view.UpsertExternalUser(bob.Sub, "attacker@evil.com", "Bob", true); !errors.Is(err, authx.ErrEmailConflict) {
+		t.Fatalf("rebinding an invited member's global email must be refused, got %v", err)
+	}
+	if u, _ := s.UserByEmail("bob@corp.com"); u == nil || u.Sub != bob.Sub {
+		t.Fatal("bob's global identity must be untouched")
+	}
+	if u, _ := s.UserByEmail("attacker@evil.com"); u != nil {
+		t.Fatal("no account may now own the attacker address")
+	}
+
+	// The account this org's IdP DID provision is still updatable under its namespaced sub.
+	prov, err := view.UpsertExternalUser("scim:jane", "jane@acme-corp.com", "Jane", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := view.UpsertExternalUser(prov.Sub, "jane@acme-corp.com", "Jane R", true); err != nil {
+		t.Fatalf("an org-provisioned account must stay updatable: %v", err)
+	}
+}
+
+// TestOrgBoundKey_RefusedByGlobalGate is the regression for the GateHTTP/authenticated hole: an
+// org-bound key must not authenticate a global request gate.
+func TestOrgBoundKey_RefusedByGlobalGate(t *testing.T) {
+	a, s, _ := newOrgAuth(t)
+	org := seedOrg(t, s, "acme", nil)
+	raw := orgScimKey(t, s, org.ID, "orgkey") // org-bound, scope "scim"
+
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) })
+	bearer := func() *http.Request {
+		r := httptest.NewRequest("GET", "/api/thing", nil)
+		r.Header.Set("Authorization", "Bearer "+raw)
+		return r
+	}
+	// GateHTTP must not admit the org key onto a protected app route.
+	rec := httptest.NewRecorder()
+	a.GateHTTP(inner).ServeHTTP(rec, bearer())
+	if rec.Code == 200 {
+		t.Fatalf("an org-bound key must not pass GateHTTP, got %d", rec.Code)
+	}
+	// RequireGroupsHTTP() with no groups (→ authenticated()) must reject it too.
+	rec = httptest.NewRecorder()
+	a.RequireGroupsHTTP()(inner).ServeHTTP(rec, bearer())
+	if rec.Code == 200 {
+		t.Fatalf("an org-bound key must not satisfy empty RequireGroupsHTTP, got %d", rec.Code)
+	}
+	// A GLOBAL key with a group still passes the group gate (control).
+	graw, _, ghash := generateGlobalKey(t, s, "gkey", []string{"team"})
+	_ = ghash
+	rec = httptest.NewRecorder()
+	gr := httptest.NewRequest("GET", "/api/thing", nil)
+	gr.Header.Set("Authorization", "Bearer "+graw)
+	a.RequireGroupsHTTP("team")(inner).ServeHTTP(rec, gr)
+	if rec.Code != 200 {
+		t.Fatalf("a global key in the group must still pass, got %d", rec.Code)
+	}
+}
+
+// generateGlobalKey mints a global API key in the store and returns its raw secret.
+func generateGlobalKey(t *testing.T, s *memory.Store, name string, groups []string) (raw, prefix string, hash []byte) {
+	t.Helper()
+	raw = "axk_" + name
+	h := sha256.Sum256([]byte(raw))
+	if _, err := s.CreateAPIKey(name, groups, []string{"*"}, raw, h[:], nil); err != nil {
+		t.Fatal(err)
+	}
+	return raw, raw, h[:]
+}
+
 // --- per-customer SCIM, end-to-end over HTTP ---
 
 func TestOrgScopedSCIM_HTTPIsolation(t *testing.T) {
@@ -231,6 +313,19 @@ func TestOrgScopedSCIM_HTTPIsolation(t *testing.T) {
 		t.Fatal("the global account must survive an org deprovision")
 	}
 
+	// Deprovisioning an org OWNER via SCIM is refused with 403 (not a silent 200 that would fake
+	// offboarding, nor a 500 an IdP retries forever). ownerA is org A's owner.
+	if w := scimDo(t, srvA, keyA, "PATCH", "/Users/"+itoa(ownerA.ID),
+		`{"Operations":[{"op":"replace","path":"active","value":false}]}`); w.Code != http.StatusForbidden {
+		t.Fatalf("PATCH-deprovision of an owner = %d, want 403: %s", w.Code, w.Body.String())
+	}
+	if w := scimDo(t, srvA, keyA, "DELETE", "/Users/"+itoa(ownerA.ID), ""); w.Code != http.StatusForbidden {
+		t.Fatalf("DELETE-deprovision of an owner = %d, want 403", w.Code)
+	}
+	if role, err := s.OrgRole(orgA.ID, ownerA.ID); err != nil || role != authx.OrgRoleOwner {
+		t.Fatalf("the owner must remain a member after a refused deprovision: %q, %v", role, err)
+	}
+
 	// Groups: both orgs own "engineering"; each mount lists only its own. A member list on a
 	// group created with a FOREIGN member value silently drops the non-member (the view refuses).
 	if w := scimDo(t, srvA, keyA, "POST", "/Groups", `{"displayName":"engineering","members":[{"value":"`+itoa(uB.ID)+`"}]}`); w.Code != http.StatusCreated {
@@ -245,6 +340,14 @@ func TestOrgScopedSCIM_HTTPIsolation(t *testing.T) {
 	}
 	if members, _ := s.GroupMembers(gA.ID); len(members) != 0 {
 		t.Fatalf("a foreign user must not land in an org group: %v", members)
+	}
+	// Org B's mount can't reach org A's group: DELETE is a 404 (not a 500 retry-storm), and org A's
+	// group survives.
+	if w := scimDo(t, srvB, keyB, "DELETE", "/Groups/"+itoa(gA.ID), ""); w.Code != http.StatusNotFound {
+		t.Fatalf("cross-org group DELETE = %d, want 404: %s", w.Code, w.Body.String())
+	}
+	if _, err := s.OrgGroupByName(orgA.ID, "engineering"); err != nil {
+		t.Fatal("org A's group must survive a cross-org DELETE attempt")
 	}
 }
 

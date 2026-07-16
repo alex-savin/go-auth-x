@@ -34,15 +34,17 @@ func (a *Authenticator) RequireGroupsHTTP(groups ...string) func(http.Handler) h
 	}
 }
 
-// authenticated reports whether the request carries a principal: a session attached by GateHTTP, or a
-// valid API-key Bearer token.
+// authenticated reports whether the request carries a GLOBAL principal: a session attached by
+// GateHTTP, or a valid GLOBAL API-key Bearer token. An org-bound key is not a global principal (it
+// authorizes only its org's surfaces), so it does NOT satisfy an empty-groups RequireGroupsHTTP.
 func (a *Authenticator) authenticated(r *http.Request) bool {
 	if _, _, ok := SessionFromRequest(r); ok {
 		return true
 	}
 	if key := bearerToken(r.Header.Get("Authorization")); key != "" {
-		_, ok := a.ValidateAPIKey(key)
-		return ok
+		if info, ok := a.ValidateAPIKey(key); ok {
+			return info.OrgID == ""
+		}
 	}
 	return false
 }
@@ -383,12 +385,13 @@ func (a *Authenticator) adminCreateKey(c *reqCtx) {
 			c.JSON(http.StatusNotImplemented, H{"error": "org-bound API keys are not available (the stores don't support organizations)"})
 			return
 		}
-		org, oerr := a.orgs.OrgByID(target)
+		org, oerr := a.resolveOrg(target)
 		if errors.Is(oerr, ErrNoOrg) {
-			org, oerr = a.orgs.OrgBySlug(target)
+			c.JSON(http.StatusNotFound, H{"error": "no such organization"})
+			return
 		}
 		if oerr != nil {
-			c.JSON(http.StatusNotFound, H{"error": "no such organization"})
+			a.adminFail(c, http.StatusInternalServerError, "could not resolve organization", oerr)
 			return
 		}
 		info, err = od.CreateOrgAPIKey(org.ID, body.Name, body.Groups, body.Scopes, prefix, hash, expires)

@@ -178,19 +178,37 @@ func (a *Authenticator) defaultOrgClaimsForSub(sub string) (orgID, role string) 
 	return a.defaultOrgClaims(u.ID)
 }
 
-// liveOrgRole resolves the LIVE role of the gated session's user in its active org. The cookie
-// only names the org — membership and role are re-checked against the store on every call, so a
-// removal or demotion takes effect immediately instead of riding out the session TTL (org
-// off-boarding is a sharper boundary than the group claims, which stay cookie-stale by design).
-func (a *Authenticator) liveOrgRole(sc *SessionClaims) (role string, err error) {
+// liveOrgMember resolves the gated session's credential user AND their LIVE role in the active org.
+// The cookie only names the org — membership and role are re-checked against the store on every
+// call, so a removal or demotion takes effect immediately instead of riding out the session TTL
+// (org off-boarding is a sharper boundary than the group claims, which stay cookie-stale by
+// design). The single live-membership check behind RequireOrgHTTP and RequireOrgGroupsHTTP.
+func (a *Authenticator) liveOrgMember(sc *SessionClaims) (*AuthUser, string, error) {
 	if sc == nil || sc.Org == "" {
-		return "", ErrNotOrgMember
+		return nil, "", ErrNotOrgMember
 	}
 	u, err := a.creds.UserBySub(sc.Subject)
 	if err != nil {
-		return "", err
+		return nil, "", err
 	}
-	return a.orgs.OrgRole(sc.Org, u.ID)
+	role, err := a.orgs.OrgRole(sc.Org, u.ID)
+	return u, role, err
+}
+
+// liveOrgRole is liveOrgMember when only the role is needed.
+func (a *Authenticator) liveOrgRole(sc *SessionClaims) (string, error) {
+	_, role, err := a.liveOrgMember(sc)
+	return role, err
+}
+
+// resolveOrg looks up an org by opaque ID, falling back to slug — the ID-then-slug resolution the
+// switch and admin surfaces share. Returns ErrNoOrg when neither matches.
+func (a *Authenticator) resolveOrg(idOrSlug string) (*Org, error) {
+	org, err := a.orgs.OrgByID(idOrSlug)
+	if errors.Is(err, ErrNoOrg) {
+		org, err = a.orgs.OrgBySlug(idOrSlug)
+	}
+	return org, err
 }
 
 // RequireOrgHTTP is net/http middleware permitting only a session user (gated by GateHTTP) whose

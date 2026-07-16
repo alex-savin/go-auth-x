@@ -125,10 +125,7 @@ func (a *Authenticator) OrgSwitch(c *reqCtx) {
 	if slug != "" {
 		org, err = a.orgs.OrgBySlug(slug)
 	} else {
-		org, err = a.orgs.OrgByID(target)
-		if errors.Is(err, ErrNoOrg) {
-			org, err = a.orgs.OrgBySlug(target)
-		}
+		org, err = a.resolveOrg(target)
 	}
 	if errors.Is(err, ErrNoOrg) {
 		c.JSON(http.StatusForbidden, H{"error": "not a member of that organization"})
@@ -414,9 +411,13 @@ func (a *Authenticator) OrgInviteCreate(c *reqCtx) {
 		u.Email+" invited you to join "+org.Name+" on "+a.brandName()+". Sign in (or create an account) with this email address, then accept below.",
 		"Accept invitation", link,
 		"This invitation is valid for 7 days and can be used once. If you weren't expecting it, ignore this email."); err != nil {
-		// Don't leave an unreachable-but-redeemable record behind if the mail never went out.
-		_ = a.orgs.RevokeOrgInvite(org.ID, inv.ID)
-		c.JSON(http.StatusInternalServerError, H{"error": "could not send the invitation email"})
+		// The record is valid and now shows in the pending list — leave it so the admin can resend
+		// or revoke it. Do NOT delete it: re-inviting already REPLACED any prior invite for this
+		// address, so revoking here would leave the invitee with no working invitation at all.
+		c.JSON(http.StatusInternalServerError, H{
+			"error":  "the invitation was created but the email could not be sent — resend or revoke it from the pending list",
+			"invite": inv,
+		})
 		return
 	}
 	a.orgAudit(c, u.ID, "org_invite_sent", org.ID+":"+role+":"+email)

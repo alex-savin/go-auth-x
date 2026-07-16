@@ -86,10 +86,9 @@ func (a *Authenticator) RequireOrgGroupsHTTP(groups ...string) func(http.Handler
 				writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: no active organization"})
 				return
 			}
-			u, err := a.creds.UserBySub(sc.Subject)
-			if err == nil {
-				_, err = a.orgs.OrgRole(sc.Org, u.ID)
-			}
+			// Same live-membership gate as RequireOrgHTTP (shared liveOrgMember), plus the org-group
+			// check — org groups never ride in the cookie, so both are re-read per request.
+			u, _, err := a.liveOrgMember(sc)
 			switch {
 			case errors.Is(err, ErrNotOrgMember), errors.Is(err, ErrNoOrg), errors.Is(err, ErrNoUser):
 				writeJSON(w, http.StatusForbidden, map[string]string{"error": "forbidden: not a member of this organization"})
@@ -118,6 +117,11 @@ func (a *Authenticator) RequireOrgGroupsHTTP(groups ...string) func(http.Handler
 
 // errOrgView is returned by view methods a per-org caller must never reach (bans, API keys).
 var errOrgView = errors.New("authx: not available through an org-scoped directory view")
+
+// ErrOrgOwnerDeprovision is returned by an org-scoped directory when a customer IdP tries to
+// deprovision an org OWNER via SCIM. Exported so the SCIM server can render it as a 403 policy
+// refusal instead of a 500 (a 5xx an IdP would retry forever) — owners are managed in-app.
+var ErrOrgOwnerDeprovision = errors.New("authx: cannot deprovision an organization owner via SCIM — manage owners in-app")
 
 // orgScopedDir presents ONE organization as a complete DirectoryStore, for mounting a per-customer
 // SCIM server. Every operation is confined to the org: users are its members, groups are its
@@ -159,12 +163,15 @@ func NewOrgScopedDirectory(dir DirectoryStore, orgs OrgStore, orgID string) (Dir
 	return &orgScopedDir{dir: dir, od: od, orgs: orgs, orgID: orgID}, nil
 }
 
-// nsSub namespaces a SCIM-minted subject per org so identical userNames from different customer
-// IdPs can never resolve to one account. Non-SCIM subjects (an invited member being updated via
-// PUT preserves their existing "local:"/OIDC sub) pass through untouched, as does an
-// already-namespaced sub.
+// orgSubPrefix is the subject namespace for accounts THIS org's IdP provisions.
+func (v *orgScopedDir) orgSubPrefix() string { return "scim:org" + v.orgID + ":" }
+
+// nsSub namespaces a SCIM-minted subject ("scim:<userName>") into this org's namespace so identical
+// userNames from different customer IdPs can never resolve to one account. An already-namespaced
+// sub passes through; a non-SCIM sub (a "local:"/OIDC subject) is returned unchanged — those
+// identify globally-owned accounts the view refuses to rebind (see UpsertExternalUser).
 func (v *orgScopedDir) nsSub(sub string) string {
-	prefix := "scim:org" + v.orgID + ":"
+	prefix := v.orgSubPrefix()
 	if strings.HasPrefix(sub, prefix) {
 		return sub
 	}
@@ -230,15 +237,26 @@ func (v *orgScopedDir) UserByEmail(email string) (*AuthUser, error) {
 	return u, nil
 }
 
-// UpsertExternalUser provisions into THIS org. The cross-tenant guard is the heart of the view:
-// the underlying upsert's account-linking rule would REBIND a verified account to a new subject
-// when the incoming email is asserted verified — correct for the single trusted enterprise IdP of
-// the global mount, an account-takeover vector if granted to per-customer IdPs. So an email owned
-// by any account this org's IdP didn't provision (and that isn't already a member being updated
-// under its own sub) is refused with ErrEmailConflict (SCIM 409); existing users join orgs through
-// the invite flow, which proves the mailbox.
+// UpsertExternalUser provisions into THIS org. The cross-tenant trust boundary is the heart of the
+// view — the underlying upsert's account-linking rule REBINDS an account's global identity when an
+// incoming email is asserted verified (correct for the single trusted enterprise IdP of the global
+// mount, an account-takeover vector for a per-customer IdP), so the view enforces two rules:
+//
+//   - The view may only create/update accounts THIS org's IdP OWNS — those under its subject
+//     namespace. A sub that doesn't namespace to this org (an invited member's "local:"/OIDC sub,
+//     or an account provisioned by another org) identifies a GLOBAL identity the customer IdP must
+//     not touch: rewriting its email would redirect that account's password-reset / magic-link to
+//     an attacker-chosen address with no mailbox proof. Such members are managed in-app, not here.
+//   - An email already owned by a DIFFERENT account (one not provisioned under this namespace) is
+//     refused rather than adopted/rebound — existing users join an org through the invite flow,
+//     which proves mailbox control.
+//
+// Both refusals surface as ErrEmailConflict (SCIM 409).
 func (v *orgScopedDir) UpsertExternalUser(sub, email, name string, emailVerified bool) (*AuthUser, error) {
 	ns := v.nsSub(sub)
+	if !strings.HasPrefix(ns, v.orgSubPrefix()) {
+		return nil, ErrEmailConflict // not an account this org's IdP owns — never rebind its identity
+	}
 	if existing, err := v.dir.UserByEmail(email); err == nil && existing != nil && existing.Sub != ns {
 		return nil, ErrEmailConflict
 	} else if err != nil && !errors.Is(err, ErrNoUser) {
@@ -272,7 +290,7 @@ func (v *orgScopedDir) SetUserDisabled(userID uint, disabled bool) error {
 		return nil // already an active member
 	}
 	if role == OrgRoleOwner {
-		return errors.New("authx: cannot deprovision an organization owner via SCIM — manage owners in-app")
+		return ErrOrgOwnerDeprovision
 	}
 	return v.orgs.RemoveOrgMember(v.orgID, userID)
 }

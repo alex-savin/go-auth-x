@@ -50,9 +50,11 @@ func (a *Authenticator) GateHTTP(next http.Handler) http.Handler {
 		}
 		if err != nil {
 			// API-key (Bearer) principals authenticate without a session cookie — let them through so
-			// RequireGroupsHTTP can authorize by the key's groups (CSRFHTTP already skips Bearer).
+			// RequireGroupsHTTP can authorize by the key's groups (CSRFHTTP already skips Bearer). Only
+			// GLOBAL keys are a principal for the app gate; an ORG-BOUND key authorizes its org's
+			// surfaces (its SCIM mount) via ValidateOrgAPIKeyScope, never the global request gate.
 			if key := bearerToken(r.Header.Get("Authorization")); key != "" {
-				if _, ok := a.ValidateAPIKey(key); ok {
+				if info, ok := a.ValidateAPIKey(key); ok && info.OrgID == "" {
 					next.ServeHTTP(w, r)
 					return
 				}

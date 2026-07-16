@@ -56,7 +56,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     invite flow), deprovision (`active=false`/DELETE) **removes the user from the org** — never the
     global account — and org owners can't be deprovisioned by a customer IdP.
   - **SCIM server hardening** — `PATCH`/`PUT /Users/{id}` no longer dereference a post-update
-    refetch miss (an org-scoped deprovision removes the user from view mid-request).
+    refetch miss (an org-scoped deprovision removes the user from view mid-request); an
+    owner-deprovision refusal renders as **403** (not a silent 200 that fakes offboarding, nor a
+    retryable 500), and group `PUT`/`PATCH`/`DELETE` on an out-of-scope id returns **404** instead
+    of fabricating a 200 or 500.
+  - **Review hardening** (from an adversarial pass over the slice):
+    - The org-scoped view **never rebinds the global identity** of an account its org's IdP didn't
+      provision — a customer IdP can only create/update accounts under its own subject namespace,
+      closing a cross-tenant account-takeover (a SCIM `PUT` rewriting an invited member's login
+      email with no mailbox proof).
+    - **Org-bound keys are now refused at `GateHTTP` and the empty-groups `RequireGroupsHTTP`** too,
+      matching the "refused by every global surface" contract (they previously authenticated a
+      global request gate).
+    - A failed invitation email **leaves the (valid, listable) invite in place** to resend/revoke
+      rather than deleting it — re-inviting had already replaced any prior invite, so the rollback
+      could strand the invitee.
 
 ## [0.5.1] — 2026-07-15
 

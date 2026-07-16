@@ -112,10 +112,11 @@ func (s *Store) DeleteOrg(id string) error {
 	}
 	delete(s.orgs, n)
 	delete(s.orgMembers, n)
+	canonical := orgIDString(n)
 	// Everything the org owned dies with it: its groups (and their memberships), its pending
-	// invites, and any API keys bound to it.
+	// invites, and any API keys bound to it. Match on the canonical id (see RemoveOrgMember).
 	for gid, g := range s.groups {
-		if g.OrgID == id {
+		if g.OrgID == canonical {
 			delete(s.groups, gid)
 			for _, set := range s.memberships {
 				delete(set, gid)
@@ -123,12 +124,12 @@ func (s *Store) DeleteOrg(id string) error {
 		}
 	}
 	for iid, rec := range s.orgInvites {
-		if rec.inv.OrgID == id {
+		if rec.inv.OrgID == canonical {
 			delete(s.orgInvites, iid)
 		}
 	}
 	for kid, k := range s.apikeys {
-		if k.info.OrgID == id {
+		if k.info.OrgID == canonical {
 			delete(s.apikeys, kid)
 		}
 	}
@@ -165,9 +166,10 @@ func (s *Store) RemoveOrgMember(orgID string, userID uint) error {
 		delete(set, userID)
 	}
 	// Org-group membership dies with org membership (the OrgStore contract): a former member must
-	// not linger in the org's group lists.
+	// not linger in the org's group lists. Match by parsed id, not raw string, so a non-canonical
+	// orgID ("01") can't remove the membership yet orphan the group rows (gormstore normalizes too).
 	for gid, g := range s.groups {
-		if g.OrgID == orgID {
+		if gn, gok := parseOrgID(g.OrgID); gok && gn == n {
 			if set := s.memberships[userID]; set != nil {
 				delete(set, gid)
 			}
@@ -329,14 +331,15 @@ func (s *Store) CreateOrgGroup(orgID, name, description string) (*authx.Group, e
 		return nil, authx.ErrNoOrg
 	}
 	trimmed := strings.TrimSpace(name)
+	canonical := orgIDString(n) // store the canonical id so every OrgID comparison is stable
 	// Names are unique per (org, name) — a global "engineering" and two orgs' "engineering" coexist.
 	for _, g := range s.groups {
-		if g.OrgID == orgID && g.Name == trimmed {
+		if g.OrgID == canonical && g.Name == trimmed {
 			return nil, errDuplicateGroup
 		}
 	}
 	s.groupSeq++
-	g := &authx.Group{ID: s.groupSeq, Name: trimmed, Description: description, OrgID: orgID, CreatedAt: time.Now(), UpdatedAt: time.Now()}
+	g := &authx.Group{ID: s.groupSeq, Name: trimmed, Description: description, OrgID: canonical, CreatedAt: time.Now(), UpdatedAt: time.Now()}
 	s.groups[g.ID] = g
 	cp := *g
 	return &cp, nil
