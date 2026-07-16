@@ -402,8 +402,12 @@ func (s *Store) DeleteUser(userID uint) error {
 		if err := cascadeDeletes(tx, userID); err != nil {
 			return err
 		}
-		if u.Email != "" { // OTPs are keyed by email, not user_id
+		if u.Email != "" { // OTPs and org invites are keyed by email, not user_id
 			if err := tx.Where("email = ?", u.Email).Delete(&EmailOTP{}).Error; err != nil {
+				return err
+			}
+			// GDPR parity: pending org invites addressed to the erased user's email carry PII too.
+			if err := tx.Where("email = ?", u.Email).Delete(&OrgInvite{}).Error; err != nil {
 				return err
 			}
 		}

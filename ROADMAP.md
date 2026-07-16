@@ -85,12 +85,16 @@ a pre-v1.0 breaking change if/when a uuid-keyed consumer adopts the library or t
 
 ### Organizations (tenant/org concept) — additive
 
-**Status: the v0.6 core slice is implemented on `main` (unreleased)** — `OrgStore` + both reference
-stores, active-org session claims + `POST /auth/org/switch`, `RequireOrgHTTP` (live re-verification),
-email invites, self-service member management (last-owner guard), and the admin org verbs. Org IDs
-shipped as **opaque strings from day one** (resolving the [#2](https://github.com/alex-savin/go-auth-x/issues/2)
-dependency below for the new surface). Remaining: the v0.7 org-scoped resources phase and (if ever
-demanded) per-org SSO.
+**Status: the v0.6 core slice AND the v0.7 org-scoped-resources slice are implemented on
+`feat/organizations` (unreleased).** v0.6: `OrgStore` + both reference stores, active-org session
+claims + `POST /auth/org/switch`, `RequireOrgHTTP` (live re-verification), email invites,
+self-service member management (last-owner guard), and the admin org verbs — org IDs shipped as
+**opaque strings from day one** (resolving the [#2](https://github.com/alex-savin/go-auth-x/issues/2)
+dependency below for the new surface). v0.7: first-class **invite records** (list/revoke),
+**org-scoped groups** (per-org namespaces + `RequireOrgGroupsHTTP`, live), **org-bound API keys**
+(refused by every global surface), and **per-customer SCIM** via `NewOrgScopedDirectory`
+(namespaced subjects, no cross-tenant email adoption, deprovision = org removal). Remaining: per-org
+SSO, only if a consumer ever demands it.
 
 Give the library a first-class org layer for B2B-shaped apps, as a fourth optional capability store
 following the house pattern (`SetOrgStore`; nil = feature off, zero behavior change):

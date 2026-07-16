@@ -348,27 +348,17 @@ func (a *Authenticator) OrgMemberRemove(c *reqCtx) {
 
 // --- invites ---
 
-// orgInvitePurpose binds a stored invite token to one org + role: the accept URL echoes org/role
-// back and the purpose is reconstructed for the lookup, so tampering with either yields a purpose
-// that matches no token (ErrTokenInvalid) rather than a role escalation.
-func orgInvitePurpose(orgID, role string) string {
-	return purposeOrgInvite + ":" + orgID + ":" + role
-}
-
 // orgAudit writes an org event to the audit trail (best-effort, creds is non-nil when orgs are on).
 func (a *Authenticator) orgAudit(c *reqCtx, userID uint, event, detail string) {
 	a.creds.RecordAudit(userID, "", c.ClientIP(), "org", event, true, detail)
 }
 
 // OrgInviteCreate (POST /auth/org/invites, body {"email","role"}) emails a single-use invite to
-// join the ACTIVE org. Owner/admin only; only an owner may invite an owner. The link is ONLY ever
-// emailed — possession of the token is the invitee's proof of mailbox control, so handing it to
-// the inviter would let them mint memberships for addresses they don't own.
-//
-// KNOWN LIMITATION: pending invitations cannot be listed or revoked (the token store is
-// exact-lookup only) — a mis-sent invite stays redeemable until ttlInvite (7 days) passes, bounded
-// by the accept-side email match. Double-check the address on owner-role invites; first-class
-// invite records are planned with the org-scoped-resources phase.
+// join the ACTIVE org, stored as a first-class record (list with GET, revoke with DELETE /{id});
+// re-inviting an address replaces its pending invite. Owner/admin only; only an owner may invite
+// an owner. The link is ONLY ever emailed — possession of the token is the invitee's proof of
+// mailbox control, so handing it to the inviter would let them mint memberships for addresses
+// they don't own.
 func (a *Authenticator) OrgInviteCreate(c *reqCtx) {
 	sc, u, actorRole, ok := a.activeOrgManager(c)
 	if !ok {
@@ -411,36 +401,75 @@ func (a *Authenticator) OrgInviteCreate(c *reqCtx) {
 		return
 	}
 	raw, hash := newToken()
-	if err := a.creds.CreateToken(orgInvitePurpose(org.ID, role), 0, email, hash, time.Now().Add(ttlInvite)); err != nil {
+	inv, err := a.orgs.CreateOrgInvite(org.ID, email, role, u.Email, hash, time.Now().Add(ttlInvite))
+	if err != nil {
 		a.adminFail(c, http.StatusInternalServerError, "could not create invitation", err)
 		return
 	}
-	link := a.baseURL() + "/auth/org/invite/accept?org=" + url.QueryEscape(org.ID) +
-		"&role=" + url.QueryEscape(role) + "&token=" + raw
+	// Only the opaque token rides in the URL — the org and role bind to the stored record, so
+	// there is nothing in the link to tamper with.
+	link := a.baseURL() + "/auth/org/invite/accept?token=" + raw
 	if err := a.sendAuthEmail(email, "You're invited to join "+org.Name,
 		"Join "+org.Name,
 		u.Email+" invited you to join "+org.Name+" on "+a.brandName()+". Sign in (or create an account) with this email address, then accept below.",
 		"Accept invitation", link,
 		"This invitation is valid for 7 days and can be used once. If you weren't expecting it, ignore this email."); err != nil {
+		// Don't leave an unreachable-but-redeemable record behind if the mail never went out.
+		_ = a.orgs.RevokeOrgInvite(org.ID, inv.ID)
 		c.JSON(http.StatusInternalServerError, H{"error": "could not send the invitation email"})
 		return
 	}
 	a.orgAudit(c, u.ID, "org_invite_sent", org.ID+":"+role+":"+email)
+	c.JSON(http.StatusOK, H{"ok": true, "invite": inv})
+}
+
+// OrgInviteList (GET /auth/org/invites) lists the ACTIVE org's PENDING invitations (owner/admin) —
+// the management surface a bare token could never offer.
+func (a *Authenticator) OrgInviteList(c *reqCtx) {
+	sc, _, _, ok := a.activeOrgManager(c)
+	if !ok {
+		return
+	}
+	invites, err := a.orgs.OrgInvites(sc.Org)
+	if err != nil {
+		a.adminFail(c, http.StatusInternalServerError, "could not list invitations", err)
+		return
+	}
+	c.JSON(http.StatusOK, H{"invites": invites})
+}
+
+// OrgInviteRevoke (DELETE /auth/org/invites/{id}) cancels a pending invitation before it is
+// redeemed (owner/admin). Idempotent — revoking an already-gone invite is not an error.
+func (a *Authenticator) OrgInviteRevoke(c *reqCtx) {
+	sc, u, _, ok := a.activeOrgManager(c)
+	if !ok {
+		return
+	}
+	id, ok := paramUint(c, "id")
+	if !ok {
+		return
+	}
+	if err := a.orgs.RevokeOrgInvite(sc.Org, id); err != nil {
+		a.adminFail(c, http.StatusInternalServerError, "could not revoke invitation", err)
+		return
+	}
+	a.orgAudit(c, u.ID, "org_invite_revoked", sc.Org)
 	c.JSON(http.StatusOK, H{"ok": true})
 }
 
-// OrgInviteAccept (GET /auth/org/invite/accept?org=&role=&token=) redeems an invite from the
-// emailed link. The signed-in user's email must MATCH the invited address — the token proves
-// control of that mailbox, so acceptance also marks the email verified (same rule as the magic
-// link). Unauthenticated clicks bounce to the login page with the accept URL as next, so the
-// invitee can sign in or register first. These are browser link-clicks, so failures redirect with
-// a message rather than returning JSON (mirrors redeemAndLogin).
+// OrgInviteAccept (GET /auth/org/invite/accept?token=) redeems an invite from the emailed link.
+// The org and role come from the stored RECORD — nothing in the URL can be tampered with. The
+// signed-in user's email must MATCH the invited address — the token proves control of that
+// mailbox, so acceptance also marks the email verified (same rule as the magic link).
+// Unauthenticated clicks bounce to the login page with the accept URL as next, so the invitee can
+// sign in or register first. These are browser link-clicks, so failures redirect with a message
+// rather than returning JSON (mirrors redeemAndLogin).
 func (a *Authenticator) OrgInviteAccept(c *reqCtx) {
 	fail := func(msg string) {
 		c.Redirect(http.StatusFound, a.baseURL()+"/login?error="+url.QueryEscape(msg))
 	}
-	orgID, role, token := c.Query("org"), c.Query("role"), c.Query("token")
-	if orgID == "" || !validOrgRole(role) || token == "" {
+	token := c.Query("token")
+	if token == "" {
 		fail("this invitation link is invalid")
 		return
 	}
@@ -457,21 +486,21 @@ func (a *Authenticator) OrgInviteAccept(c *reqCtx) {
 	}
 	// PEEK first: consuming is what burns the single-use token, and the wrong-account case must
 	// not destroy a still-valid invitation.
-	claim, err := a.creds.PeekToken(orgInvitePurpose(orgID, role), hashToken(token))
+	inv, err := a.orgs.PeekOrgInvite(hashToken(token))
 	if err != nil {
 		fail("this invitation is invalid or has expired")
 		return
 	}
-	if normEmail(u.Email) != normEmail(claim.Email) {
+	if normEmail(u.Email) != normEmail(inv.Email) {
 		fail("this invitation was sent to a different email address — sign in with that account")
 		return
 	}
-	org, err := a.orgs.OrgByID(orgID)
+	org, err := a.orgs.OrgByID(inv.OrgID)
 	if err != nil {
 		fail("this organization no longer exists")
 		return
 	}
-	if _, err := a.creds.ConsumeToken(orgInvitePurpose(orgID, role), hashToken(token)); err != nil {
+	if _, err := a.orgs.ConsumeOrgInvite(hashToken(token)); err != nil {
 		fail("this invitation is invalid or has expired") // lost a redeem race — already consumed
 		return
 	}
@@ -479,14 +508,15 @@ func (a *Authenticator) OrgInviteAccept(c *reqCtx) {
 	// what they've since been granted.
 	finalRole, err := a.orgs.OrgRole(org.ID, u.ID)
 	if errors.Is(err, ErrNotOrgMember) {
-		finalRole = role
-		err = a.orgs.SetOrgMember(org.ID, u.ID, role)
+		finalRole = inv.Role
+		err = a.orgs.SetOrgMember(org.ID, u.ID, inv.Role)
 	}
 	if err != nil {
-		// The single-use token is already consumed (deliberately BEFORE the grant — granting first
-		// would leave a live token that a later-removed member could replay). Record the failed
-		// grant so an operator can see why this invitation never produced a member and re-issue it.
-		a.creds.RecordAudit(u.ID, u.Email, c.ClientIP(), "org", "org_invite_grant_failed", false, org.ID+":"+role)
+		// The single-use invite is already consumed (deliberately BEFORE the grant — granting
+		// first would leave a live token that a later-removed member could replay). Record the
+		// failed grant so an operator can see why this invitation never produced a member and
+		// re-issue it.
+		a.creds.RecordAudit(u.ID, u.Email, c.ClientIP(), "org", "org_invite_grant_failed", false, org.ID+":"+inv.Role)
 		fail("could not join the organization — ask for a new invitation")
 		return
 	}

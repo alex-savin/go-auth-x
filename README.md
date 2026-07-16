@@ -94,7 +94,8 @@ IdP hand-off, no "double login page."
   **impersonate**, and list/revoke a user's sessions.
 - 🏢 **LDAP** sync and a minimal **SCIM 2.0** provisioning server.
 - 🏬 **Organizations (multi-tenant orgs)** — per-org roles, an active-org session claim + switching,
-  **email invites**, `RequireOrgHTTP` middleware, and admin org CRUD.
+  **email invites** (listable/revocable records), `RequireOrgHTTP` middleware, admin org CRUD, and
+  **org-scoped resources**: per-org groups + org-bound API keys unlocking **per-customer SCIM**.
 
 **Operational**
 - 🚦 Rate limiting + soft lockout (**`429 + Retry-After`**, IPv6 `/64` keying), trusted-proxy-aware client IP.
@@ -408,7 +409,8 @@ Mounted under `/auth` by `Handler()`:
 | POST | `/auth/org/switch` | switch (or clear) the active org | session + CSRF |
 | GET | `/auth/org/members` | list the active org's members | session (member) |
 | POST · DELETE | `/auth/org/members/{userId}` | set a member's role / remove (or leave) | session (owner/admin) + CSRF |
-| POST | `/auth/org/invites` | email a single-use org invite | session (owner/admin) + CSRF |
+| POST · GET | `/auth/org/invites` | email a single-use org invite / list pending | session (owner/admin) (+ CSRF) |
+| DELETE | `/auth/org/invites/{id}` | revoke a pending invite | session (owner/admin) + CSRF |
 | GET | `/auth/org/invite/accept` | redeem an invite from the emailed link | session + token |
 
 The account, session-management, unlink, and delete endpoints require a **`SessionStore`** only for the
@@ -499,15 +501,32 @@ needs no schema.
 - **Enforcement is live** — `RequireOrgHTTP(roles...)` re-verifies membership + role against the store
   on every request, so off-boarding takes effect immediately, not at cookie expiry. It gates *who is
   acting in which org*; row-level isolation of your app's data remains your responsibility.
-- **Invites** — `POST /auth/org/invites` emails a single-use, hashed-at-rest token bound to org +
-  role. Accepting requires signing in with the invited address (the token proves the mailbox — so it
-  also marks the email verified); a tampered role/org in the link redeems nothing, and the wrong
-  account can't burn the token. Owners/admins invite; only owners may grant `owner`. **Known
-  limitation:** pending invitations can't be listed or revoked — a mis-sent invite stays redeemable
-  (by that mailbox only) until its 7-day TTL passes, so double-check the address on `owner` invites.
+- **Invites** — `POST /auth/org/invites` emails a single-use, hashed-at-rest token whose org + role
+  bind to a **first-class record**: pending invites are listable (`GET`) and revocable
+  (`DELETE /{id}`), and re-inviting an address replaces its pending invite. Accepting requires
+  signing in with the invited address (the token proves the mailbox — so it also marks the email
+  verified); nothing in the link can be tampered with, and the wrong account can't burn the token.
+  Owners/admins invite; only owners may grant `owner`.
 - **Member management** — members list the org; owners/admins set roles and remove members; anyone
   may leave. A serialized **last-owner guard** refuses demoting/removing the final owner (the admin
   API bypasses it as the recovery path).
+- **Org-scoped groups & API keys** (via the `OrgDirectoryStore` upgrade interface — both reference
+  stores implement it) — groups and keys bound to one org, invisible to every global surface: two
+  orgs both own "engineering" (never in the session cookie; gate with **`RequireOrgGroupsHTTP`**,
+  checked live), and an org-bound key is refused by `adminGuard`/`ValidateAPIKeyScope` outright,
+  passing only `ValidateOrgAPIKeyScope` for its own org.
+- **Per-customer SCIM** — `NewOrgScopedDirectory(store, store, org.ID)` presents ONE org as a
+  complete `DirectoryStore` for `scim.NewServer`, so each customer's IdP provisions only its own
+  org: subjects are namespaced per org, an existing outside account is never adopted by an asserted
+  email (409 — use the invite flow), and deprovisioning removes the user from the org, never the
+  global account (owners can't be deprovisioned via SCIM at all).
+
+```go
+// per-customer SCIM mount: org-bound key + org-scoped directory view
+view, _ := authx.NewOrgScopedDirectory(store, store, org.ID)
+mux.Handle("/scim/"+org.Slug+"/v2/", http.StripPrefix("/scim/"+org.Slug+"/v2",
+	scim.NewServer(view, func(t string) bool { return authn.ValidateOrgAPIKeyScope(t, "scim", org.ID) }).Handler()))
+```
 
 ```go
 authn.SetOrgStore(store) // gormstore + memory both implement authx.OrgStore

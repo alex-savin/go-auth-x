@@ -33,12 +33,14 @@ func (a *Authenticator) completeLogin(c *reqCtx, id Identity, remember bool, fir
 	if a.creds != nil {
 		u, _ = a.creds.UserBySub(id.Subject)
 	}
-	// Enrich the session with the user's groups (for per-group access control) when a directory
-	// is wired and the upstream identity didn't already carry groups (e.g. local/social logins;
-	// OIDC logins keep the IdP-asserted groups).
+	// Enrich the session with the user's GLOBAL groups (for per-group access control) when a
+	// directory is wired and the upstream identity didn't already carry groups (e.g. local/social
+	// logins; OIDC logins keep the IdP-asserted groups). Org-scoped groups are filtered out —
+	// their names collide across orgs, so they are checked live (RequireOrgGroupsHTTP), never
+	// baked into the cookie.
 	if a.dir != nil && u != nil && len(id.Groups) == 0 {
 		if gs, gerr := a.dir.UserGroups(u.ID); gerr == nil {
-			id.Groups = groupNames(gs)
+			id.Groups = groupNames(globalGroups(gs))
 		}
 	}
 	// Second-factor gate: if the user has confirmed TOTP, don't mint the session yet — stash the

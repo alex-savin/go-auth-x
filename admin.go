@@ -1,6 +1,7 @@
 package authx
 
 import (
+	"errors"
 	"log"
 	"net/http"
 	"strconv"
@@ -55,11 +56,12 @@ func GroupsFromRequest(r *http.Request) []string {
 }
 
 // requestGroups returns the groups of whichever principal authenticated the request — the gated
-// session user, plus an API key's groups if a valid Bearer key is present.
+// session user, plus a GLOBAL API key's groups if a valid Bearer key is present. An org-bound
+// key's groups never merge: group gates are global surfaces, outside an org key's blast radius.
 func (a *Authenticator) requestGroups(r *http.Request) []string {
 	have := GroupsFromRequest(r)
 	if key := bearerToken(r.Header.Get("Authorization")); key != "" {
-		if info, ok := a.ValidateAPIKey(key); ok {
+		if info, ok := a.ValidateAPIKey(key); ok && info.OrgID == "" {
 			have = append(have, info.Groups...)
 		}
 	}
@@ -94,13 +96,16 @@ func (a *Authenticator) ValidateAPIKey(raw string) (*APIKeyInfo, bool) {
 	return info, true
 }
 
-// ValidateAPIKeyScope is ValidateAPIKey plus a scope check — convenient for gating a surface (e.g.
-// the SCIM server) to keys that carry a specific scope:
+// ValidateAPIKeyScope is ValidateAPIKey plus a scope check — convenient for gating a GLOBAL
+// surface (e.g. the global SCIM server) to keys that carry a specific scope:
 //
 //	scim.NewServer(store, func(t string) bool { return authn.ValidateAPIKeyScope(t, "scim") })
+//
+// Org-bound keys (OrgID != "") are REFUSED here — a key bound to one org grants nothing outside
+// it; gate per-org surfaces with ValidateOrgAPIKeyScope instead.
 func (a *Authenticator) ValidateAPIKeyScope(raw, scope string) bool {
 	info, ok := a.ValidateAPIKey(raw)
-	return ok && KeyHasScope(info, scope)
+	return ok && KeyHasScope(info, scope) && info.OrgID == ""
 }
 
 func bearerToken(h string) string {
@@ -122,7 +127,9 @@ func (a *Authenticator) adminGuard(c *reqCtx) bool {
 	if key := bearerToken(c.GetHeader("Authorization")); key != "" {
 		keyPresent = true
 		if info, ok := a.ValidateAPIKey(key); ok {
-			if KeyHasScope(info, "admin") {
+			// An ORG-BOUND key never grants GLOBAL admin, whatever scopes it carries — its blast
+			// radius is its org (ValidateOrgAPIKeyScope). Only a global key passes here.
+			if KeyHasScope(info, "admin") && info.OrgID == "" {
 				return true
 			}
 			keyValidNoScope = true
@@ -352,6 +359,7 @@ func (a *Authenticator) adminCreateKey(c *reqCtx) {
 		Groups    []string `json:"groups"`
 		Scopes    []string `json:"scopes"`    // deny-by-default: empty grants NOTHING; e.g. ["admin"], ["scim"], ["*"]
 		ExpiresAt *string  `json:"expiresAt"` // optional RFC3339
+		Org       string   `json:"org"`       // optional org ID or slug: mints an ORG-BOUND key (see APIKeyInfo.OrgID)
 	}
 	if err := c.ShouldBindJSON(&body); err != nil || strings.TrimSpace(body.Name) == "" {
 		c.JSON(http.StatusBadRequest, H{"error": "name required"})
@@ -367,7 +375,26 @@ func (a *Authenticator) adminCreateKey(c *reqCtx) {
 		expires = &t
 	}
 	raw, prefix, hash := generateAPIKey()
-	info, err := a.dir.CreateAPIKey(body.Name, body.Groups, body.Scopes, prefix, hash, expires)
+	var info *APIKeyInfo
+	var err error
+	if target := strings.TrimSpace(body.Org); target != "" {
+		od := a.orgDir()
+		if od == nil || a.orgs == nil {
+			c.JSON(http.StatusNotImplemented, H{"error": "org-bound API keys are not available (the stores don't support organizations)"})
+			return
+		}
+		org, oerr := a.orgs.OrgByID(target)
+		if errors.Is(oerr, ErrNoOrg) {
+			org, oerr = a.orgs.OrgBySlug(target)
+		}
+		if oerr != nil {
+			c.JSON(http.StatusNotFound, H{"error": "no such organization"})
+			return
+		}
+		info, err = od.CreateOrgAPIKey(org.ID, body.Name, body.Groups, body.Scopes, prefix, hash, expires)
+	} else {
+		info, err = a.dir.CreateAPIKey(body.Name, body.Groups, body.Scopes, prefix, hash, expires)
+	}
 	if err != nil {
 		a.adminFail(c, http.StatusInternalServerError, "could not create API key", err)
 		return

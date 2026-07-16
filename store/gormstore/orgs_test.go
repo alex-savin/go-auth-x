@@ -1,8 +1,10 @@
 package gormstore
 
 import (
+	"crypto/sha256"
 	"errors"
 	"testing"
+	"time"
 
 	authx "github.com/alex-savin/go-auth-x"
 )
@@ -114,5 +116,133 @@ func TestOrgs_Conformance(t *testing.T) {
 	}
 	if ms, _ := store.UserOrgs(u2.ID); len(ms) != 0 {
 		t.Fatalf("DeleteOrg must cascade memberships: %+v", ms)
+	}
+}
+
+// TestOrgs_V07Conformance mirrors the memory store's v0.7 suite over sqlite: invites, org groups,
+// org-bound keys, and the cascades (RemoveOrgMember → group rows, DeleteOrg → everything).
+func TestOrgs_V07Conformance(t *testing.T) {
+	s := newStore(t)
+	var store authx.OrgStore = s
+	u, _ := s.CreateLocalUser("m@x.com", "M")
+	o, _ := store.CreateOrg("acme", "Acme")
+
+	// Invite lifecycle.
+	h1 := sha256.Sum256([]byte("tok1"))
+	if _, err := store.CreateOrgInvite(o.ID, "new@x.com", "member", "m@x.com", h1[:], time.Now().Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PeekOrgInvite(h1[:]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PeekOrgInvite(h1[:]); err != nil {
+		t.Fatal("peek must be non-destructive")
+	}
+	if got, err := store.ConsumeOrgInvite(h1[:]); err != nil || got.Role != "member" {
+		t.Fatalf("consume = %v, %v", got, err)
+	}
+	if _, err := store.ConsumeOrgInvite(h1[:]); !errors.Is(err, authx.ErrTokenInvalid) {
+		t.Fatalf("second consume must be ErrTokenInvalid, got %v", err)
+	}
+
+	// Replacement + pending list + revoke + expiry.
+	h2 := sha256.Sum256([]byte("tok2"))
+	h3 := sha256.Sum256([]byte("tok3"))
+	_, _ = store.CreateOrgInvite(o.ID, "x@x.com", "member", "", h2[:], time.Now().Add(time.Hour))
+	_, _ = store.CreateOrgInvite(o.ID, "x@x.com", "admin", "", h3[:], time.Now().Add(time.Hour))
+	if _, err := store.PeekOrgInvite(h2[:]); !errors.Is(err, authx.ErrTokenInvalid) {
+		t.Fatalf("replaced invite must be dead, got %v", err)
+	}
+	pending, _ := store.OrgInvites(o.ID)
+	if len(pending) != 1 || pending[0].Role != "admin" {
+		t.Fatalf("pending = %+v", pending)
+	}
+	if err := store.RevokeOrgInvite(o.ID, pending[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PeekOrgInvite(h3[:]); !errors.Is(err, authx.ErrTokenInvalid) {
+		t.Fatalf("revoked invite must be dead, got %v", err)
+	}
+	h4 := sha256.Sum256([]byte("tok4"))
+	_, _ = store.CreateOrgInvite(o.ID, "late@x.com", "member", "", h4[:], time.Now().Add(-time.Minute))
+	if _, err := store.PeekOrgInvite(h4[:]); !errors.Is(err, authx.ErrTokenInvalid) {
+		t.Fatalf("expired invite must be ErrTokenInvalid, got %v", err)
+	}
+
+	// Org groups: per-org namespace, global verbs blind to them, membership cascade on removal.
+	if _, err := s.CreateOrgGroup(o.ID, "eng", ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.CreateOrgGroup(o.ID, "eng", ""); err == nil {
+		t.Fatal("duplicate (org, name) must be refused")
+	}
+	if _, err := s.CreateGroup("eng", ""); err != nil {
+		t.Fatalf("a GLOBAL 'eng' must coexist with the org one: %v", err)
+	}
+	o2, _ := store.CreateOrg("globex", "Globex")
+	if _, err := s.CreateOrgGroup(o2.ID, "eng", ""); err != nil {
+		t.Fatalf("two orgs must both own 'eng': %v", err)
+	}
+	og, _ := s.OrgGroupByName(o.ID, "eng")
+	if owner, _ := s.OrgOfGroup(og.ID); owner != o.ID {
+		t.Fatalf("OrgOfGroup = %q, want %q", owner, o.ID)
+	}
+	gg, _ := s.GroupByName("eng")
+	if owner, _ := s.OrgOfGroup(gg.ID); owner != "" {
+		t.Fatalf("a global group's OrgOfGroup must be empty, got %q", owner)
+	}
+	if gs, _ := s.Groups(); len(gs) != 1 || gs[0].OrgID != "" {
+		t.Fatalf("global Groups() must list only the global group: %+v", gs)
+	}
+	_ = store.SetOrgMember(o.ID, u.ID, authx.OrgRoleMember)
+	_ = s.AddUserToGroup(u.ID, og.ID)
+	if gs, _ := s.UserOrgGroups(o.ID, u.ID); len(gs) != 1 {
+		t.Fatalf("UserOrgGroups = %+v", gs)
+	}
+	if err := store.RemoveOrgMember(o.ID, u.ID); err != nil {
+		t.Fatal(err)
+	}
+	if gs, _ := s.UserOrgGroups(o.ID, u.ID); len(gs) != 0 {
+		t.Fatalf("org-group membership must die with org membership: %+v", gs)
+	}
+
+	// Org-bound keys carry OrgID through the hash lookup; DeleteOrg cascades everything.
+	kh := sha256.Sum256([]byte("axk_orgkey"))
+	if _, err := s.CreateOrgAPIKey(o.ID, "k", nil, []string{"scim"}, "axk_orgk", kh[:], nil); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := s.APIKeyByHash(kh[:]); err != nil || info.OrgID != o.ID {
+		t.Fatalf("org key lookup = %+v, %v", info, err)
+	}
+	if keys, _ := s.ListOrgAPIKeys(o.ID); len(keys) != 1 {
+		t.Fatalf("ListOrgAPIKeys = %+v", keys)
+	}
+	h5 := sha256.Sum256([]byte("tok5"))
+	_, _ = store.CreateOrgInvite(o.ID, "y@x.com", "member", "", h5[:], time.Now().Add(time.Hour))
+	if err := store.DeleteOrg(o.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.OrgOfGroup(og.ID); !errors.Is(err, authx.ErrNoGroup) {
+		t.Fatalf("org groups must die with the org, got %v", err)
+	}
+	if _, err := store.PeekOrgInvite(h5[:]); !errors.Is(err, authx.ErrTokenInvalid) {
+		t.Fatalf("org invites must die with the org, got %v", err)
+	}
+	if _, err := s.APIKeyByHash(kh[:]); !errors.Is(err, authx.ErrNoCredential) {
+		t.Fatalf("org keys must die with the org, got %v", err)
+	}
+	if gg2, err := s.GroupByName("eng"); err != nil || gg2.ID != gg.ID {
+		t.Fatalf("the GLOBAL group must survive DeleteOrg: %v", err)
+	}
+
+	// DeleteUser erases pending invites addressed to the user's email (GDPR parity).
+	victim, _ := s.CreateLocalUser("bye@x.com", "Bye")
+	h6 := sha256.Sum256([]byte("tok6"))
+	_, _ = store.CreateOrgInvite(o2.ID, "bye@x.com", "member", "", h6[:], time.Now().Add(time.Hour))
+	if err := s.DeleteUser(victim.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.PeekOrgInvite(h6[:]); !errors.Is(err, authx.ErrTokenInvalid) {
+		t.Fatalf("invites to an erased user must be gone, got %v", err)
 	}
 }

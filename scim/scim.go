@@ -435,7 +435,18 @@ func (s *Server) patchUser(w http.ResponseWriter, r *http.Request) {
 			_ = s.dir.SetUserDisabled(id, !active)
 		}
 	}
-	u, _ := s.dir.UserByID(id)
+	u, uerr := s.dir.UserByID(id)
+	if uerr != nil {
+		// An org-scoped directory deprovisions by REMOVING the user from the org, so the refetch
+		// can legitimately miss. Render the pre-patch resource with the applied active state —
+		// the resource then 404s on the next read, which is how the IdP observes the removal.
+		u = cur
+		for _, op := range p.Operations {
+			if active, ok := activeFromOp(op.Path, op.Value); ok {
+				u.Disabled = !active
+			}
+		}
+	}
 	writeResource(w, http.StatusOK, s.toSCIMUser(u), userVersion(u))
 }
 
@@ -473,7 +484,13 @@ func (s *Server) putUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = s.dir.SetUserDisabled(cur.ID, !activeWithDefault(raw)) // absent → true
-	u, _ := s.dir.UserByID(cur.ID)
+	u, uerr := s.dir.UserByID(cur.ID)
+	if uerr != nil {
+		// See patchUser: an org-scoped directory removes a deprovisioned user from view — render
+		// the pre-PUT resource with the applied state instead of dereferencing a miss.
+		u = cur
+		u.Disabled = !activeWithDefault(raw)
+	}
 	writeResource(w, http.StatusOK, s.toSCIMUser(u), userVersion(u))
 }
 

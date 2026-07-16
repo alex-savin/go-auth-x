@@ -206,7 +206,7 @@ func (a *Authenticator) adminImpersonate(c *reqCtx) {
 	}
 	var groups []string
 	if gs, gerr := a.dir.UserGroups(id); gerr == nil {
-		groups = groupNames(gs)
+		groups = groupNames(globalGroups(gs)) // org groups never ride in the cookie (see completeLogin)
 	}
 	// Impersonation sees the target's default active org too, so an org-scoped app renders as the
 	// user would see it (adminGuard still refuses the session for admin verbs via ImpersonatedBy).

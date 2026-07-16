@@ -21,18 +21,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `org`, `orgRole` (live), and `orgs`; `/auth/config` reports `orgs`.
   - **`RequireOrgHTTP(roles...)`** middleware — re-verifies membership/role against the store per
     request, so an org removal or demotion takes effect immediately instead of at cookie expiry.
-  - **Email invites** — `POST /auth/org/invites` (owner/admin; only owners may invite owners) sends a
-    single-use, hashed-at-rest token whose stored purpose binds org + role (tampering with the accept
-    URL redeems nothing). Accepting requires a session whose email MATCHES the invited address; the
-    wrong account can't burn the token (peek-before-consume), and redemption marks the email verified.
-    Known limitation: pending invitations can't be listed or revoked before their 7-day TTL (the
-    token store is exact-lookup only); first-class invite records are planned for the v0.7 phase.
+  - **Email invites — first-class records** (`OrgInvite`): `POST /auth/org/invites` (owner/admin;
+    only owners may invite owners) emails a single-use, hashed-at-rest token; the org + role bind
+    to the stored RECORD, so nothing in the accept URL can be tampered with. Pending invites are
+    **listable** (`GET /auth/org/invites`) and **revocable** (`DELETE /auth/org/invites/{id}`);
+    re-inviting an address replaces its pending invite. Accepting requires a session whose email
+    MATCHES the invited address; the wrong account can't burn the token (peek-before-consume), and
+    redemption marks the email verified.
   - **Self-service member management** — `GET/POST/DELETE /auth/org/members[/{userId}]` with a
     serialized last-owner guard (can't demote/remove the final owner) and self-removal (leave).
   - **Admin verbs** — org CRUD + membership under `/auth/admin/orgs` (admin API deliberately bypasses
     the last-owner guard as the recovery path).
-  - **GDPR parity** — `DeleteUser` cascades org memberships in both reference stores; `DeleteOrg`
-    cascades its memberships.
+  - **GDPR parity** — `DeleteUser` cascades org memberships (and pending invites to the erased
+    email) in both reference stores; `DeleteOrg` cascades its memberships, groups, invites, and
+    org-bound API keys.
+
+- **Org-scoped resources (the v0.7 phase)** — groups and API keys can now be BOUND to one org via
+  the optional `OrgDirectoryStore` upgrade interface (detected by type assertion; custom
+  `DirectoryStore`s keep compiling unchanged, the features just 501), unlocking per-customer SCIM:
+  - **Org-scoped groups** — `Group.OrgID` ("" = global); names unique per (org, name), so two orgs
+    both own "engineering". The GLOBAL verbs (`Groups`/`GroupByName`) never see them, and they
+    never ride in the session cookie (names collide across orgs) — **`RequireOrgGroupsHTTP`** gates
+    on LIVE org-group membership in the active org instead. Org membership removal cascades the
+    member out of the org's groups. Admin CRUD under `/auth/admin/orgs/{id}/groups`.
+  - **Org-bound API keys** — `APIKeyInfo.OrgID`; minted via the admin API (`POST /auth/admin/apikeys`
+    with `"org"`). An org-bound key is refused by EVERY global surface — `adminGuard` (even with the
+    `admin` scope), `ValidateAPIKeyScope`, group merging — and only satisfies the new
+    **`ValidateOrgAPIKeyScope(raw, scope, orgID)`** for its own org.
+  - **Org-scoped SCIM** — **`NewOrgScopedDirectory(dir, orgs, orgID)`** wraps a `DirectoryStore` in
+    a view confined to one org, mountable per customer with `scim.NewServer` + an org-bound key.
+    The trust boundary is enforced in the view: provisioned subjects are **namespaced per org**
+    (two customers' "jdoe" are two accounts), an existing outside account's email is **never
+    adopted or rebound** (`ErrEmailConflict` → SCIM 409 — existing users join via the consent-based
+    invite flow), deprovision (`active=false`/DELETE) **removes the user from the org** — never the
+    global account — and org owners can't be deprovisioned by a customer IdP.
+  - **SCIM server hardening** — `PATCH`/`PUT /Users/{id}` no longer dereference a post-update
+    refetch miss (an org-scoped deprovision removes the user from view mid-request).
 
 ## [0.5.1] — 2026-07-15
 

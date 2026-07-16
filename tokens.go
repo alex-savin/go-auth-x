@@ -13,10 +13,6 @@ const (
 	purposeInvite        = "invite"
 	purposeChangeEmail   = "change_email" // verify a NEW address before rebinding it
 	purposeEmailOTP      = "email_otp"    // short numeric sign-in code (see emailotp.go)
-	// purposeOrgInvite is a PREFIX: the stored purpose is "org_invite:<orgID>:<role>", binding the
-	// invite to one org + role. The accept URL carries org/role in the query, so a tampered value
-	// reconstructs a purpose that matches no stored token (see orgInvitePurpose).
-	purposeOrgInvite = "org_invite"
 )
 
 // Token TTLs by purpose (used by the Phase 1+ email flows).

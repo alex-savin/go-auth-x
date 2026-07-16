@@ -86,6 +86,8 @@ func (a *Authenticator) routes(mux *http.ServeMux) {
 		mux.HandleFunc("POST /auth/org/members/{userId}", a.wrap(a.OrgMemberSetRole))
 		mux.HandleFunc("DELETE /auth/org/members/{userId}", a.wrap(a.OrgMemberRemove))
 		mux.HandleFunc("POST /auth/org/invites", a.wrap(a.OrgInviteCreate))
+		mux.HandleFunc("GET /auth/org/invites", a.wrap(a.OrgInviteList))
+		mux.HandleFunc("DELETE /auth/org/invites/{id}", a.wrap(a.OrgInviteRevoke))
 		mux.HandleFunc("GET /auth/org/invite/accept", a.wrap(a.OrgInviteAccept))
 		a.adminOrgRoutes(mux)
 	}

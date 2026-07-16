@@ -16,38 +16,44 @@ var _ authx.DirectoryStore = (*Store)(nil)
 func (s *Store) CreateGroup(name, description string) (*authx.Group, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// Enforce name uniqueness (parity with gormstore's uniqueIndex on Group.Name), so a concurrent
-	// check-then-create can't leave two groups with the same name.
+	// Enforce name uniqueness among GLOBAL groups (parity with gormstore's (org, name) index) —
+	// org-scoped groups live in per-org namespaces, so only a global/global collision is refused.
 	trimmed := strings.TrimSpace(name)
 	for _, g := range s.groups {
-		if g.Name == trimmed {
+		if g.OrgID == "" && g.Name == trimmed {
 			return nil, errDuplicateGroup
 		}
 	}
 	s.groupSeq++
-	g := &authx.Group{ID: s.groupSeq, Name: strings.TrimSpace(name), Description: description, CreatedAt: time.Now(), UpdatedAt: time.Now()}
+	g := &authx.Group{ID: s.groupSeq, Name: trimmed, Description: description, CreatedAt: time.Now(), UpdatedAt: time.Now()}
 	s.groups[g.ID] = g
 	cp := *g
 	return &cp, nil
 }
 
+// Groups lists the GLOBAL groups only — org-scoped groups are reached through OrgGroups (see
+// OrgDirectoryStore), so an org's namespace never leaks into the global verbs.
 func (s *Store) Groups() ([]authx.Group, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make([]authx.Group, 0, len(s.groups))
 	for _, g := range s.groups {
-		out = append(out, *g)
+		if g.OrgID == "" {
+			out = append(out, *g)
+		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
 }
 
+// GroupByName resolves a GLOBAL group; org-scoped names live in their org's namespace
+// (OrgGroupByName).
 func (s *Store) GroupByName(name string) (*authx.Group, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	name = strings.TrimSpace(name)
 	for _, g := range s.groups {
-		if g.Name == name {
+		if g.OrgID == "" && g.Name == name {
 			cp := *g
 			return &cp, nil
 		}

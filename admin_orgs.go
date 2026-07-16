@@ -18,6 +18,208 @@ func (a *Authenticator) adminOrgRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /auth/admin/orgs/{id}/members", a.wrap(a.adminOrgMembers))
 	mux.HandleFunc("POST /auth/admin/orgs/{id}/members/{userId}", a.wrap(a.adminSetOrgMember))
 	mux.HandleFunc("DELETE /auth/admin/orgs/{id}/members/{userId}", a.wrap(a.adminRemoveOrgMember))
+	// Org-scoped groups (self-gate on the store implementing OrgDirectoryStore; 501 otherwise).
+	mux.HandleFunc("GET /auth/admin/orgs/{id}/groups", a.wrap(a.adminOrgGroups))
+	mux.HandleFunc("POST /auth/admin/orgs/{id}/groups", a.wrap(a.adminCreateOrgGroup))
+	mux.HandleFunc("DELETE /auth/admin/orgs/{id}/groups/{groupId}", a.wrap(a.adminDeleteOrgGroup))
+	mux.HandleFunc("GET /auth/admin/orgs/{id}/groups/{groupId}/members", a.wrap(a.adminOrgGroupMembers))
+	mux.HandleFunc("POST /auth/admin/orgs/{id}/groups/{groupId}/members/{userId}", a.wrap(a.adminAddOrgGroupMember))
+	mux.HandleFunc("DELETE /auth/admin/orgs/{id}/groups/{groupId}/members/{userId}", a.wrap(a.adminRemoveOrgGroupMember))
+}
+
+// adminOrgDir gates the org-group verbs on the directory supporting org-scoped resources.
+func (a *Authenticator) adminOrgDir(c *reqCtx) (OrgDirectoryStore, bool) {
+	od := a.orgDir()
+	if od == nil {
+		c.JSON(http.StatusNotImplemented, H{"error": "org-scoped groups are not available (the directory store doesn't support them)"})
+		return nil, false
+	}
+	return od, true
+}
+
+// orgGroupInOrg verifies group {groupId} belongs to org {id} (admin paths name both, so a
+// mismatched pair must 404 rather than silently operate on another org's — or a global — group).
+func (a *Authenticator) orgGroupInOrg(c *reqCtx, od OrgDirectoryStore, orgID string) (uint, bool) {
+	gid, ok := paramUint(c, "groupId")
+	if !ok {
+		return 0, false
+	}
+	owner, err := od.OrgOfGroup(gid)
+	if errors.Is(err, ErrNoGroup) || (err == nil && owner != orgID) {
+		c.JSON(http.StatusNotFound, H{"error": "no such group in this organization"})
+		return 0, false
+	}
+	if err != nil {
+		a.adminFail(c, http.StatusInternalServerError, "could not resolve group", err)
+		return 0, false
+	}
+	return gid, true
+}
+
+func (a *Authenticator) adminOrgGroups(c *reqCtx) {
+	if !a.adminGuard(c) {
+		return
+	}
+	od, ok := a.adminOrgDir(c)
+	if !ok {
+		return
+	}
+	id, ok := paramOrgID(c)
+	if !ok {
+		return
+	}
+	gs, err := od.OrgGroups(id)
+	if err != nil {
+		a.adminFail(c, http.StatusInternalServerError, "could not list groups", err)
+		return
+	}
+	c.JSON(http.StatusOK, H{"groups": gs})
+}
+
+func (a *Authenticator) adminCreateOrgGroup(c *reqCtx) {
+	if !a.adminGuard(c) {
+		return
+	}
+	od, ok := a.adminOrgDir(c)
+	if !ok {
+		return
+	}
+	id, ok := paramOrgID(c)
+	if !ok {
+		return
+	}
+	if a.orgs != nil {
+		if _, err := a.orgs.OrgByID(id); err != nil {
+			c.JSON(http.StatusNotFound, H{"error": "no such organization"})
+			return
+		}
+	}
+	var body struct{ Name, Description string }
+	if err := c.ShouldBindJSON(&body); err != nil || strings.TrimSpace(body.Name) == "" {
+		c.JSON(http.StatusBadRequest, H{"error": "name required"})
+		return
+	}
+	// A duplicate name within the org is a 409; the store's (org, name) constraint is the
+	// fail-closed backstop under races (parity with adminCreateGroup).
+	if existing, gerr := od.OrgGroupByName(id, strings.TrimSpace(body.Name)); gerr == nil && existing != nil {
+		c.JSON(http.StatusConflict, H{"error": "a group with that name already exists in this organization"})
+		return
+	}
+	g, err := od.CreateOrgGroup(id, strings.TrimSpace(body.Name), body.Description)
+	if err != nil {
+		a.adminFail(c, http.StatusInternalServerError, "could not create group", err)
+		return
+	}
+	c.JSON(http.StatusOK, g)
+}
+
+func (a *Authenticator) adminDeleteOrgGroup(c *reqCtx) {
+	if !a.adminGuard(c) {
+		return
+	}
+	od, ok := a.adminOrgDir(c)
+	if !ok {
+		return
+	}
+	id, ok := paramOrgID(c)
+	if !ok {
+		return
+	}
+	gid, ok := a.orgGroupInOrg(c, od, id)
+	if !ok {
+		return
+	}
+	if err := a.dir.DeleteGroup(gid); err != nil {
+		a.adminFail(c, http.StatusInternalServerError, "could not delete group", err)
+		return
+	}
+	c.JSON(http.StatusOK, H{"ok": true})
+}
+
+func (a *Authenticator) adminOrgGroupMembers(c *reqCtx) {
+	if !a.adminGuard(c) {
+		return
+	}
+	od, ok := a.adminOrgDir(c)
+	if !ok {
+		return
+	}
+	id, ok := paramOrgID(c)
+	if !ok {
+		return
+	}
+	gid, ok := a.orgGroupInOrg(c, od, id)
+	if !ok {
+		return
+	}
+	members, err := a.dir.GroupMembers(gid)
+	if err != nil {
+		a.adminFail(c, http.StatusInternalServerError, "could not list members", err)
+		return
+	}
+	c.JSON(http.StatusOK, H{"members": members})
+}
+
+func (a *Authenticator) adminAddOrgGroupMember(c *reqCtx) {
+	if !a.adminGuard(c) {
+		return
+	}
+	od, ok := a.adminOrgDir(c)
+	if !ok {
+		return
+	}
+	id, ok := paramOrgID(c)
+	if !ok {
+		return
+	}
+	gid, ok := a.orgGroupInOrg(c, od, id)
+	if !ok {
+		return
+	}
+	uid, ok := paramUint(c, "userId")
+	if !ok {
+		return
+	}
+	// Only the org's own members may populate its groups — a group row for a non-member would
+	// grant nothing (RequireOrgGroupsHTTP re-checks membership) but would confuse every list.
+	if a.orgs != nil {
+		if _, err := a.orgs.OrgRole(id, uid); err != nil {
+			c.JSON(http.StatusConflict, H{"error": "that user is not a member of this organization"})
+			return
+		}
+	}
+	if err := a.dir.AddUserToGroup(uid, gid); err != nil {
+		a.adminFail(c, http.StatusInternalServerError, "could not add member", err)
+		return
+	}
+	c.JSON(http.StatusOK, H{"ok": true})
+}
+
+func (a *Authenticator) adminRemoveOrgGroupMember(c *reqCtx) {
+	if !a.adminGuard(c) {
+		return
+	}
+	od, ok := a.adminOrgDir(c)
+	if !ok {
+		return
+	}
+	id, ok := paramOrgID(c)
+	if !ok {
+		return
+	}
+	gid, ok := a.orgGroupInOrg(c, od, id)
+	if !ok {
+		return
+	}
+	uid, ok := paramUint(c, "userId")
+	if !ok {
+		return
+	}
+	if err := a.dir.RemoveUserFromGroup(uid, gid); err != nil {
+		a.adminFail(c, http.StatusInternalServerError, "could not remove member", err)
+		return
+	}
+	c.JSON(http.StatusOK, H{"ok": true})
 }
 
 // paramOrgID reads the opaque org-id path parameter (400 on empty, mirroring paramUint).

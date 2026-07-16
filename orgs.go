@@ -49,6 +49,19 @@ type OrgMember struct {
 	Role string   `json:"role"`
 }
 
+// OrgInvite is a pending, first-class invitation record: listable and revocable, unlike a bare
+// token. The raw invite token is emailed once and only its hash is stored; the org + role bind to
+// the RECORD, so nothing security-relevant rides in the accept URL.
+type OrgInvite struct {
+	ID        uint      `json:"id"`
+	OrgID     string    `json:"orgId"`
+	Email     string    `json:"email"`
+	Role      string    `json:"role"`
+	InvitedBy string    `json:"invitedBy,omitempty"` // inviter's email, for the pending-invites UI
+	ExpiresAt time.Time `json:"expiresAt"`
+	CreatedAt time.Time `json:"createdAt"`
+}
+
 // OrgStore is the OPTIONAL persistence for organizations and their memberships. Wire it with
 // SetOrgStore to enable the org layer: an active-org session claim, org switching, member
 // management, email invites, RequireOrgHTTP, and the admin org verbs. Like the other capability
@@ -71,13 +84,27 @@ type OrgStore interface {
 	// (who may grant what, the last-owner guard) is enforced by the callers, not the store. It
 	// returns ErrNoOrg when the org is absent and ErrNoUser when the user doesn't exist (a
 	// dangling row would be invisible in OrgMembers yet inherited by a future user assigned that
-	// ID). RemoveOrgMember is idempotent. OrgRole returns ErrNotOrgMember when there is no
-	// membership (ErrNoOrg when the org itself is absent).
+	// ID). RemoveOrgMember is idempotent and ALSO removes the user from the org's org-scoped
+	// groups when the store supports them — org-group membership must not outlive org membership.
+	// OrgRole returns ErrNotOrgMember when there is no membership (ErrNoOrg when the org itself
+	// is absent).
 	SetOrgMember(orgID string, userID uint, role string) error
 	RemoveOrgMember(orgID string, userID uint) error
 	OrgRole(orgID string, userID uint) (string, error)
 	UserOrgs(userID uint) ([]UserOrg, error)
 	OrgMembers(orgID string) ([]OrgMember, error)
+
+	// Invitations — first-class records (listable + revocable), hashed-at-rest like every other
+	// token. CreateOrgInvite REPLACES any pending invite for (org, email), so re-inviting updates
+	// the role/expiry instead of stacking rows. OrgInvites returns the PENDING set (unconsumed,
+	// unexpired, unrevoked). RevokeOrgInvite is idempotent. PeekOrgInvite validates a token
+	// WITHOUT consuming it (so the wrong account can't burn a valid invite); ConsumeOrgInvite
+	// atomically marks it used — both return ErrTokenInvalid on any miss/expiry/revocation.
+	CreateOrgInvite(orgID, email, role, invitedBy string, tokenHash []byte, expiresAt time.Time) (*OrgInvite, error)
+	OrgInvites(orgID string) ([]OrgInvite, error)
+	RevokeOrgInvite(orgID string, id uint) error
+	PeekOrgInvite(tokenHash []byte) (*OrgInvite, error)
+	ConsumeOrgInvite(tokenHash []byte) (*OrgInvite, error)
 }
 
 // SetOrgStore installs the optional organization persistence, enabling the org layer (active-org

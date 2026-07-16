@@ -15,6 +15,11 @@ type Group struct {
 	Description string    `json:"description"`
 	CreatedAt   time.Time `json:"createdAt"`
 	UpdatedAt   time.Time `json:"updatedAt,omitempty"` // for SCIM meta.lastModified; zero if the store doesn't track it
+	// OrgID binds an org-scoped group to its organization ("" = a global group, the default).
+	// Names are unique per (org, name). Org-scoped groups are invisible to the global verbs
+	// (Groups / GroupByName) and never ride in the session cookie — they are managed through
+	// OrgDirectoryStore and checked live by RequireOrgGroupsHTTP.
+	OrgID string `json:"orgId,omitempty"`
 }
 
 // APIKeyInfo is the non-secret metadata of an API key. The raw key is shown ONCE at creation; only
@@ -30,6 +35,10 @@ type APIKeyInfo struct {
 	ExpiresAt  *time.Time `json:"expiresAt,omitempty"`
 	CreatedAt  time.Time  `json:"createdAt"`
 	LastUsedAt *time.Time `json:"lastUsedAt,omitempty"`
+	// OrgID binds the key to one organization ("" = a global key, the default). An org-bound key
+	// is refused by every GLOBAL surface — adminGuard, ValidateAPIKeyScope, group merging — and
+	// only satisfies ValidateOrgAPIKeyScope for its own org (e.g. that org's SCIM mount).
+	OrgID string `json:"orgId,omitempty"`
 }
 
 // KeyHasScope reports whether an API key may use a given scope. Least privilege: an EMPTY Scopes

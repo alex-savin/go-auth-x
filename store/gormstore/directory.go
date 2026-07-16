@@ -17,8 +17,12 @@ var _ authx.DirectoryStore = (*Store)(nil)
 // --- directory models (groups, membership, api keys) ---
 
 type Group struct {
-	ID          uint   `gorm:"primaryKey"`
-	Name        string `gorm:"uniqueIndex"`
+	ID uint `gorm:"primaryKey"`
+	// OrgID scopes the group to an organization (0 = global). Names are unique per (org, name) —
+	// two orgs may both have "engineering" alongside a global one. default:0 backfills the column
+	// on migration so pre-org rows read as global.
+	OrgID       uint   `gorm:"default:0;uniqueIndex:idx_authx_groups_org_name,priority:1"`
+	Name        string `gorm:"uniqueIndex:idx_authx_groups_org_name,priority:2"`
 	Description string
 	CreatedAt   time.Time
 	UpdatedAt   time.Time // gorm auto-updates on save; surfaced as SCIM meta.lastModified
@@ -41,6 +45,7 @@ type APIKey struct {
 	Hash       []byte `gorm:"uniqueIndex"`
 	Groups     string // CSV of group names granted to calls made with this key
 	Scopes     string // CSV of scopes this key is limited to (empty = unrestricted)
+	OrgID      uint   `gorm:"default:0;index"` // 0 = global; else the org this key is bound to
 	ExpiresAt  *time.Time
 	CreatedAt  time.Time
 	LastUsedAt *time.Time
@@ -50,11 +55,26 @@ func (APIKey) TableName() string { return "authx_api_keys" }
 
 // migrateDirectory is called by New to migrate the directory tables.
 func (s *Store) migrateDirectory() error {
-	return s.db.AutoMigrate(&Group{}, &GroupMembership{}, &APIKey{})
+	if err := s.db.AutoMigrate(&Group{}, &GroupMembership{}, &APIKey{}); err != nil {
+		return err
+	}
+	// Pre-org deployments carry the old GLOBAL unique index on group name; it must go or two orgs
+	// could never share a group name (the composite (org_id, name) index is the replacement,
+	// created by AutoMigrate above). Best-effort: absent on fresh databases.
+	if s.db.Migrator().HasIndex(&Group{}, "idx_authx_groups_name") {
+		if err := s.db.Migrator().DropIndex(&Group{}, "idx_authx_groups_name"); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func toGroup(g *Group) authx.Group {
-	return authx.Group{ID: g.ID, Name: g.Name, Description: g.Description, CreatedAt: g.CreatedAt, UpdatedAt: g.UpdatedAt}
+	orgID := ""
+	if g.OrgID != 0 {
+		orgID = orgIDString(g.OrgID)
+	}
+	return authx.Group{ID: g.ID, Name: g.Name, Description: g.Description, OrgID: orgID, CreatedAt: g.CreatedAt, UpdatedAt: g.UpdatedAt}
 }
 
 func csvSplit(s string) []string {
@@ -68,9 +88,13 @@ func csvSplit(s string) []string {
 }
 
 func toAPIKeyInfo(k *APIKey) authx.APIKeyInfo {
+	orgID := ""
+	if k.OrgID != 0 {
+		orgID = orgIDString(k.OrgID)
+	}
 	return authx.APIKeyInfo{
 		ID: k.ID, Name: k.Name, Prefix: k.Prefix, Groups: csvSplit(k.Groups), Scopes: csvSplit(k.Scopes),
-		ExpiresAt: k.ExpiresAt, CreatedAt: k.CreatedAt, LastUsedAt: k.LastUsedAt,
+		ExpiresAt: k.ExpiresAt, CreatedAt: k.CreatedAt, LastUsedAt: k.LastUsedAt, OrgID: orgID,
 	}
 }
 
@@ -85,9 +109,11 @@ func (s *Store) CreateGroup(name, description string) (*authx.Group, error) {
 	return &ag, nil
 }
 
+// Groups lists the GLOBAL groups only — org-scoped groups are reached through OrgGroups (see
+// OrgDirectoryStore), so an org's namespace never leaks into the global verbs.
 func (s *Store) Groups() ([]authx.Group, error) {
 	var rows []Group
-	if err := s.db.Order("name").Find(&rows).Error; err != nil {
+	if err := s.db.Where("org_id = 0").Order("name").Find(&rows).Error; err != nil {
 		return nil, err
 	}
 	out := make([]authx.Group, 0, len(rows))
@@ -97,9 +123,11 @@ func (s *Store) Groups() ([]authx.Group, error) {
 	return out, nil
 }
 
+// GroupByName resolves a GLOBAL group; org-scoped names live in their org's namespace
+// (OrgGroupByName).
 func (s *Store) GroupByName(name string) (*authx.Group, error) {
 	var g Group
-	if err := s.db.Where("name = ?", strings.TrimSpace(name)).First(&g).Error; err != nil {
+	if err := s.db.Where("org_id = 0 AND name = ?", strings.TrimSpace(name)).First(&g).Error; err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, authx.ErrNoGroup
 		}

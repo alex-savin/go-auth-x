@@ -94,6 +94,8 @@ type Store struct {
 	orgs       map[uint]*org
 	orgSeq     uint
 	orgMembers map[uint]map[uint]string // orgID -> userID -> role
+	orgInvites map[uint]*orgInvite      // inviteID -> pending/consumed invite record
+	inviteSeq  uint
 	// 2fa state
 	totp     map[uint]*totpRec
 	recovery map[uint]map[string]bool // userID -> set of hex(sha256(code))
@@ -124,6 +126,7 @@ func New() *Store {
 		apikeys:     map[uint]*apiKey{},
 		orgs:        map[uint]*org{},
 		orgMembers:  map[uint]map[uint]string{},
+		orgInvites:  map[uint]*orgInvite{},
 		totp:        map[uint]*totpRec{},
 		recovery:    map[uint]map[string]bool{},
 	}
@@ -368,6 +371,12 @@ func (s *Store) DeleteUser(userID uint) error {
 		for k := range s.otps {
 			if strings.HasSuffix(k, "|"+email) {
 				delete(s.otps, k)
+			}
+		}
+		// GDPR parity: pending org invites addressed to the erased user's email carry PII too.
+		for iid, rec := range s.orgInvites {
+			if rec.inv.Email == email {
+				delete(s.orgInvites, iid)
 			}
 		}
 	}

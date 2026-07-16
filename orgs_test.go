@@ -404,29 +404,57 @@ func TestOrgInvite_WrongAccountDoesNotBurnToken(t *testing.T) {
 	}
 }
 
-func TestOrgInvite_TamperedRoleIsRefused(t *testing.T) {
+func TestOrgInvite_RecordsListRevokeAndReplace(t *testing.T) {
 	a, s, mailer := newOrgAuth(t)
 	owner := seedUser(t, s, "o@x.com", "hunter2hunter2", true)
 	o := seedOrg(t, s, "acme", map[uint]string{owner.ID: authx.OrgRoleOwner})
 	oc := newClient(t, a)
 	oc.login("o@x.com", "hunter2hunter2")
+
+	// Nothing in the accept URL can be tampered with anymore (org+role bind to the record); a
+	// corrupted token simply matches no invite.
 	_ = oc.do("POST", "/auth/org/invites", map[string]any{"email": "new@x.com", "role": "member"})
 	link := inviteLink(t, mailer, "invited you to join")
-
-	// Escalate role=member → role=owner in the URL: the reconstructed purpose matches no token.
-	tampered := strings.Replace(link, "role=member", "role=owner", 1)
 	invitee := seedUser(t, s, "new@x.com", "hunter2hunter2", true)
 	ic := newClient(t, a)
 	ic.login("new@x.com", "hunter2hunter2")
-	if w := ic.do("GET", tampered, nil); !strings.Contains(w.Header().Get("Location"), "error=") {
-		t.Fatal("a tampered role must be refused")
+	if w := ic.do("GET", link+"x", nil); !strings.Contains(w.Header().Get("Location"), "error=") {
+		t.Fatal("a corrupted token must be refused")
+	}
+
+	// Re-inviting the same address REPLACES the pending invite (role update, no row stacking) —
+	// and invalidates the earlier link.
+	if w := oc.do("POST", "/auth/org/invites", map[string]any{"email": "new@x.com", "role": "admin"}); w.Code != 200 {
+		t.Fatalf("re-invite = %d", w.Code)
+	}
+	lst := decode(t, oc.do("GET", "/auth/org/invites", nil))
+	invites, _ := lst["invites"].([]any)
+	if len(invites) != 1 {
+		t.Fatalf("re-invite must replace, not stack: %v", lst)
+	}
+	first := invites[0].(map[string]any)
+	if first["role"] != "admin" || first["email"] != "new@x.com" || first["invitedBy"] != "o@x.com" {
+		t.Fatalf("pending invite record = %v", first)
+	}
+	if w := ic.do("GET", link, nil); !strings.Contains(w.Header().Get("Location"), "error=") {
+		t.Fatal("a replaced invite's old link must be dead")
+	}
+
+	// Revoke kills the pending invite before redemption.
+	id := int(first["id"].(float64))
+	if w := oc.do("DELETE", "/auth/org/invites/"+itoa(uint(id)), nil); w.Code != 200 {
+		t.Fatalf("revoke = %d: %s", w.Code, w.Body.String())
+	}
+	link2 := inviteLink(t, mailer, "invited you to join") // the re-invite email
+	if w := ic.do("GET", link2, nil); !strings.Contains(w.Header().Get("Location"), "error=") {
+		t.Fatal("a revoked invite must not redeem")
 	}
 	if _, err := s.OrgRole(o.ID, invitee.ID); !errors.Is(err, authx.ErrNotOrgMember) {
-		t.Fatalf("no membership may be granted from a tampered link: %v", err)
+		t.Fatalf("no membership may exist after revocation: %v", err)
 	}
-	// The untampered link still works (the failed attempt didn't consume it).
-	if w := ic.do("GET", link, nil); strings.Contains(w.Header().Get("Location"), "error=") {
-		t.Fatalf("original link must still redeem: %q", w.Header().Get("Location"))
+	lst = decode(t, oc.do("GET", "/auth/org/invites", nil))
+	if invites, _ := lst["invites"].([]any); len(invites) != 0 {
+		t.Fatalf("revoked invite must leave the pending list: %v", lst)
 	}
 }
 
