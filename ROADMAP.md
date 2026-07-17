@@ -166,6 +166,12 @@ demands it** — it's the IdP-shaped edge the README's positioning deliberately 
 - **Org-scoped SCIM efficiency** (non-blocking, noted in the v0.7 review) — the per-customer view
   re-checks group ownership + membership per member in a group PUT/PATCH loop (an N+1 on large group
   syncs); memoize group→org per request and validate members in one query if a large-org consumer hits it.
+- **Pluggable logger (`log/slog`)** — the internal warnings/errors are hardwired to the stdlib
+  `log.Printf` (~8 call sites: the `SESSION_SECRET`/`TRUSTED_PROXIES` warnings, failed-email logs, …),
+  so a consumer can't route or level them. Accept a `*slog.Logger` (`Config.Logger` / `SetLogger`,
+  default `slog.Default()`) and swap the call sites, keeping the security warnings loud. Speak the
+  ecosystem standard rather than invent an `authx.Logger` interface — every backend (zap/zerolog/…)
+  bridges to `slog` — the same principle as `http.Handler` for transport. Small, additive.
 
 ---
 
