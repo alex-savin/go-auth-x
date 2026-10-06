@@ -3,7 +3,6 @@ package authx
 import (
 	"context"
 	"errors"
-	"log"
 	"sort"
 	"strings"
 
@@ -50,7 +49,7 @@ func (a *Authenticator) enableOIDCSocial(ctx context.Context) {
 		// are refused until the operator pins a tenant (MICROSOFT_TENANT) — the safe posture.
 		assumeVerified := !a.cfg.MicrosoftStrictEmailVerified && !isMultiTenantMicrosoft(tenant)
 		if a.cfg.MicrosoftTenant == "" || isMultiTenantMicrosoft(a.cfg.MicrosoftTenant) {
-			log.Printf("authx: Microsoft login is configured for a multi-tenant endpoint (%q); token email is not trusted there — set MICROSOFT_TENANT to a single tenant/domain to enable email-based sign-in.", tenant)
+			a.log().Warn("authx: Microsoft login is configured for a multi-tenant endpoint; token email is not trusted there — set MICROSOFT_TENANT to a single tenant/domain to enable email-based sign-in", "tenant", tenant)
 		}
 		providers = append(providers, SocialOIDCProvider{
 			Name:           "microsoft",

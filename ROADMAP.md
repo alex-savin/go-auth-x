@@ -5,6 +5,17 @@ Direction and planned work for the library. Authoritative usage/feature docs liv
 
 ## Shipped
 
+### Next release — pluggable logger + batch group membership · _unreleased_ · additive
+
+- **Pluggable logger (`log/slog`)** — `Config.Logger` / `SetLogger` (default `slog.Default()`,
+  resolved at log time) replace the hardwired `log.Printf` call sites, keeping the security warnings
+  loud; the SCIM server takes its own via `Server.SetLogger`. Speaks the ecosystem standard rather
+  than an `authx.Logger` interface — every backend (zap/zerolog/…) bridges to `slog`.
+- **Batch group membership** — an optional `BatchGroupStore` (both reference stores implement it) +
+  `AddGroupMembers` / `RemoveGroupMembers` with a best-effort per-member fallback. SCIM group
+  create / `PUT` / `PATCH` write membership in one batch, and the per-customer org view checks group
+  ownership once and validates members in one read — retiring the v0.7 review's N+1 note.
+
 ### v0.8.0 — opaque entity IDs (uuid-friendly stores) · [#2](https://github.com/alex-savin/go-auth-x/issues/2) · **BREAKING**
 
 Every public entity ID is now an opaque `string` across the store interfaces — `AuthUser.ID`,
@@ -163,16 +174,9 @@ demands it** — it's the IdP-shaped edge the README's positioning deliberately 
   already covers any OIDC IdP; named presets (like Microsoft) are added for convenience/quirks.
 - **SCIM** — remaining depth: PATCH on complex multi-valued sub-attributes, `/Me`, and richer
   `$ref` handling. Core filters, sorting, ETags, pagination, timestamps, and schemas are done.
-- **Org-scoped SCIM efficiency** (non-blocking, noted in the v0.7 review) — the per-customer view
-  re-checks group ownership + membership per member in a group PUT/PATCH loop (an N+1 on large group
-  syncs); memoize group→org per request and validate members in one query if a large-org consumer hits it.
-- **Pluggable logger (`log/slog`)** — the internal warnings/errors are hardwired to the stdlib
-  `log.Printf` (~8 call sites: the `SESSION_SECRET`/`TRUSTED_PROXIES` warnings, failed-email logs, …),
-  so a consumer can't route or level them. Accept a `*slog.Logger` (`Config.Logger` / `SetLogger`,
-  default `slog.Default()`) and swap the call sites, keeping the security warnings loud. Speak the
-  ecosystem standard rather than invent an `authx.Logger` interface — every backend (zap/zerolog/…)
-  bridges to `slog` — the same principle as `http.Handler` for transport. Small, additive.
+- **LDAP sync batching** — `ldapsync` still adds group members one at a time (it reports a per-member
+  error and counts memberships); move it onto `AddGroupMembers` if a large directory makes that slow.
 
 ---
 
-_Updated 2026-07-16._
+_Updated 2026-10-06._

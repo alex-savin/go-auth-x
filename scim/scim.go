@@ -14,7 +14,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -34,8 +34,8 @@ func readBody(w http.ResponseWriter, r *http.Request) ([]byte, error) {
 
 // scimInternal logs the real error and returns a generic 500, so internal (e.g. GORM) error strings
 // never leak to the SCIM client.
-func scimInternal(w http.ResponseWriter, context string, err error) {
-	log.Printf("scim: %s: %v", context, err)
+func (s *Server) scimInternal(w http.ResponseWriter, context string, err error) {
+	s.log().Error("scim: "+context, "error", err)
 	scimError(w, http.StatusInternalServerError, "internal error")
 }
 
@@ -64,6 +64,18 @@ type Server struct {
 	auth    func(token string) bool // validates the bearer token (e.g. authn.ValidateAPIKey)
 	mux     *http.ServeMux          // the (unauthenticated) route table; /Bulk dispatches sub-requests here
 	baseURL string                  // externally-visible SCIM root, for Location / meta.location
+	logger  *slog.Logger            // internal errors + incomplete membership writes; nil = slog.Default()
+}
+
+// SetLogger routes the server's internal errors (logged instead of leaked to the client) and
+// incomplete group-membership writes to l. Nil = slog.Default(), resolved at log time.
+func (s *Server) SetLogger(l *slog.Logger) { s.logger = l }
+
+func (s *Server) log() *slog.Logger {
+	if s.logger == nil {
+		return slog.Default()
+	}
+	return s.logger
 }
 
 // SetBaseURL sets the externally-visible SCIM root (e.g. "https://app.example.com/scim/v2") used to
@@ -298,7 +310,7 @@ func pathID(r *http.Request) string { return r.PathValue("id") }
 func (s *Server) listUsers(w http.ResponseWriter, r *http.Request) {
 	users, err := s.dir.ListUsers()
 	if err != nil {
-		scimInternal(w, "listUsers", err)
+		s.scimInternal(w, "listUsers", err)
 		return
 	}
 	// Filtering: boolean-composed (and / or / not / parens) over eq/ne/co/sw/ew/pr on userName,
@@ -352,7 +364,7 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 		scimErrorType(w, http.StatusConflict, "uniqueness", "a user with this email already exists")
 		return
 	} else if cerr != nil && !errors.Is(cerr, authx.ErrNoUser) {
-		scimInternal(w, "createUser", cerr)
+		s.scimInternal(w, "createUser", cerr)
 		return
 	}
 	u, err := s.dir.UpsertExternalUser("scim:"+in.UserName, email, name, true)
@@ -360,7 +372,7 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, authx.ErrEmailConflict) {
 			scimErrorType(w, http.StatusConflict, "uniqueness", "a user with this email already exists")
 		} else {
-			scimInternal(w, "createUser", err)
+			s.scimInternal(w, "createUser", err)
 		}
 		return
 	}
@@ -482,7 +494,7 @@ func (s *Server) putUser(w http.ResponseWriter, r *http.Request) {
 			scimErrorType(w, http.StatusConflict, "uniqueness", "a user with this email already exists")
 			return
 		}
-		scimInternal(w, "putUser", uerr)
+		s.scimInternal(w, "putUser", uerr)
 		return
 	}
 	if derr := s.dir.SetUserDisabled(cur.ID, !activeWithDefault(raw)); errors.Is(derr, authx.ErrOrgOwnerDeprovision) {
@@ -513,7 +525,7 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
 			scimError(w, http.StatusForbidden, err.Error())
 			return
 		}
-		scimInternal(w, "deleteUser", err)
+		s.scimInternal(w, "deleteUser", err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -524,7 +536,7 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
 func (s *Server) listGroups(w http.ResponseWriter, r *http.Request) {
 	gs, err := s.dir.Groups()
 	if err != nil {
-		scimInternal(w, "listGroups", err)
+		s.scimInternal(w, "listGroups", err)
 		return
 	}
 	q := r.URL.Query()
@@ -555,6 +567,22 @@ func (s *Server) listGroups(w http.ResponseWriter, r *http.Request) {
 	writeSCIM(w, http.StatusOK, listEnvelope(resources, total, start))
 }
 
+// addMembers / removeMembers apply a group-membership change in one batch when the directory
+// supports it (authx.BatchGroupStore), else member by member. Both are best-effort: the response
+// reflects the membership actually stored, and a failed write is logged rather than failing the
+// whole sync (an IdP would retry a 5xx forever).
+func (s *Server) addMembers(groupID string, userIDs []string) {
+	if err := authx.AddGroupMembers(s.dir, userIDs, groupID); err != nil {
+		s.log().Warn("scim: group membership add incomplete", "group", groupID, "error", err)
+	}
+}
+
+func (s *Server) removeMembers(groupID string, userIDs []string) {
+	if err := authx.RemoveGroupMembers(s.dir, userIDs, groupID); err != nil {
+		s.log().Warn("scim: group membership remove incomplete", "group", groupID, "error", err)
+	}
+}
+
 func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
 	raw, rerr := readBody(w, r)
 	var in scimGroup
@@ -567,19 +595,21 @@ func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
 		scimErrorType(w, http.StatusConflict, "uniqueness", "a group with this displayName already exists")
 		return
 	} else if gerr != nil && !errors.Is(gerr, authx.ErrNoGroup) {
-		scimInternal(w, "createGroup lookup", gerr)
+		s.scimInternal(w, "createGroup lookup", gerr)
 		return
 	}
 	g, err := s.dir.CreateGroup(in.DisplayName, "provisioned via SCIM")
 	if err != nil {
-		scimInternal(w, "createGroup", err)
+		s.scimInternal(w, "createGroup", err)
 		return
 	}
+	var toAdd []string
 	for _, m := range in.Members {
 		if m.Value != "" {
-			_ = s.dir.AddUserToGroup(m.Value, g.ID)
+			toAdd = append(toAdd, m.Value)
 		}
 	}
+	s.addMembers(g.ID, toAdd)
 	members, _ := s.dir.GroupMembers(g.ID)
 	res := s.toSCIMGroup(*g, members)
 	if res.Meta.Location != "" {
@@ -644,14 +674,18 @@ func (s *Server) putGroup(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	current, _ := s.dir.GroupMembers(id)
+	var toRemove []string
 	for _, m := range current { // remove members no longer present
 		if !want[m.ID] {
-			_ = s.dir.RemoveUserFromGroup(m.ID, id)
+			toRemove = append(toRemove, m.ID)
 		}
 	}
+	s.removeMembers(id, toRemove)
+	var toAdd []string
 	for uid := range want { // add the desired set (idempotent)
-		_ = s.dir.AddUserToGroup(uid, id)
+		toAdd = append(toAdd, uid)
 	}
+	s.addMembers(id, toAdd)
 	g, members, _ := s.groupByID(id) // still present — membership edits don't delete the group
 	writeResource(w, http.StatusOK, s.toSCIMGroup(g, members), groupVersion(g, members))
 }
@@ -686,7 +720,7 @@ func (s *Server) patchGroup(w http.ResponseWriter, r *http.Request) {
 		if strings.HasPrefix(pathl, "members[") {
 			if opl == "remove" {
 				if uid, ok := memberIDFromValuePath(op.Path); ok {
-					_ = s.dir.RemoveUserFromGroup(uid, id)
+					s.removeMembers(id, []string{uid})
 				}
 			}
 			continue
@@ -696,9 +730,7 @@ func (s *Server) patchGroup(w http.ResponseWriter, r *http.Request) {
 		}
 		switch opl {
 		case "add":
-			for _, uid := range memberValues(op.Value) {
-				_ = s.dir.AddUserToGroup(uid, id)
-			}
+			s.addMembers(id, memberValues(op.Value))
 		case "replace":
 			// Replace the ENTIRE membership set with the provided one (not merely additive).
 			want := map[string]bool{}
@@ -706,25 +738,29 @@ func (s *Server) patchGroup(w http.ResponseWriter, r *http.Request) {
 				want[uid] = true
 			}
 			current, _ := s.dir.GroupMembers(id)
+			var toRemove []string
 			for _, m := range current {
 				if !want[m.ID] {
-					_ = s.dir.RemoveUserFromGroup(m.ID, id)
+					toRemove = append(toRemove, m.ID)
 				}
 			}
+			s.removeMembers(id, toRemove)
+			var toAdd []string
 			for uid := range want {
-				_ = s.dir.AddUserToGroup(uid, id)
+				toAdd = append(toAdd, uid)
 			}
+			s.addMembers(id, toAdd)
 		case "remove":
 			if len(op.Value) == 0 || string(op.Value) == "null" {
 				// `remove` on "members" with no value → clear all members.
 				current, _ := s.dir.GroupMembers(id)
+				var toRemove []string
 				for _, m := range current {
-					_ = s.dir.RemoveUserFromGroup(m.ID, id)
+					toRemove = append(toRemove, m.ID)
 				}
+				s.removeMembers(id, toRemove)
 			} else {
-				for _, uid := range memberValues(op.Value) {
-					_ = s.dir.RemoveUserFromGroup(uid, id)
-				}
+				s.removeMembers(id, memberValues(op.Value))
 			}
 		}
 	}
@@ -746,7 +782,7 @@ func (s *Server) deleteGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.dir.DeleteGroup(id); err != nil {
-		scimInternal(w, "deleteGroup", err)
+		s.scimInternal(w, "deleteGroup", err)
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

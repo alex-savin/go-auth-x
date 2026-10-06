@@ -345,6 +345,64 @@ func (v *orgScopedDir) RemoveUserFromGroup(userID, groupID string) error {
 	return v.dir.RemoveUserFromGroup(userID, groupID)
 }
 
+// orgMemberScanMin is the batch size at which AddUsersToGroup validates membership with ONE read of
+// the org's member list instead of a lookup per id: below it (the common single-member SCIM PATCH)
+// a few indexed lookups beat loading every member of a large org.
+const orgMemberScanMin = 16
+
+// AddUsersToGroup is the batch form of AddUserToGroup (BatchGroupStore) with the same trust
+// boundary: the group must be this org's, and only its members may be grouped. Unlike the single
+// form, a non-member is SKIPPED rather than failing the batch (the BatchGroupStore contract).
+func (v *orgScopedDir) AddUsersToGroup(userIDs []string, groupID string) error {
+	if err := v.groupInOrg(groupID); err != nil {
+		return err
+	}
+	members, err := v.orgMembersOf(userIDs)
+	if err != nil {
+		return err
+	}
+	return AddGroupMembers(v.dir, members, groupID)
+}
+
+// RemoveUsersFromGroup is the batch form of RemoveUserFromGroup (BatchGroupStore). Removal needs
+// no membership check — the group is this org's, and ungrouping a non-member is a no-op.
+func (v *orgScopedDir) RemoveUsersFromGroup(userIDs []string, groupID string) error {
+	if err := v.groupInOrg(groupID); err != nil {
+		return err
+	}
+	return RemoveGroupMembers(v.dir, userIDs, groupID)
+}
+
+// orgMembersOf filters userIDs to this org's members, preserving order.
+func (v *orgScopedDir) orgMembersOf(userIDs []string) ([]string, error) {
+	out := make([]string, 0, len(userIDs))
+	if len(userIDs) < orgMemberScanMin {
+		for _, uid := range userIDs {
+			switch _, err := v.memberRole(uid); {
+			case err == nil:
+				out = append(out, uid)
+			case !errors.Is(err, ErrNotOrgMember):
+				return nil, err
+			}
+		}
+		return out, nil
+	}
+	members, err := v.orgs.OrgMembers(v.orgID)
+	if err != nil {
+		return nil, err
+	}
+	isMember := make(map[string]bool, len(members))
+	for i := range members {
+		isMember[members[i].User.ID] = true
+	}
+	for _, uid := range userIDs {
+		if isMember[uid] {
+			out = append(out, uid)
+		}
+	}
+	return out, nil
+}
+
 func (v *orgScopedDir) GroupMembers(groupID string) ([]AuthUser, error) {
 	if err := v.groupInOrg(groupID); err != nil {
 		return nil, err

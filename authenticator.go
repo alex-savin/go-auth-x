@@ -6,7 +6,7 @@ import (
 	"crypto/ecdsa"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"sync"
 
@@ -97,6 +97,20 @@ type Authenticator struct {
 // SetAuthorizer installs an optional post-login authorization hook.
 func (a *Authenticator) SetAuthorizer(z Authorizer) { a.authorizer = z }
 
+// SetLogger routes the library's internal warnings and errors to l (nil = slog.Default()). The
+// warnings New itself emits (SESSION_SECRET / TRUSTED_PROXIES) fire before this can run — set
+// Config.Logger to capture those too.
+func (a *Authenticator) SetLogger(l *slog.Logger) { a.cfg.Logger = l }
+
+// log returns the configured logger, resolving slog.Default() at call time when none is set — so a
+// later slog.SetDefault is honored, and the zero-value Authenticator (valid by design) can log.
+func (a *Authenticator) log() *slog.Logger {
+	if a == nil || a.cfg.Logger == nil {
+		return slog.Default()
+	}
+	return a.cfg.Logger
+}
+
 // New builds the Authenticator. If auth is not configured it returns a disabled
 // (no-op) instance. If it IS configured it performs OIDC discovery against the
 // issuer and fails on error — we'd rather refuse to boot than run unprotected when
@@ -117,20 +131,20 @@ func New(ctx context.Context, cfg Config) (*Authenticator, error) {
 			return nil, fmt.Errorf("authx: PreviousSessionSecrets[%d] must be at least 32 bytes (got %d)", i, len(prev))
 		}
 	}
+	a := &Authenticator{cfg: cfg}
 	// SESSION_SECRET_PREVIOUS is comma-split + whitespace-trimmed on intake, so a primary secret carrying
 	// a comma or surrounding whitespace (a common env_file / --from-file footgun) won't round-trip
 	// byte-for-byte once demoted into the rotation list — silently invalidating exactly the cookies the
 	// rollover window exists to preserve. Warn now so it's caught before a rotation, not during one.
 	if s := cfg.SessionSecret; len(s) > 0 && (bytes.ContainsRune(s, ',') || len(bytes.TrimSpace(s)) != len(s)) {
-		log.Printf("authx: WARNING SESSION_SECRET contains a comma or surrounding whitespace; it cannot be safely rotated via SESSION_SECRET_PREVIOUS (comma-split + trimmed). Use a comma/whitespace-free secret (base64/hex).")
+		a.log().Warn("authx: SESSION_SECRET contains a comma or surrounding whitespace; it cannot be safely rotated via SESSION_SECRET_PREVIOUS (comma-split + trimmed). Use a comma/whitespace-free secret (base64/hex).")
 	}
 	// The client IP (for per-IP rate limits) trusts X-Forwarded-For only from TRUSTED_PROXIES; unset, it
 	// defaults to the private ranges + loopback. Warn so an operator whose app socket is directly reachable
 	// (not only via a proxy) knows a client on a private network could spoof its IP.
 	if os.Getenv("TRUSTED_PROXIES") == "" {
-		log.Printf("authx: TRUSTED_PROXIES is unset — X-Forwarded-For is trusted from the default private ranges (RFC1918 + loopback). Ensure the app is reachable only via your proxy, or set TRUSTED_PROXIES to the proxy address, so clients can't spoof their IP.")
+		a.log().Warn("authx: TRUSTED_PROXIES is unset — X-Forwarded-For is trusted from the default private ranges (RFC1918 + loopback). Ensure the app is reachable only via your proxy, or set TRUSTED_PROXIES to the proxy address, so clients can't spoof their IP.")
 	}
-	a := &Authenticator{cfg: cfg}
 	if cfg.BreachCheckHIBP {
 		a.breach = NewHIBPBreachChecker()
 	}

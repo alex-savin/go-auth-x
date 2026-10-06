@@ -8,8 +8,11 @@ import (
 	authx "github.com/alex-savin/go-auth-x"
 )
 
-// compile-time proof the in-memory store also satisfies the directory interface.
-var _ authx.DirectoryStore = (*Store)(nil)
+// compile-time proof the in-memory store also satisfies the directory interface (+ its batch upgrade).
+var (
+	_ authx.DirectoryStore  = (*Store)(nil)
+	_ authx.BatchGroupStore = (*Store)(nil)
+)
 
 // --- groups ---
 
@@ -101,6 +104,46 @@ func (s *Store) RemoveUserFromGroup(userID, groupID string) error {
 	}
 	if set := s.memberships[uid]; set != nil {
 		delete(set, gid)
+	}
+	return nil
+}
+
+// AddUsersToGroup is the batch AddUserToGroup (authx.BatchGroupStore), under one lock. Ids that
+// can't name a user are skipped, as in the single form.
+func (s *Store) AddUsersToGroup(userIDs []string, groupID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	gid, ok := parseID(groupID)
+	if !ok {
+		return nil
+	}
+	for _, id := range userIDs {
+		uid, ok := parseID(id)
+		if !ok {
+			continue
+		}
+		if s.memberships[uid] == nil {
+			s.memberships[uid] = map[uint]bool{}
+		}
+		s.memberships[uid][gid] = true
+	}
+	return nil
+}
+
+// RemoveUsersFromGroup is the batch RemoveUserFromGroup (authx.BatchGroupStore), under one lock.
+func (s *Store) RemoveUsersFromGroup(userIDs []string, groupID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	gid, ok := parseID(groupID)
+	if !ok {
+		return nil
+	}
+	for _, id := range userIDs {
+		if uid, ok := parseID(id); ok {
+			if set := s.memberships[uid]; set != nil {
+				delete(set, gid)
+			}
+		}
 	}
 	return nil
 }

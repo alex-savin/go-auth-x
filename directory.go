@@ -92,6 +92,55 @@ type DirectoryStore interface {
 	TouchAPIKey(id string) error // best-effort last-used stamp
 }
 
+// BatchGroupStore is an OPTIONAL upgrade interface a DirectoryStore may implement to apply group
+// membership changes in bulk, so a large SCIM group sync costs a few queries instead of one per
+// member. It is detected via type assertion (like OrgDirectoryStore) — a store without it falls
+// back to per-member AddUserToGroup / RemoveUserFromGroup. Both reference stores implement it.
+//
+// Both methods are idempotent and best-effort PER MEMBER, matching the per-member fallback: an id
+// that cannot name a user is skipped rather than failing the batch, so one bad SCIM member value
+// never drops the rest. An error means the store itself failed (or the group id was unresolvable).
+type BatchGroupStore interface {
+	AddUsersToGroup(userIDs []string, groupID string) error
+	RemoveUsersFromGroup(userIDs []string, groupID string) error
+}
+
+// AddGroupMembers adds userIDs to groupID through dir's BatchGroupStore when it has one, else
+// member by member — best-effort either way, so one failing member never drops the rest (per-member
+// errors are joined and returned after every member has been tried).
+func AddGroupMembers(dir DirectoryStore, userIDs []string, groupID string) error {
+	if len(userIDs) == 0 {
+		return nil
+	}
+	if bs, ok := dir.(BatchGroupStore); ok {
+		return bs.AddUsersToGroup(userIDs, groupID)
+	}
+	var errs []error
+	for _, uid := range userIDs {
+		if err := dir.AddUserToGroup(uid, groupID); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// RemoveGroupMembers is AddGroupMembers' removal counterpart.
+func RemoveGroupMembers(dir DirectoryStore, userIDs []string, groupID string) error {
+	if len(userIDs) == 0 {
+		return nil
+	}
+	if bs, ok := dir.(BatchGroupStore); ok {
+		return bs.RemoveUsersFromGroup(userIDs, groupID)
+	}
+	var errs []error
+	for _, uid := range userIDs {
+		if err := dir.RemoveUserFromGroup(uid, groupID); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // SetDirectoryStore enables groups, API keys, per-group access control, and the admin REST API.
 func (a *Authenticator) SetDirectoryStore(d DirectoryStore) { a.dir = d }
 

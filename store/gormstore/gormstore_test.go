@@ -2,6 +2,7 @@ package gormstore
 
 import (
 	"path/filepath"
+	"strconv"
 	"testing"
 	"time"
 
@@ -311,6 +312,52 @@ func TestDirectoryGroupsAndMembership(t *testing.T) {
 	}
 	if users, _ := s.ListUsers(); len(users) != 2 {
 		t.Fatalf("ListUsers want 2, got %d", len(users))
+	}
+}
+
+func TestBatchGroupMembership(t *testing.T) {
+	s := newStore(t)
+	u1, _ := s.CreateLocalUser("u1@x.com", "U1")
+	u2, _ := s.CreateLocalUser("u2@x.com", "U2")
+	g, _ := s.CreateGroup("eng", "")
+
+	// Unparseable ids are skipped and duplicates folded — never a failed batch.
+	if err := s.AddUsersToGroup([]string{u1.ID, "bogus", u1.ID, u2.ID}, g.ID); err != nil {
+		t.Fatal(err)
+	}
+	if members, _ := s.GroupMembers(g.ID); len(members) != 2 {
+		t.Fatalf("want 2 members, got %d", len(members))
+	}
+	if err := s.AddUsersToGroup([]string{u1.ID}, "bogus"); err != authx.ErrNoGroup {
+		t.Fatalf("an unparseable group must be ErrNoGroup (parity with AddUserToGroup), got %v", err)
+	}
+
+	// A sync larger than one statement chunk, re-applied: ON CONFLICT must hold in every chunk
+	// (ids 1 and 2 are already members from above). Membership rows carry no FK, so synthetic
+	// ids exercise the chunking without seeding 1200 users.
+	ids := make([]string, 1200)
+	for i := range ids {
+		ids[i] = strconv.Itoa(i + 1)
+	}
+	gid, _ := parseID(g.ID)
+	count := func() int64 {
+		var n int64
+		s.db.Model(&GroupMembership{}).Where("group_id = ?", gid).Count(&n)
+		return n
+	}
+	for range 2 {
+		if err := s.AddUsersToGroup(ids, g.ID); err != nil {
+			t.Fatalf("batch add must be idempotent across chunks: %v", err)
+		}
+	}
+	if n := count(); n != 1200 {
+		t.Fatalf("want 1200 membership rows, got %d", n)
+	}
+	if err := s.RemoveUsersFromGroup(append(ids[:1100:1100], "bogus"), g.ID); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(); n != 100 {
+		t.Fatalf("want 100 rows after the chunked remove, got %d", n)
 	}
 }
 
