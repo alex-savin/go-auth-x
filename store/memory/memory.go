@@ -100,6 +100,13 @@ type Store struct {
 	// 2fa state
 	totp     map[uint]*totpRec
 	recovery map[uint]map[string]bool // userID -> set of hex(sha256(code))
+	// oauth provider state (maps created lazily by initOAuthLocked)
+	oauthClients  map[string]*authx.OAuthClient
+	oauthRequests map[string]*authx.OAuthAuthRequest
+	oauthGrants   map[string]*authx.OAuthGrant
+	oauthAccess   map[string]*authx.OAuthAccessToken  // by ID
+	oauthRefresh  map[string]*authx.OAuthRefreshToken // by hash
+	oauthKeys     []authx.OAuthSigningKey
 }
 
 type totpRec struct {

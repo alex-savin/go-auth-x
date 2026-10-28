@@ -167,3 +167,20 @@ func (a *Authenticator) csrfValidHTTP(r *http.Request) bool {
 	// Defense-in-depth: also require a present Origin/Referer to be allow-listed (fails open otherwise).
 	return a.originAllowed(r)
 }
+
+// SessionOf returns the signed-in, unrevoked session of a request straight from its cookie — for
+// handlers that are not behind GateHTTP (such as the oidcprovider's login step) — or nil.
+func (a *Authenticator) SessionOf(r *http.Request) *SessionClaims {
+	sc, err := parseSessionMulti(a.verifySecrets(), cookieValue(r, sessionCookie))
+	if err != nil || a.sessionRevoked(sc) {
+		return nil
+	}
+	return sc
+}
+
+// ClientIP is the request's client address, honoring X-Forwarded-For only from trusted proxies.
+func (a *Authenticator) ClientIP(r *http.Request) string { return a.clientIP(r) }
+
+// CSRFValid reports whether a state-changing request carries the double-submit CSRF token (and an
+// allowed Origin) — for handlers outside /api and /auth that CSRFHTTP does not cover.
+func (a *Authenticator) CSRFValid(r *http.Request) bool { return a.csrfValidHTTP(r) }

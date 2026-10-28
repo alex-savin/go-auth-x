@@ -32,6 +32,7 @@ import authx "github.com/alex-savin/go-auth-x"
 - [Authentication methods](#authentication-methods)
 - [HTTP endpoints](#http-endpoints)
 - [Directory layer: groups, access control, API keys, LDAP & SCIM](#directory-layer)
+- [OAuth 2.1 / OIDC provider](#oauth-21--oidc-provider)
 - [Storage: reference stores & writing your own](#storage)
 - [Security model](#security-model)
 - [Framework support](#framework-support)
@@ -538,6 +539,52 @@ authn.SetOrgStore(store) // gormstore + memory both implement authx.OrgStore
 mux.Handle("/app/", authn.GateHTTP(authn.RequireOrgHTTP()(appHandler)))
 mux.Handle("/app/billing", authn.GateHTTP(authn.RequireOrgHTTP(authx.OrgRoleOwner, "billing")(billingHandler)))
 ```
+
+---
+
+## OAuth 2.1 / OIDC provider
+
+The optional `oidcprovider` package makes the app an authorization server. Other programs can then
+ask a signed-in user for access: a satellite service, or an AI assistant's connector following the
+[MCP authorization spec](https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization).
+It is built on [`zitadel/oidc`](https://github.com/zitadel/oidc), and the user signs in with the
+go-auth-x session.
+
+```go
+p, err := oidcprovider.New(ctx, oidcprovider.Config{
+    Issuer:        "https://app.example.com",
+    Auth:          authn,
+    Store:         store,                       // gormstore / memory implement authx.OAuthStore
+    CryptoKey:     key32,                       // encrypts the opaque access tokens
+    Scopes:        []string{"notes:read"},
+    DefaultScopes: []string{"notes:read"},
+    Resources:     []string{"https://app.example.com/mcp"},
+    ConsentURL:    func(id string) string { return "/connect?request=" + id },
+    Registration:  true,                        // RFC 7591, for MCP clients
+})
+for _, pat := range p.Patterns() { mux.Handle(pat, p.Handler()) }
+
+// The app's consent screen:
+req, _ := p.Pending(ctx, id, session.Subject)   // client, scopes, resources
+next, _ := p.Approve(ctx, id, session.Subject, oidcprovider.Decision{Scopes: chosen, Ref: myRecordID})
+// …then send the browser to next.
+
+// The resource server:
+g, err := p.VerifyFor(ctx, bearer, "https://app.example.com/mcp") // g.Subject, g.Scopes, g.Ref
+```
+
+- **Endpoints:** `{Prefix}/authorize`, `/token`, `/revoke`, `/introspect`, `/userinfo`, `/keys`,
+  `/register`; the default `Prefix` is `/oauth`.
+- **Metadata:** `/.well-known/oauth-authorization-server` (RFC 8414) and
+  `/.well-known/openid-configuration`.
+- **Public clients** must use PKCE with S256.
+- **Access tokens** are opaque and bound to their resource.
+- **Refresh tokens** rotate and are single-use. Replaying one ends the whole grant.
+- **Revoking:** `RevokeRef` ends every grant tied to the app's record.
+- **Registration** is limited per address. A dynamic client that is never used is removed after
+  `UnusedClientTTL`.
+- **Consent screen:** show the client's self-chosen name as a claim, together with `RedirectHost`,
+  which is where the browser really goes back to.
 
 ---
 

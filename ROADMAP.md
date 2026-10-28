@@ -5,7 +5,20 @@ Direction and planned work for the library. Authoritative usage/feature docs liv
 
 ## Shipped
 
-### Next release — pluggable logger + batch group membership · _unreleased_ · additive
+### Next release — OAuth/OIDC provider, pluggable logger, batch group membership · _unreleased_ · additive
+
+- **Embeddable OAuth 2.1 / OIDC provider (`oidcprovider`)** — the planned "be a lightweight IdP",
+  shaped for MCP clients as well as satellite services:
+  - built on `zitadel/oidc`;
+  - the session is the login, and the consent screen is the app's;
+  - a pluggable `OAuthStore` (gormstore + memory);
+  - RFC 8414 metadata, dynamic registration and resource indicators;
+  - opaque access tokens and rotating single-use refresh tokens.
+
+  Still open:
+  - signing-key rotation, beyond publishing retired keys;
+  - Client ID Metadata Documents;
+  - `prompt=login` / `max_age` re-authentication.
 
 - **Pluggable logger (`log/slog`)** — `Config.Logger` / `SetLogger` (default `slog.Default()`,
   resolved at log time) replace the hardwired `log.Printf` call sites, keeping the security warnings
@@ -130,36 +143,6 @@ store implementers update their signatures to the `string` id types (see CHANGEL
   account-linking + squatter-reclaim rule; `SESSION_SECRET` ≥ 32-byte enforcement.
 
 ## Planned
-
-### Embeddable OIDC/OAuth2 provider (be a lightweight IdP, without a separate service) · additive
-
-Add an optional `oidcprovider` subpackage so an embedded go-auth-x app can also **issue** tokens —
-turning your BFF into a lightweight OIDC provider for satellite services, without standing up a
-separate Keycloak/Pocket-ID. This is the one genuinely new capability (today the library is an OIDC
-*client*), but it packages as a library exactly like everything else — so it stays **"embed me,"**
-not a mandatory service.
-
-- **Shape** — `oidcprovider.Handler()` returns an `http.Handler` mounting `/authorize`, `/token`,
-  `/userinfo`, `/jwks`, `/.well-known/openid-configuration`, `/revoke`, `/introspect`, `/end-session`.
-  Mounted next to `authn.Handler()`.
-- **Auth hook is the existing session** — `/authorize` reads the authx session; no session →
-  redirect to the consumer's login (which already drives `authn`'s `/auth/*` flows) → back to
-  `/authorize`. The IdP's own login *is* go-auth-x's login; no new auth machinery.
-- **Pluggable `Store`** (clients, auth codes, refresh grants, consents, signing keys) with
-  `gormstore` + `memory` reference impls — same seam as the other capability stores. **Claims** come
-  from the DirectoryStore/OrgStore (groups, orgs, roles) plus a `ClaimsFunc` hook for custom claims.
-- **UI stays the consumer's** — consent is decision endpoints (`GET/POST /oidc/consent`, JSON) for
-  the app to render, or `AutoConsentFirstParty` to skip it. The library ships no HTML (parity with
-  today's no-login-UI stance).
-- **Build on `zitadel/oidc`** behind an authx-flavored facade — don't hand-roll the security-critical
-  token machinery (PKCE, signing, refresh rotation, the OAuth2 Security BCP); adapt at the boundary.
-- **Caveats** (all within the pattern) — signing keys need a **durable `KeyStore`** (don't use the
-  in-memory store multi-replica, same rule as sessions); optional stoppable GC goroutine for key
-  rotation / expired-grant cleanup (like the rate-limiter GC); `issuer` is stable-public-URL config.
-- **Scope note** — even as a clean library package this expands the project's one-line identity from
-  "auth client/BFF" to "client *and* lightweight provider"; a deliberate decision to make when it
-  lands. A standalone service + WebUI (Pocket-ID-shaped) would be a **separate, optional reference
-  consumer** of this package — not a requirement, and the library never becomes a service.
 
 ### Organizations — per-org SSO · deferred
 

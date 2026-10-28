@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Embeddable OAuth 2.1 / OIDC provider (`oidcprovider`)** — an app embedding go-auth-x can issue
+  tokens to other programs: satellite services, or AI assistants' connectors following the MCP
+  authorization spec. Built on `zitadel/oidc` (codes, PKCE, refresh, signing, discovery) behind an
+  authx facade: `oidcprovider.New(ctx, Config{Issuer, Auth, Store, CryptoKey, …})`, then mount
+  `Handler()` on `Patterns()`. What it adds:
+  - The user signs in with the go-auth-x session. Consent is the app's own screen
+    (`Config.ConsentURL`, then `Pending` / `Approve` / `Deny`), or JSON endpoints at
+    `{Prefix}/consent`.
+  - RFC 8414 metadata at `/.well-known/oauth-authorization-server`.
+  - Optional dynamic client registration (RFC 7591), limited per address, with unused clients
+    expiring.
+  - RFC 8707 resource indicators bind tokens to a resource (`VerifyFor`).
+  - Clients that may refresh get refresh tokens without asking for `offline_access`.
+  - `DefaultScopes` for requests that name no scope.
+  - PKCE is required for public clients, S256 only.
+  - Access tokens are opaque (`Verify`). Refresh tokens rotate and are single-use: replaying one
+    ends its grant (OAuth Security BCP).
+  - `Decision.Ref` ties a grant to the app's own record, and `RevokeRef` ends it.
+- **`OAuthStore`** — the provider's storage interface (clients, auth requests, grants, access and
+  refresh tokens, signing keys; secrets kept as hashes), implemented by both reference stores
+  (`gormstore` migrates `authx_oauth_*` tables).
+- **`Authenticator.SessionOf`, `UserBySub` (+ `ErrUserBlocked`), `ClientIP`, `CSRFValid`** — public
+  accessors for handlers outside `/auth` and `GateHTTP`.
 - **Pluggable logger (`log/slog`)** — `Config.Logger` and `Authenticator.SetLogger` route the
   library's internal warnings and errors (the `SESSION_SECRET` / `TRUSTED_PROXIES` / Microsoft
   multi-tenant warnings, failed auth emails, admin-API store errors) to any `*slog.Logger`. Nil =
