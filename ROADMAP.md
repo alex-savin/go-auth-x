@@ -5,7 +5,7 @@ Direction and planned work for the library. Authoritative usage/feature docs liv
 
 ## Shipped
 
-### Next release — OAuth/OIDC provider, pluggable logger, batch group membership · _unreleased_ · additive
+### v0.9.0 — OAuth/OIDC provider, pluggable logger, batch group membership · additive
 
 - **Embeddable OAuth 2.1 / OIDC provider (`oidcprovider`)** — the planned "be a lightweight IdP",
   shaped for MCP clients as well as satellite services:
