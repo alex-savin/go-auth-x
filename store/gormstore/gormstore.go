@@ -158,6 +158,9 @@ func New(db *gorm.DB) (*Store, error) {
 	if err := s.migrateOrgs(); err != nil {
 		return nil, err
 	}
+	if err := s.migrateOAuth(); err != nil {
+		return nil, err
+	}
 	return s, nil
 }
 

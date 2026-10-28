@@ -15,6 +15,8 @@ var (
 	// email already belongs to a different, unproven (unverified, non-bootstrap) account row.
 	// Refusing rather than merging is what prevents account takeover; surface it as a 409.
 	ErrEmailConflict = errors.New("authx: an account already exists for this email")
+	// ErrUserBlocked is returned by UserBySub for a user who may not sign in (disabled or banned).
+	ErrUserBlocked = errors.New("authx: this account may not sign in")
 )
 
 // AuthUser is the auth package's storage-agnostic view of a control-plane user.
@@ -174,3 +176,20 @@ func (a *Authenticator) SetLocalEnabled(on bool) {
 
 // LocalEnabled reports whether in-app auth methods are active (flag on + a credential store).
 func (a *Authenticator) LocalEnabled() bool { return a != nil && a.localEnabled && a.creds != nil }
+
+// UserBySub returns the stored user with this subject, or ErrNoUser when there is none (or no
+// CredentialStore is wired). A user who may not sign in (disabled, banned) comes back with
+// ErrUserBlocked alongside it.
+func (a *Authenticator) UserBySub(sub string) (*AuthUser, error) {
+	if a == nil || a.creds == nil {
+		return nil, ErrNoUser
+	}
+	u, err := a.creds.UserBySub(sub)
+	if err != nil {
+		return nil, err
+	}
+	if blocked, _ := u.loginBlocked(); blocked {
+		return u, ErrUserBlocked
+	}
+	return u, nil
+}
