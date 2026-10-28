@@ -49,3 +49,27 @@ func TestDirectory(t *testing.T) {
 		t.Fatalf("after removal: %+v", gs)
 	}
 }
+
+func TestBatchGroupMembership(t *testing.T) {
+	s := New()
+	u1, _ := s.CreateLocalUser("u1@x.com", "U1")
+	u2, _ := s.CreateLocalUser("u2@x.com", "U2")
+	u3, _ := s.CreateLocalUser("u3@x.com", "U3")
+	g, _ := s.CreateGroup("eng", "")
+
+	// Unparseable ids are skipped, never a failed batch; re-adding is idempotent.
+	for range 2 {
+		if err := s.AddUsersToGroup([]string{u1.ID, "bogus", u2.ID, u3.ID}, g.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if m, _ := s.GroupMembers(g.ID); len(m) != 3 {
+		t.Fatalf("want 3 members, got %+v", m)
+	}
+	if err := s.RemoveUsersFromGroup([]string{u1.ID, "bogus", u3.ID}, g.ID); err != nil {
+		t.Fatal(err)
+	}
+	if m, _ := s.GroupMembers(g.ID); len(m) != 1 || m[0].ID != u2.ID {
+		t.Fatalf("want only u2 left, got %+v", m)
+	}
+}

@@ -281,6 +281,7 @@ provider activates when its client id + secret are present.
 | `DISCORD_CLIENT_ID` / `DISCORD_CLIENT_SECRET` | `DiscordClientID` / `…Secret` | Enables Discord login (verified email required). |
 | `MICROSOFT_STRICT_EMAIL_VERIFIED` | `MicrosoftStrictEmailVerified` | For a **pinned single tenant**, also require an explicit `email_verified` rather than trusting the tenant-owned address (default off). Has no effect in multi-tenant mode, where the email is never trusted. |
 | — (programmatic) | `SocialOIDC []SocialOIDCProvider` | Register any OIDC IdP (GitLab, Okta, Auth0, Keycloak, …) as a social login. |
+| — (programmatic) | `Logger *slog.Logger` | Receives internal warnings + errors (boot warnings, failed emails, admin-API store errors). Default `slog.Default()`. `SetLogger` swaps it after `New`; set the field to also capture `New`'s own warnings. |
 | `TRUSTED_PROXIES` | — (`authx.TrustedProxies()`) | CSV of proxy CIDRs; default = private ranges + loopback. |
 | `WEBAUTHN_RPID` / `WEBAUTHN_RP_NAME` | — | Override the passkey relying-party id/name (default: app host). |
 | `SMTP_HOST` `SMTP_PORT` `SMTP_USER` `SMTP_PASS` `SMTP_FROM` | — (`mailer.FromEnv()`) | STARTTLS sender. |
@@ -479,6 +480,8 @@ with **`and`/`or`/`not`** + parens + **valuePath** `emails[type eq "work"]`), **
 (`sortBy`/`sortOrder`), **pagination** (`startIndex`/`count`), and **ETags** (`If-Match` / `If-None-Match`).
 Resources carry `meta.created`/`meta.lastModified`, and discovery is complete: `ServiceProviderConfig` /
 `ResourceTypes` / full **`/Schemas`** documents (+ `/Schemas/{id}`). Bearer-auth via `ValidateAPIKey`.
+Group membership changes are written in **one batch** when the store implements `BatchGroupStore`
+(both reference stores do), and `srv.SetLogger(l)` routes internal errors to your `*slog.Logger`.
 
 ```go
 mux.Handle("/scim/v2/", http.StripPrefix("/scim/v2",
@@ -541,7 +544,8 @@ mux.Handle("/app/billing", authn.GateHTTP(authn.RequireOrgHTTP(authx.OrgRoleOwne
 ## Storage
 
 go-auth-x ships two reference stores; both implement `CredentialStore` **and** `DirectoryStore` (plus
-the optional `TwoFactorStore`, `SessionStore`, and `OrgStore`):
+the optional `TwoFactorStore`, `SessionStore`, `OrgStore`, and the `OrgDirectoryStore` /
+`BatchGroupStore` upgrades):
 
 - **`gormstore`** — Postgres/SQLite via GORM. `New(db)` migrates self-contained `authx_*` tables
   (so it won't collide with yours) and adds a unique-email index. Ships the **safe verified-email

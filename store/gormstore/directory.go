@@ -11,8 +11,15 @@ import (
 	authx "github.com/alex-savin/go-auth-x"
 )
 
-// compile-time proof the GORM store also satisfies the directory interface.
-var _ authx.DirectoryStore = (*Store)(nil)
+// compile-time proof the GORM store also satisfies the directory interface (+ its batch upgrade).
+var (
+	_ authx.DirectoryStore  = (*Store)(nil)
+	_ authx.BatchGroupStore = (*Store)(nil)
+)
+
+// memberBatch caps the rows / IN-list per statement in the batch membership verbs, keeping a large
+// SCIM group sync well under every driver's bind-parameter limit.
+const memberBatch = 500
 
 // --- directory models (groups, membership, api keys) ---
 
@@ -173,6 +180,54 @@ func (s *Store) RemoveUserFromGroup(userID, groupID string) error {
 		return nil
 	}
 	return s.db.Where("user_id = ? AND group_id = ?", uid, gid).Delete(&GroupMembership{}).Error
+}
+
+// AddUsersToGroup is the batch AddUserToGroup (authx.BatchGroupStore): one INSERT … ON CONFLICT
+// DO NOTHING per memberBatch rows, in one transaction. Ids that can't name a user are skipped.
+func (s *Store) AddUsersToGroup(userIDs []string, groupID string) error {
+	gid, ok := parseID(groupID)
+	if !ok {
+		return authx.ErrNoGroup
+	}
+	uids := parseIDs(userIDs)
+	if len(uids) == 0 {
+		return nil
+	}
+	rows := make([]GroupMembership, len(uids))
+	for i, uid := range uids {
+		rows[i] = GroupMembership{UserID: uid, GroupID: gid}
+	}
+	return s.db.Clauses(clause.OnConflict{DoNothing: true}).CreateInBatches(rows, memberBatch).Error
+}
+
+// RemoveUsersFromGroup is the batch RemoveUserFromGroup (authx.BatchGroupStore): one DELETE per
+// memberBatch ids.
+func (s *Store) RemoveUsersFromGroup(userIDs []string, groupID string) error {
+	gid, ok := parseID(groupID)
+	if !ok {
+		return nil
+	}
+	uids := parseIDs(userIDs)
+	for start := 0; start < len(uids); start += memberBatch {
+		chunk := uids[start:min(start+memberBatch, len(uids))]
+		if err := s.db.Where("group_id = ? AND user_id IN ?", gid, chunk).Delete(&GroupMembership{}).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// parseIDs parses opaque ids to PKs, dropping unparseable ones and duplicates (order kept).
+func parseIDs(ids []string) []uint {
+	out := make([]uint, 0, len(ids))
+	seen := make(map[uint]bool, len(ids))
+	for _, id := range ids {
+		if n, ok := parseID(id); ok && !seen[n] {
+			seen[n] = true
+			out = append(out, n)
+		}
+	}
+	return out
 }
 
 func (s *Store) UserGroups(userID string) ([]authx.Group, error) {

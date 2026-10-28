@@ -3,7 +3,6 @@ package authx
 import (
 	"fmt"
 	"html"
-	"log"
 	"net/url"
 	"strings"
 )
@@ -50,10 +49,10 @@ func (a *Authenticator) sendAuthEmail(to, subject, heading, intro, ctaLabel, cta
 	htmlBody := emailShell(a.brandName(), heading, intro, ctaLabel, ctaURL, footer)
 	textBody := intro + "\n\n" + ctaLabel + ":\n" + ctaURL + "\n\n" + footer
 	if err := a.email.Send(to, subject, htmlBody, textBody); err != nil {
-		log.Printf("auth: email %q to %s FAILED: %v", subject, to, err)
+		a.log().Error("auth: email FAILED", "subject", subject, "to", to, "error", err)
 		return err
 	}
-	log.Printf("auth: email %q sent to %s", subject, to)
+	a.log().Info("auth: email sent", "subject", subject, "to", to)
 	return nil
 }
 

@@ -173,6 +173,112 @@ func TestOrgScopedDirectoryView(t *testing.T) {
 	}
 }
 
+// noBatchDir hides the store's BatchGroupStore (forcing the per-member fallback) and fails
+// AddUserToGroup for one user, to prove the fallback is best-effort per member.
+type noBatchDir struct {
+	authx.DirectoryStore
+	authx.OrgDirectoryStore
+	failFor string
+}
+
+func (d noBatchDir) AddUserToGroup(userID, groupID string) error {
+	if userID == d.failFor {
+		return errors.New("store unavailable")
+	}
+	return d.DirectoryStore.AddUserToGroup(userID, groupID)
+}
+
+// TestOrgScopedView_BatchMembership pins the batch membership verbs to the same trust boundary as
+// the single ones (own group, own members only) on both membership-check paths, and that a store
+// without BatchGroupStore still gets every member it can.
+func TestOrgScopedView_BatchMembership(t *testing.T) {
+	_, s, _ := newOrgAuth(t)
+	outsider := seedUser(t, s, "outsider@x.com", "", true)
+	orgA := seedOrg(t, s, "acme", nil)
+	orgB := seedOrg(t, s, "globex", nil)
+	var members []string
+	for i := range 20 { // enough to cross orgMemberScanMin onto the one-read path
+		u := seedUser(t, s, "m"+string(rune('a'+i))+"@acme.com", "", true)
+		if err := s.SetOrgMember(orgA.ID, u.ID, authx.OrgRoleMember); err != nil {
+			t.Fatal(err)
+		}
+		members = append(members, u.ID)
+	}
+	viewA, _ := authx.NewOrgScopedDirectory(s, s, orgA.ID)
+	viewB, _ := authx.NewOrgScopedDirectory(s, s, orgB.ID)
+	batchA, ok := viewA.(authx.BatchGroupStore)
+	if !ok {
+		t.Fatal("the org-scoped view must implement BatchGroupStore")
+	}
+	ga, _ := viewA.CreateGroup("engineering", "")
+	gb, _ := viewB.CreateGroup("engineering", "")
+	global, _ := s.CreateGroup("admins", "")
+	memberIDs := func(groupID string) map[string]bool {
+		t.Helper()
+		us, err := viewA.GroupMembers(groupID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		out := map[string]bool{}
+		for _, u := range us {
+			out[u.ID] = true
+		}
+		return out
+	}
+
+	// Small batch (per-id lookups): the outsider is skipped, members are grouped.
+	if err := batchA.AddUsersToGroup([]string{members[0], outsider.ID, members[1]}, ga.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := memberIDs(ga.ID); len(got) != 2 || got[outsider.ID] {
+		t.Fatalf("small batch must group only org members, got %v", got)
+	}
+	// Large batch (one member-list read): same rule.
+	if err := batchA.AddUsersToGroup(append([]string{outsider.ID}, members...), ga.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := memberIDs(ga.ID); len(got) != 20 || got[outsider.ID] {
+		t.Fatalf("large batch must group exactly the 20 org members, got %d (outsider=%v)", len(got), got[outsider.ID])
+	}
+	if err := batchA.RemoveUsersFromGroup(members[:15], ga.ID); err != nil {
+		t.Fatal(err)
+	}
+	if got := memberIDs(ga.ID); len(got) != 5 {
+		t.Fatalf("want 5 members after batch remove, got %d", len(got))
+	}
+
+	// Another org's group and a global group are invisible to both batch verbs.
+	for _, gid := range []string{gb.ID, global.ID} {
+		if err := batchA.AddUsersToGroup(members[:1], gid); !errors.Is(err, authx.ErrNoGroup) {
+			t.Fatalf("batch add into an out-of-org group must be ErrNoGroup, got %v", err)
+		}
+		if err := batchA.RemoveUsersFromGroup(members[:1], gid); !errors.Is(err, authx.ErrNoGroup) {
+			t.Fatalf("batch remove from an out-of-org group must be ErrNoGroup, got %v", err)
+		}
+	}
+	if m, _ := s.GroupMembers(global.ID); len(m) != 0 {
+		t.Fatalf("an org view must never touch a global group, got %v", m)
+	}
+
+	// Per-member fallback (store without BatchGroupStore): a failing member is reported but never
+	// drops the members after it.
+	fallback := noBatchDir{DirectoryStore: s, OrgDirectoryStore: s, failFor: members[0]}
+	if _, isBatch := any(fallback).(authx.BatchGroupStore); isBatch {
+		t.Fatal("test wrapper must hide BatchGroupStore")
+	}
+	fv, err := authx.NewOrgScopedDirectory(fallback, s, orgA.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	g2, _ := fv.CreateGroup("ops", "")
+	if err := fv.(authx.BatchGroupStore).AddUsersToGroup(members[:3], g2.ID); err == nil {
+		t.Fatal("the failed member's error must be returned")
+	}
+	if got := memberIDs(g2.ID); len(got) != 2 || !got[members[1]] || !got[members[2]] {
+		t.Fatalf("members after a failing one must still be grouped, got %v", got)
+	}
+}
+
 // TestOrgScopedView_NoGlobalIdentityRebind is the regression for the cross-tenant takeover: a
 // customer IdP must never rewrite the GLOBAL login identity of an account it did not provision
 // (an invited "local:" member, or another org's / the global mount's account).

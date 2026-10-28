@@ -2,7 +2,6 @@ package authx
 
 import (
 	"errors"
-	"log"
 	"time"
 )
 
@@ -166,7 +165,7 @@ func (a *Authenticator) SetLocalEnabled(on bool) {
 			// Local auth mints signed cookies; a weak/absent key makes them forgeable. New() can't
 			// catch this (local is enabled after construction), so warn loudly here — signJWT also
 			// fails closed so no cookie is ever signed with a short key.
-			log.Printf("authx: WARNING SESSION_SECRET is shorter than %d bytes; local auth cannot mint sessions until it is set", minSessionSecret)
+			a.log().Warn("authx: SESSION_SECRET is too short; local auth cannot mint sessions until it is set", "min_bytes", minSessionSecret)
 		}
 		a.enableLimiters()
 		a.enableWebauthn()

@@ -2,7 +2,6 @@ package authx
 
 import (
 	"errors"
-	"log"
 	"net/http"
 	"strings"
 	"time"
@@ -197,7 +196,7 @@ func paramID(c *reqCtx, name string) (string, bool) {
 // so store internals (SQL text, driver errors) never leak over the admin API.
 func (a *Authenticator) adminFail(c *reqCtx, code int, msg string, err error) {
 	if err != nil {
-		log.Printf("authx admin: %s: %v", msg, err)
+		a.log().Error("authx admin: "+msg, "error", err)
 	}
 	c.JSON(code, H{"error": msg})
 }

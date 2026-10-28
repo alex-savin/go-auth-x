@@ -6,6 +6,7 @@
 package authx
 
 import (
+	"log/slog"
 	"os"
 	"strings"
 )
@@ -91,6 +92,11 @@ type Config struct {
 	// (GitLab, Okta, Auth0, Keycloak, …), each mounted at /auth/social/<Name>/{login,callback}.
 	// Programmatic only (set on the Config) — there is no env form.
 	SocialOIDC []SocialOIDCProvider
+
+	// Logger receives the library's internal warnings and errors (SESSION_SECRET / TRUSTED_PROXIES
+	// warnings, failed auth emails, admin-API store errors, …). Nil = slog.Default(), resolved at
+	// log time. Programmatic only; Authenticator.SetLogger swaps it after New.
+	Logger *slog.Logger
 }
 
 // SocialOIDCProvider registers any OIDC-compliant identity provider as a social login. Discovery

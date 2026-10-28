@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Pluggable logger (`log/slog`)** — `Config.Logger` and `Authenticator.SetLogger` route the
+  library's internal warnings and errors (the `SESSION_SECRET` / `TRUSTED_PROXIES` / Microsoft
+  multi-tenant warnings, failed auth emails, admin-API store errors) to any `*slog.Logger`. Nil =
+  `slog.Default()`, resolved at log time, so a later `slog.SetDefault` is honored and the zero-value
+  `Authenticator` stays valid. Set `Config.Logger` (not `SetLogger`) to capture the warnings `New`
+  itself emits. The SCIM server gains `Server.SetLogger` for its internal errors and incomplete
+  membership writes.
+- **Batch group membership** — an optional `BatchGroupStore` upgrade interface (`AddUsersToGroup` /
+  `RemoveUsersFromGroup`, detected by type assertion — custom `DirectoryStore`s keep compiling), plus
+  `authx.AddGroupMembers` / `authx.RemoveGroupMembers`, which use it when present and otherwise fall
+  back member by member. Both are best-effort per member: an id that names no user is skipped, never
+  failing the batch. Both reference stores implement it — `gormstore` with chunked
+  `INSERT … ON CONFLICT DO NOTHING` / `DELETE … IN` (500 rows per statement), `memory` under one lock.
+
+### Changed
+
+- **SCIM group syncs batch their membership writes** — group create / `PUT` / `PATCH` issue one
+  membership write per change instead of one per member. A write that fails is now logged at Warn
+  (previously dropped silently); the response still reflects the membership actually stored.
+- **Org-scoped SCIM group syncs are no longer N+1** (the v0.7 review note) — the per-customer view
+  checks group ownership once per change instead of per member, and validates membership with one
+  member-list read for batches of 16+ ids (per-id lookups below that, so a one-member `PATCH` on a
+  large org stays cheap). The trust boundary is unchanged: only the org's own group, only its members.
+- **Log output** moved from `log.Printf` to leveled, structured `slog` records — the `WARNING` prefix
+  became the level, and values ride as attributes (`min_bytes`, `tenant`, `subject`, `to`, `group`,
+  `error`). With no logger configured, output still goes through the standard `log` package (slog's
+  default handler). Update any log scraping that matched the old text.
+
 ## [0.8.0] — 2026-07-16
 
 ### Changed — BREAKING
