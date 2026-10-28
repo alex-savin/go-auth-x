@@ -35,6 +35,16 @@ import (
 	authx "github.com/alex-savin/go-auth-x"
 )
 
+// Sessions is what the provider needs of the app's Authenticator.
+type Sessions interface {
+	SessionOf(r *http.Request) *authx.SessionClaims
+	UserBySub(sub string) (*authx.AuthUser, error)
+	ClientIP(r *http.Request) string
+	CSRFValid(r *http.Request) bool
+}
+
+var _ Sessions = (*authx.Authenticator)(nil)
+
 // Config configures a Provider. Issuer, Auth, Store and CryptoKey are required.
 type Config struct {
 	// Issuer is the provider's stable public URL, e.g. "https://tree.example.com". Discovery
@@ -42,8 +52,9 @@ type Config struct {
 	Issuer string
 	// Prefix is the path the endpoints live under (default "/oauth").
 	Prefix string
-	// Auth is the app's Authenticator: its session is the provider's login.
-	Auth *authx.Authenticator
+	// Auth is the app's sign-in: its session is the provider's login. An *authx.Authenticator
+	// satisfies it; an app that rebuilds its Authenticator passes a forwarder to the current one.
+	Auth Sessions
 	// Store keeps clients, requests, grants, tokens and signing keys. Share it between replicas.
 	Store authx.OAuthStore
 	// CryptoKey (32 bytes) encrypts access tokens. Keep it secret and stable: changing it ends every
