@@ -88,6 +88,13 @@ type Config struct {
 	// (default 30 days).
 	UnusedClientTTL time.Duration
 
+	// KeyRotation is how long a key signs ID tokens before a new one replaces it (default 90 days;
+	// negative: never). The replaced key stays published for KeyGrace, then is deleted.
+	KeyRotation time.Duration
+	// KeyGrace is how long a retired key stays published, so tokens it signed still verify
+	// (default 24 hours; never less than an ID token's life plus a few minutes).
+	KeyGrace time.Duration
+
 	// Claims adds claims to ID tokens and userinfo for the granted scopes (optional).
 	Claims func(ctx context.Context, subject string, scopes []string) (map[string]any, error)
 	// Logger receives the provider's warnings; nil uses slog.Default().
@@ -111,12 +118,14 @@ type Provider struct {
 	mux    *http.ServeMux
 	reg    *limiter
 
+	now func() time.Time // the clock of key rotation and the metadata cache (tests replace it)
+
 	stop chan struct{}
 	once sync.Once
 }
 
-// New builds the provider, creating a signing key on first use, and starts the clean-up of
-// expired records (stopped by Close).
+// New builds the provider, creating a signing key on first use (or replacing one past
+// Config.KeyRotation), and starts the clean-up of expired records and old keys (stopped by Close).
 func New(ctx context.Context, cfg Config) (*Provider, error) {
 	if cfg.Auth == nil || cfg.Store == nil {
 		return nil, errors.New("oidcprovider: Auth and Store are required")
@@ -145,6 +154,13 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 	if cfg.UnusedClientTTL <= 0 {
 		cfg.UnusedClientTTL = 30 * 24 * time.Hour
 	}
+	if cfg.KeyRotation == 0 {
+		cfg.KeyRotation = 90 * 24 * time.Hour
+	}
+	if cfg.KeyGrace <= 0 {
+		cfg.KeyGrace = 24 * time.Hour
+	}
+	cfg.KeyGrace = max(cfg.KeyGrace, idTokenTTL+keySkew)
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
@@ -152,9 +168,9 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 		cfg.Resources[i] = normResource(r)
 	}
 
-	p := &Provider{cfg: cfg, prefix: cfg.Prefix, stop: make(chan struct{}), reg: newLimiter(20, time.Hour)}
+	p := &Provider{cfg: cfg, prefix: cfg.Prefix, stop: make(chan struct{}), reg: newLimiter(20, time.Hour), now: time.Now}
 	p.store = &storage{p: p, codes: map[string]time.Time{}}
-	if err := p.store.loadKeys(); err != nil {
+	if err := p.store.rotateKeys(false); err != nil {
 		return nil, err
 	}
 
@@ -227,6 +243,9 @@ func (p *Provider) gc() {
 			now := time.Now()
 			if err := p.cfg.Store.DeleteExpiredOAuth(now, now.Add(-authRequestTTL), now.Add(-p.cfg.UnusedClientTTL)); err != nil {
 				p.cfg.Logger.Warn("oidcprovider: clean-up failed", "err", err)
+			}
+			if err := p.store.rotateKeys(false); err != nil {
+				p.cfg.Logger.Warn("oidcprovider: signing-key upkeep failed", "err", err)
 			}
 			p.store.forgetCodes(now)
 			p.reg.sweep(now)

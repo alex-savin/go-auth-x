@@ -28,12 +28,14 @@ type harness struct {
 	t     *testing.T
 	srv   *httptest.Server
 	p     *oidcprovider.Provider
+	cfg   oidcprovider.Config // p's configuration, for a second replica
 	store *memory.Store
 	user  *authx.AuthUser
 	web   *http.Client // a browser: cookies, no redirects followed
 }
 
-func setup(t *testing.T) *harness {
+// setup serves an Authenticator and a provider; opts adjust the provider's configuration.
+func setup(t *testing.T, opts ...func(*oidcprovider.Config)) *harness {
 	t.Helper()
 	h := &harness{t: t, store: memory.New()}
 	mux := http.NewServeMux()
@@ -51,13 +53,17 @@ func setup(t *testing.T) *harness {
 	a.SetAuthorizer(h.store.Authorizer())
 	a.SetLocalEnabled(true)
 
-	h.p, err = oidcprovider.New(context.Background(), oidcprovider.Config{
+	h.cfg = oidcprovider.Config{
 		Issuer: h.srv.URL, Auth: a, Store: h.store, CryptoKey: bytes.Repeat([]byte{7}, 32),
 		Scopes: []string{"tree:read", "tree:write"}, DefaultScopes: []string{"tree:read", "tree:write"},
 		Resources:    []string{h.srv.URL + "/mcp"},
 		ConsentURL:   func(id string) string { return "/consent?id=" + id },
 		Registration: true, Insecure: true,
-	})
+	}
+	for _, o := range opts {
+		o(&h.cfg)
+	}
+	h.p, err = oidcprovider.New(context.Background(), h.cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
