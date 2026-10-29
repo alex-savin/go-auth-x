@@ -101,8 +101,9 @@ type Request struct {
 }
 
 // Client describes a client on the consent screen. Its name, home page and logo were given by
-// the client itself when it registered dynamically (Dynamic): show them as claims, alongside
-// RedirectHost, which is where the browser really goes back to.
+// the client itself when it registered dynamically or in its metadata document (Dynamic; ID is
+// then the document's URL): show them as claims, alongside RedirectHost, which is where the
+// browser really goes back to.
 type Client struct {
 	ID           string `json:"id"`
 	Name         string `json:"name"`
@@ -125,12 +126,12 @@ type Decision struct {
 
 // Pending returns the request for the consent screen. subject is the signed-in user: a request
 // someone else signed in for is ErrNoRequest.
-func (p *Provider) Pending(_ context.Context, id, subject string) (*Request, error) {
+func (p *Provider) Pending(ctx context.Context, id, subject string) (*Request, error) {
 	req, err := p.store.request(id)
 	if err != nil || req.Done || req.Subject == "" || req.Subject != subject {
 		return nil, ErrNoRequest
 	}
-	c, err := p.cfg.Store.OAuthClient(req.ClientID)
+	c, err := p.client(ctx, req.ClientID)
 	if err != nil {
 		return nil, ErrNoRequest
 	}
@@ -305,7 +306,12 @@ func (p *Provider) Verify(_ context.Context, token string) (*Grant, error) {
 		return nil, ErrInvalidToken
 	}
 	name := ""
-	if c, err := p.cfg.Store.OAuthClient(t.ClientID); err == nil {
+	if p.metadataClient(t.ClientID) {
+		// Not fetched here (Verify is on every request): the name if the document is cached.
+		if c := p.cimd.cached(t.ClientID); c != nil {
+			name = c.Name
+		}
+	} else if c, err := p.cfg.Store.OAuthClient(t.ClientID); err == nil {
 		name = c.Name
 	}
 	return &Grant{ID: g.ID, ClientID: t.ClientID, ClientName: name, Subject: sub, Scopes: slices.Clone(t.Scopes),

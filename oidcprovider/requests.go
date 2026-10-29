@@ -17,18 +17,18 @@ type authRequest struct{ *authx.OAuthAuthRequest }
 
 var _ op.AuthRequest = (*authRequest)(nil)
 
-func (r *authRequest) GetID() string           { return r.ID }
-func (r *authRequest) GetACR() string          { return "" }
-func (r *authRequest) GetAMR() []string        { return nil }
-func (r *authRequest) GetAudience() []string   { return []string{r.ClientID} }
-func (r *authRequest) GetAuthTime() time.Time  { return r.AuthTime }
-func (r *authRequest) GetClientID() string     { return r.ClientID }
-func (r *authRequest) GetNonce() string        { return r.Nonce }
-func (r *authRequest) GetRedirectURI() string  { return r.RedirectURI }
-func (r *authRequest) GetScopes() []string     { return r.Scopes }
-func (r *authRequest) GetState() string        { return r.State }
-func (r *authRequest) GetSubject() string      { return r.Subject }
-func (r *authRequest) Done() bool              { return r.OAuthAuthRequest.Done }
+func (r *authRequest) GetID() string          { return r.ID }
+func (r *authRequest) GetACR() string         { return "" }
+func (r *authRequest) GetAMR() []string       { return nil }
+func (r *authRequest) GetAudience() []string  { return []string{r.ClientID} }
+func (r *authRequest) GetAuthTime() time.Time { return r.AuthTime }
+func (r *authRequest) GetClientID() string    { return r.ClientID }
+func (r *authRequest) GetNonce() string       { return r.Nonce }
+func (r *authRequest) GetRedirectURI() string { return r.RedirectURI }
+func (r *authRequest) GetScopes() []string    { return r.Scopes }
+func (r *authRequest) GetState() string       { return r.State }
+func (r *authRequest) GetSubject() string     { return r.Subject }
+func (r *authRequest) Done() bool             { return r.OAuthAuthRequest.Done }
 func (r *authRequest) GetResponseType() oidc.ResponseType {
 	return oidc.ResponseType(r.ResponseType)
 }
@@ -91,13 +91,13 @@ func (c *client) GrantTypes() []oidc.GrantType {
 	}
 	return out
 }
-func (c *client) LoginURL(id string) string                  { return c.p.prefix + "/login?id=" + url.QueryEscape(id) }
-func (c *client) AccessTokenType() op.AccessTokenType        { return op.AccessTokenTypeBearer }
-func (c *client) IDTokenLifetime() time.Duration             { return idTokenTTL }
-func (c *client) DevMode() bool                              { return c.p.cfg.Insecure }
-func (c *client) IDTokenUserinfoClaimsAssertion() bool       { return false }
-func (c *client) ClockSkew() time.Duration                   { return 0 }
-func (c *client) IsScopeAllowed(scope string) bool           { return slices.Contains(c.p.cfg.Scopes, scope) }
+func (c *client) LoginURL(id string) string            { return c.p.prefix + "/login?id=" + url.QueryEscape(id) }
+func (c *client) AccessTokenType() op.AccessTokenType  { return op.AccessTokenTypeBearer }
+func (c *client) IDTokenLifetime() time.Duration       { return idTokenTTL }
+func (c *client) DevMode() bool                        { return c.p.cfg.Insecure }
+func (c *client) IDTokenUserinfoClaimsAssertion() bool { return false }
+func (c *client) ClockSkew() time.Duration             { return 0 }
+func (c *client) IsScopeAllowed(scope string) bool     { return slices.Contains(c.p.cfg.Scopes, scope) }
 func (c *client) RestrictAdditionalIdTokenScopes() func([]string) []string {
 	return func(s []string) []string { return s }
 }

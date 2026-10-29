@@ -2,13 +2,8 @@ package oidcprovider
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/rsa"
 	"crypto/subtle"
-	"crypto/x509"
-	"encoding/pem"
 	"errors"
-	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -27,7 +22,10 @@ type storage struct {
 
 	mu    sync.Mutex
 	codes map[string]time.Time // codes already exchanged in this process (a code is used once)
-	keys  []signingKey
+
+	kmu    sync.Mutex
+	keys   []signingKey // replaced, never changed in place
+	keysAt time.Time    // when keys were read from the store
 }
 
 var _ op.Storage = (*storage)(nil)
@@ -43,7 +41,7 @@ func (s *storage) st() authx.OAuthStore { return s.p.cfg.Store }
 // --- auth requests ---
 
 func (s *storage) CreateAuthRequest(ctx context.Context, ar *oidc.AuthRequest, _ string) (op.AuthRequest, error) {
-	c, err := s.st().OAuthClient(ar.ClientID)
+	c, err := s.p.client(ctx, ar.ClientID)
 	if err != nil {
 		return nil, oidc.ErrInvalidClient().WithParent(err)
 	}
@@ -243,8 +241,11 @@ func (s *storage) accessToken(g *authx.OAuthGrant, scopes []string) (string, tim
 	if err := s.st().CreateOAuthAccessToken(t); err != nil {
 		return "", time.Time{}, err
 	}
-	if err := s.st().TouchOAuthClient(g.ClientID, now); err != nil {
-		s.p.cfg.Logger.Warn("oidcprovider: touching the client failed", "client", g.ClientID, "err", err)
+	// A client described by a metadata document isn't stored, so there is nothing to touch.
+	if !s.p.metadataClient(g.ClientID) {
+		if err := s.st().TouchOAuthClient(g.ClientID, now); err != nil {
+			s.p.cfg.Logger.Warn("oidcprovider: touching the client failed", "client", g.ClientID, "err", err)
+		}
 	}
 	return t.ID, t.ExpiresAt, nil
 }
@@ -327,16 +328,16 @@ func (s *storage) RevokeToken(_ context.Context, tokenOrID, userID, clientID str
 
 // --- clients ---
 
-func (s *storage) GetClientByClientID(_ context.Context, id string) (op.Client, error) {
-	c, err := s.st().OAuthClient(id)
+func (s *storage) GetClientByClientID(ctx context.Context, id string) (op.Client, error) {
+	c, err := s.p.client(ctx, id)
 	if err != nil {
 		return nil, err
 	}
 	return &client{c: c, p: s.p}, nil
 }
 
-func (s *storage) AuthorizeClientIDSecret(_ context.Context, id, secret string) error {
-	c, err := s.st().OAuthClient(id)
+func (s *storage) AuthorizeClientIDSecret(ctx context.Context, id, secret string) error {
+	c, err := s.p.client(ctx, id)
 	if err != nil || c.SecretHash == "" || subtle.ConstantTimeCompare([]byte(c.SecretHash), []byte(hash(secret))) != 1 {
 		return oidc.ErrInvalidClient()
 	}
@@ -421,87 +422,3 @@ func (s *storage) ValidateJWTProfileScopes(context.Context, string, []string) ([
 }
 
 func (s *storage) Health(context.Context) error { return nil }
-
-// --- signing keys ---
-
-type signingKey struct {
-	id  string
-	key *rsa.PrivateKey
-	old bool // retired: published, not signing
-	at  time.Time
-}
-
-func (k signingKey) SignatureAlgorithm() jose.SignatureAlgorithm { return jose.RS256 }
-func (k signingKey) Key() any                                    { return k.key }
-func (k signingKey) ID() string                                  { return k.id }
-
-type publicKey struct{ signingKey }
-
-func (k publicKey) Algorithm() jose.SignatureAlgorithm { return jose.RS256 }
-func (k publicKey) Use() string                        { return "sig" }
-func (k publicKey) Key() any                           { return &k.key.PublicKey }
-
-// loadKeys reads the signing keys, creating one when there is none in use.
-func (s *storage) loadKeys() error {
-	stored, err := s.st().OAuthSigningKeys()
-	if err != nil {
-		return fmt.Errorf("oidcprovider: signing keys: %w", err)
-	}
-	var keys []signingKey
-	active := false
-	for _, k := range stored {
-		blk, _ := pem.Decode(k.PrivatePEM)
-		if blk == nil {
-			continue
-		}
-		pk, err := x509.ParsePKCS8PrivateKey(blk.Bytes)
-		rk, ok := pk.(*rsa.PrivateKey)
-		if err != nil || !ok {
-			continue
-		}
-		keys = append(keys, signingKey{id: k.ID, key: rk, old: k.RetiredAt != nil, at: k.CreatedAt})
-		active = active || k.RetiredAt == nil
-	}
-	if !active {
-		rk, err := rsa.GenerateKey(rand.Reader, 2048)
-		if err != nil {
-			return err
-		}
-		der, err := x509.MarshalPKCS8PrivateKey(rk)
-		if err != nil {
-			return err
-		}
-		k := &authx.OAuthSigningKey{ID: randomID(12), Algorithm: "RS256", PrivatePEM: pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), CreatedAt: time.Now().UTC()}
-		if err := s.st().AddOAuthSigningKey(k); err != nil {
-			return fmt.Errorf("oidcprovider: saving a signing key: %w", err)
-		}
-		keys = append(keys, signingKey{id: k.ID, key: rk, at: k.CreatedAt})
-	}
-	s.keys = keys
-	return nil
-}
-
-func (s *storage) SigningKey(context.Context) (op.SigningKey, error) {
-	var best *signingKey // the newest key in use
-	for i := range s.keys {
-		if k := &s.keys[i]; !k.old && (best == nil || k.at.After(best.at)) {
-			best = k
-		}
-	}
-	if best == nil {
-		return nil, errors.New("no signing key")
-	}
-	return *best, nil
-}
-
-func (s *storage) SignatureAlgorithms(context.Context) ([]jose.SignatureAlgorithm, error) {
-	return []jose.SignatureAlgorithm{jose.RS256}, nil
-}
-
-func (s *storage) KeySet(context.Context) ([]op.Key, error) {
-	out := make([]op.Key, 0, len(s.keys))
-	for _, k := range s.keys {
-		out = append(out, publicKey{k})
-	}
-	return out, nil
-}

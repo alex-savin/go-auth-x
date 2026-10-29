@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Signing-key rotation (`oidcprovider`)** — the provider's clean-up replaces the ID-token signing
+  key when it is older than `Config.KeyRotation` (default 90 days; negative = never) and retires
+  the previous one, which stays in the JWKS for `Config.KeyGrace` (default 24 hours, never less than
+  an ID token's life plus five minutes) and is then deleted. Only the newest key not retired signs.
+  Each replica reads the keys from the store again every five minutes, so a rotation done by one
+  replica reaches the others; two replicas rotating at once leave one extra, retired key, which is
+  harmless. `Provider.RotateKeys` forces a rotation (e.g. after a suspected leak).
+- **Client ID Metadata Documents (`oidcprovider`)** — with `Config.ClientMetadataDocuments`, a
+  client may use an https URL as its `client_id` (MCP authorization spec 2025-11-25,
+  draft-ietf-oauth-client-id-metadata-document). The provider fetches the document there, checks
+  it (its `client_id` must be the URL exactly; redirect URIs as for dynamic registration; public
+  clients only — `token_endpoint_auth_method` `none`), and treats it as a dynamic public client
+  with PKCE. Documents are cached in memory (`Cache-Control` max-age held to 5 minutes – 24 hours,
+  default 1 hour; at most 1000 entries) and never stored. Discovery advertises
+  `client_id_metadata_document_supported`. The fetch is guarded against SSRF: only public
+  addresses (no private, loopback, link-local, CGNAT, multicast or special-purpose ranges, IPv4 or
+  IPv6, IPv4-mapped included), the connection is pinned to the checked address (no DNS
+  rebinding), no proxy, https-only redirects (at most 3), JSON only, 64 KB, 5 seconds.
+- **`OAuthStore.RetireOAuthSigningKey` / `DeleteOAuthSigningKey`** — store-interface addition for
+  key rotation, implemented by both reference stores. A custom `OAuthStore` must add the two
+  methods. Retiring an already retired key keeps its first time.
+
+### Changed
+
+- **`oidcprovider` signing keys are re-read from the store periodically** (every five minutes, and
+  at each clean-up) instead of only at `New`, so replicas see each other's keys.
+
 ## [0.9.0] — 2026-10-28
 
 ### Added

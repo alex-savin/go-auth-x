@@ -186,7 +186,7 @@ func cleanName(s string) string {
 
 // discovery serves the metadata at /.well-known/openid-configuration and RFC 8414's
 // /.well-known/oauth-authorization-server: zitadel's document, plus the registration endpoint,
-// public clients and the response iss parameter.
+// client metadata documents, public clients and the response iss parameter.
 func (p *Provider) discovery(w http.ResponseWriter, r *http.Request) {
 	rec := httptest.NewRecorder()
 	r2 := r.Clone(r.Context())
@@ -199,6 +199,9 @@ func (p *Provider) discovery(w http.ResponseWriter, r *http.Request) {
 	}
 	if p.cfg.Registration {
 		doc["registration_endpoint"] = p.cfg.Issuer + p.prefix + "/register"
+	}
+	if p.cfg.ClientMetadataDocuments {
+		doc["client_id_metadata_document_supported"] = true
 	}
 	doc["code_challenge_methods_supported"] = []string{string(oidc.CodeChallengeMethodS256)}
 	doc["response_types_supported"] = []string{string(oidc.ResponseTypeCode)}

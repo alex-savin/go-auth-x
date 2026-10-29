@@ -561,6 +561,9 @@ p, err := oidcprovider.New(ctx, oidcprovider.Config{
     Resources:     []string{"https://app.example.com/mcp"},
     ConsentURL:    func(id string) string { return "/connect?request=" + id },
     Registration:  true,                        // RFC 7591, for MCP clients
+    ClientMetadataDocuments: true,              // https URL client_ids (MCP 2025-11-25)
+    // KeyRotation: 90 * 24 * time.Hour,        // default; negative = never
+    // KeyGrace:    24 * time.Hour,             // default; retired keys stay published this long
 })
 for _, pat := range p.Patterns() { mux.Handle(pat, p.Handler()) }
 
@@ -583,8 +586,17 @@ g, err := p.VerifyFor(ctx, bearer, "https://app.example.com/mcp") // g.Subject, 
 - **Revoking:** `RevokeRef` ends every grant tied to the app's record.
 - **Registration** is limited per address. A dynamic client that is never used is removed after
   `UnusedClientTTL`.
+- **Client ID Metadata Documents** (`ClientMetadataDocuments`): a client may use an https URL as its
+  `client_id`; the provider fetches its metadata there (the document's `client_id` must equal the
+  URL; public clients only, PKCE required). Documents are cached in memory (`Cache-Control` max-age,
+  5 min – 24 h, default 1 h), never stored. The fetch only reaches public addresses, is pinned to
+  the address it checked (no DNS rebinding), and is limited to 5 s, 64 KB and https redirects.
+- **Signing keys** rotate: after `KeyRotation` (default 90 days) a new key signs and the old one
+  stays in the JWKS for `KeyGrace` (default 24 h), then is deleted. Replicas re-read the keys
+  every five minutes. `RotateKeys` forces a rotation.
 - **Consent screen:** show the client's self-chosen name as a claim, together with `RedirectHost`,
-  which is where the browser really goes back to.
+  which is where the browser really goes back to. For a metadata-document client, `Client.ID` is
+  its URL.
 
 ---
 
