@@ -417,7 +417,7 @@ func testOAuthStore(t *testing.T, newStore func(t *testing.T) authx.OAuthStore) 
 		eqTimePtr(t, "RetiredAt", keys[0].RetiredAt, tp(time.Hour))
 		eqTimePtr(t, "RetiredAt (nil)", keys[1].RetiredAt, nil)
 
-		// Re-adding by ID replaces (the only way to retire a key through the interface).
+		// Re-adding by ID replaces.
 		k2.RetiredAt = tp(2 * time.Hour)
 		if err := s.AddOAuthSigningKey(k2); err != nil {
 			t.Fatal(err)
@@ -427,6 +427,48 @@ func testOAuthStore(t *testing.T, newStore func(t *testing.T) authx.OAuthStore) 
 			t.Fatalf("re-adding must replace, got %d keys", len(keys))
 		}
 		eqTimePtr(t, "RetiredAt (retired)", keys[1].RetiredAt, tp(2*time.Hour))
+	})
+
+	t.Run("signing key retire and delete", func(t *testing.T) {
+		s := newStore(t)
+		for _, k := range []*authx.OAuthSigningKey{
+			{ID: "k1", Algorithm: "RS256", PrivatePEM: []byte("pem-1"), CreatedAt: at(0)},
+			{ID: "k2", Algorithm: "RS256", PrivatePEM: []byte("pem-2"), CreatedAt: at(time.Minute)},
+		} {
+			if err := s.AddOAuthSigningKey(k); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := s.RetireOAuthSigningKey("k1", at(time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		// Retiring again keeps the first time (another replica retiring it must not extend its grace).
+		if err := s.RetireOAuthSigningKey("k1", at(5*time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.RetireOAuthSigningKey("nope", at(time.Hour)); !errors.Is(err, authx.ErrOAuthNotFound) {
+			t.Fatalf("retiring an absent key = %v, want ErrOAuthNotFound", err)
+		}
+		keys, err := s.OAuthSigningKeys()
+		if err != nil || len(keys) != 2 {
+			t.Fatalf("keys=%v err=%v", keys, err)
+		}
+		eqTimePtr(t, "RetiredAt (k1)", keys[0].RetiredAt, tp(time.Hour))
+		eqTimePtr(t, "RetiredAt (k2)", keys[1].RetiredAt, nil)
+		if string(keys[0].PrivatePEM) != "pem-1" {
+			t.Fatalf("retiring must keep the key: %+v", keys[0])
+		}
+
+		if err := s.DeleteOAuthSigningKey("k1"); err != nil {
+			t.Fatal(err)
+		}
+		if err := s.DeleteOAuthSigningKey("k1"); err != nil {
+			t.Fatalf("deleting is idempotent, got %v", err)
+		}
+		keys, _ = s.OAuthSigningKeys()
+		if len(keys) != 1 || keys[0].ID != "k2" {
+			t.Fatalf("after delete: %+v", keys)
+		}
 	})
 
 	t.Run("delete expired", func(t *testing.T) {

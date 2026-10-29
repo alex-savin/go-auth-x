@@ -2,6 +2,7 @@ package memory
 
 import (
 	"errors"
+	"slices"
 	"sort"
 	"time"
 
@@ -354,8 +355,7 @@ func (s *Store) OAuthSigningKeys() ([]authx.OAuthSigningKey, error) {
 	return out, nil
 }
 
-// AddOAuthSigningKey adds the key, or replaces the one with k.ID — the interface has no separate
-// retire call, so retiring a key is re-adding it with RetiredAt set.
+// AddOAuthSigningKey adds the key, or replaces the one with k.ID.
 func (s *Store) AddOAuthSigningKey(k *authx.OAuthSigningKey) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -366,6 +366,30 @@ func (s *Store) AddOAuthSigningKey(k *authx.OAuthSigningKey) error {
 		}
 	}
 	s.oauthKeys = append(s.oauthKeys, cloneKey(k))
+	return nil
+}
+
+// RetireOAuthSigningKey marks the key retired at at. A key already retired keeps its first time,
+// so replicas retiring it again don't extend its grace.
+func (s *Store) RetireOAuthSigningKey(id string, at time.Time) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for i := range s.oauthKeys {
+		if k := &s.oauthKeys[i]; k.ID == id {
+			if k.RetiredAt == nil {
+				k.RetiredAt = &at
+			}
+			return nil
+		}
+	}
+	return authx.ErrOAuthNotFound
+}
+
+// DeleteOAuthSigningKey removes the key (idempotent).
+func (s *Store) DeleteOAuthSigningKey(id string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.oauthKeys = slices.DeleteFunc(s.oauthKeys, func(k authx.OAuthSigningKey) bool { return k.ID == id })
 	return nil
 }
 

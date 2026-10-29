@@ -401,13 +401,36 @@ func (s *Store) OAuthSigningKeys() ([]authx.OAuthSigningKey, error) {
 	return out, nil
 }
 
-// AddOAuthSigningKey adds the key, or replaces the one with k.ID — the interface has no separate
-// retire call, so retiring a key is re-adding it with RetiredAt set.
+// AddOAuthSigningKey adds the key, or replaces the one with k.ID.
 func (s *Store) AddOAuthSigningKey(k *authx.OAuthSigningKey) error {
 	return s.db.Clauses(clause.OnConflict{UpdateAll: true}).Create(&OAuthSigningKey{
 		ID: k.ID, Algorithm: k.Algorithm, PrivatePEM: k.PrivatePEM,
 		CreatedAt: k.CreatedAt.UTC(), RetiredAt: utcPtr(k.RetiredAt),
 	}).Error
+}
+
+// RetireOAuthSigningKey marks the key retired at at. A key already retired keeps its first time,
+// so replicas retiring it again don't extend its grace.
+func (s *Store) RetireOAuthSigningKey(id string, at time.Time) error {
+	res := s.db.Model(&OAuthSigningKey{}).Where("id = ? AND retired_at IS NULL", id).Update("retired_at", at.UTC())
+	if res.Error != nil {
+		return res.Error
+	}
+	if res.RowsAffected == 0 {
+		var n int64
+		if err := s.db.Model(&OAuthSigningKey{}).Where("id = ?", id).Count(&n).Error; err != nil {
+			return err
+		}
+		if n == 0 {
+			return authx.ErrOAuthNotFound
+		}
+	}
+	return nil
+}
+
+// DeleteOAuthSigningKey removes the key (idempotent).
+func (s *Store) DeleteOAuthSigningKey(id string) error {
+	return s.db.Delete(&OAuthSigningKey{}, "id = ?", id).Error
 }
 
 // --- cleanup ---

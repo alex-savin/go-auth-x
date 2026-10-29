@@ -142,7 +142,14 @@ type OAuthStore interface {
 	UseOAuthRefreshToken(hash string, at time.Time) error
 
 	OAuthSigningKeys() ([]OAuthSigningKey, error)
+	// AddOAuthSigningKey adds the key, or replaces the one with k.ID.
 	AddOAuthSigningKey(k *OAuthSigningKey) error
+	// RetireOAuthSigningKey marks a key retired (still published, no longer signing) at at; a key
+	// already retired keeps its earlier time. An absent key is ErrOAuthNotFound.
+	RetireOAuthSigningKey(id string, at time.Time) error
+	// DeleteOAuthSigningKey removes a key, once no token signed with it can still be valid
+	// (idempotent: an absent key is not an error).
+	DeleteOAuthSigningKey(id string) error
 
 	// DeleteExpiredOAuth removes what can no longer be used: auth requests created before
 	// requestsBefore, tokens expired before now, grants revoked or expired before now (with their
