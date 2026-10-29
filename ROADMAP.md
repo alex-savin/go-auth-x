@@ -5,7 +5,7 @@ Direction and planned work for the library. Authoritative usage/feature docs liv
 
 ## Shipped
 
-### Next release (unreleased) — OIDC provider: key rotation, Client ID Metadata Documents · additive (two new `OAuthStore` methods)
+### v0.10.0 — OIDC provider: key rotation, Client ID Metadata Documents · additive (two new `OAuthStore` methods)
 
 - **Signing-key rotation** — keys older than `KeyRotation` (90 days) are replaced by the clean-up;
   retired keys stay published for `KeyGrace`, then are deleted; replicas re-read the keys every few
