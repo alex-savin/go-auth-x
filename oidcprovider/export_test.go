@@ -1,6 +1,9 @@
 package oidcprovider
 
-import "time"
+import (
+	"crypto/x509"
+	"time"
+)
 
 // Test hooks for the external tests.
 
@@ -16,4 +19,10 @@ func SigningKeyID(p *Provider) string {
 		return k.id
 	}
 	return ""
+}
+
+// UseTestMetadataServer lets p fetch metadata documents from a test server: trusting its CA and
+// allowing loopback addresses, which are refused otherwise.
+func UseTestMetadataServer(p *Provider, roots *x509.CertPool) {
+	p.cimd = newMetadataFetcher(p, roots, true)
 }

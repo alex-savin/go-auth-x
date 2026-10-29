@@ -41,7 +41,7 @@ func (s *storage) st() authx.OAuthStore { return s.p.cfg.Store }
 // --- auth requests ---
 
 func (s *storage) CreateAuthRequest(ctx context.Context, ar *oidc.AuthRequest, _ string) (op.AuthRequest, error) {
-	c, err := s.st().OAuthClient(ar.ClientID)
+	c, err := s.p.client(ctx, ar.ClientID)
 	if err != nil {
 		return nil, oidc.ErrInvalidClient().WithParent(err)
 	}
@@ -241,8 +241,11 @@ func (s *storage) accessToken(g *authx.OAuthGrant, scopes []string) (string, tim
 	if err := s.st().CreateOAuthAccessToken(t); err != nil {
 		return "", time.Time{}, err
 	}
-	if err := s.st().TouchOAuthClient(g.ClientID, now); err != nil {
-		s.p.cfg.Logger.Warn("oidcprovider: touching the client failed", "client", g.ClientID, "err", err)
+	// A client described by a metadata document isn't stored, so there is nothing to touch.
+	if !s.p.metadataClient(g.ClientID) {
+		if err := s.st().TouchOAuthClient(g.ClientID, now); err != nil {
+			s.p.cfg.Logger.Warn("oidcprovider: touching the client failed", "client", g.ClientID, "err", err)
+		}
 	}
 	return t.ID, t.ExpiresAt, nil
 }
@@ -325,16 +328,16 @@ func (s *storage) RevokeToken(_ context.Context, tokenOrID, userID, clientID str
 
 // --- clients ---
 
-func (s *storage) GetClientByClientID(_ context.Context, id string) (op.Client, error) {
-	c, err := s.st().OAuthClient(id)
+func (s *storage) GetClientByClientID(ctx context.Context, id string) (op.Client, error) {
+	c, err := s.p.client(ctx, id)
 	if err != nil {
 		return nil, err
 	}
 	return &client{c: c, p: s.p}, nil
 }
 
-func (s *storage) AuthorizeClientIDSecret(_ context.Context, id, secret string) error {
-	c, err := s.st().OAuthClient(id)
+func (s *storage) AuthorizeClientIDSecret(ctx context.Context, id, secret string) error {
+	c, err := s.p.client(ctx, id)
 	if err != nil || c.SecretHash == "" || subtle.ConstantTimeCompare([]byte(c.SecretHash), []byte(hash(secret))) != 1 {
 		return oidc.ErrInvalidClient()
 	}

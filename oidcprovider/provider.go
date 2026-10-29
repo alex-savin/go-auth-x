@@ -79,6 +79,11 @@ type Config struct {
 	// Registration enables dynamic client registration at Prefix + "/register" (needed by most MCP
 	// clients; anyone may register a client, but only a user's approval gives it access).
 	Registration bool
+	// ClientMetadataDocuments lets a client use an https URL as its client_id, the provider
+	// fetching its metadata from there (Client ID Metadata Documents, as in the MCP authorization
+	// spec) — registration without a registration step. Such clients are public and use PKCE, and
+	// the fetch only reaches public addresses.
+	ClientMetadataDocuments bool
 
 	// AccessTokenTTL is an access token's life (default 1 hour).
 	AccessTokenTTL time.Duration
@@ -114,6 +119,7 @@ type Provider struct {
 	cfg    Config
 	op     *op.Provider
 	store  *storage
+	cimd   *metadataFetcher
 	prefix string
 	mux    *http.ServeMux
 	reg    *limiter
@@ -170,6 +176,7 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 
 	p := &Provider{cfg: cfg, prefix: cfg.Prefix, stop: make(chan struct{}), reg: newLimiter(20, time.Hour), now: time.Now}
 	p.store = &storage{p: p, codes: map[string]time.Time{}}
+	p.cimd = newMetadataFetcher(p, nil, false)
 	if err := p.store.rotateKeys(false); err != nil {
 		return nil, err
 	}

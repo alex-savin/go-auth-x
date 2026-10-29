@@ -5,6 +5,16 @@ Direction and planned work for the library. Authoritative usage/feature docs liv
 
 ## Shipped
 
+### Next release (unreleased) — OIDC provider: key rotation, Client ID Metadata Documents · additive (two new `OAuthStore` methods)
+
+- **Signing-key rotation** — keys older than `KeyRotation` (90 days) are replaced by the clean-up;
+  retired keys stay published for `KeyGrace`, then are deleted; replicas re-read the keys every few
+  minutes; `RotateKeys` forces one. Adds `RetireOAuthSigningKey` / `DeleteOAuthSigningKey` to
+  `OAuthStore`.
+- **Client ID Metadata Documents** — an https URL as `client_id` (MCP 2025-11-25), fetched with
+  SSRF protection (public addresses only, pinned dial), cached in memory, public clients only.
+  `private_key_jwt` documents are refused for now.
+
 ### v0.9.0 — OAuth/OIDC provider, pluggable logger, batch group membership · additive
 
 - **Embeddable OAuth 2.1 / OIDC provider (`oidcprovider`)** — the planned "be a lightweight IdP",
@@ -16,8 +26,6 @@ Direction and planned work for the library. Authoritative usage/feature docs liv
   - opaque access tokens and rotating single-use refresh tokens.
 
   Still open:
-  - signing-key rotation, beyond publishing retired keys;
-  - Client ID Metadata Documents;
   - `prompt=login` / `max_age` re-authentication.
 
 - **Pluggable logger (`log/slog`)** — `Config.Logger` / `SetLogger` (default `slog.Default()`,
