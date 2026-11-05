@@ -378,8 +378,15 @@ func TestDenyAndRefusals(t *testing.T) {
 		}
 	}
 
+	// A grant not offered here, beside the code, is left out of the registration, not refused.
+	code, m := h.register(map[string]any{"redirect_uris": []string{"https://ok.example/cb"}, "token_endpoint_auth_method": "none",
+		"grant_types": []string{"authorization_code", "refresh_token", "urn:ietf:params:oauth:grant-type:jwt-bearer"}})
+	if g, _ := json.Marshal(m["grant_types"]); code != 201 || string(g) != `["authorization_code","refresh_token"]` {
+		t.Fatalf("register with an extra grant = %d %v", code, m)
+	}
+
 	// A confidential client gets a secret and must use it.
-	code, m := h.register(map[string]any{"redirect_uris": []string{"https://ok.example/cb"}, "client_name": "Web‮app\x07"})
+	code, m = h.register(map[string]any{"redirect_uris": []string{"https://ok.example/cb"}, "client_name": "Web‮app\x07"})
 	if code != 201 || m["client_secret"] == nil || m["client_name"] != "Webapp" {
 		t.Fatalf("confidential register = %d %v", code, m)
 	}
