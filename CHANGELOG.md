@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.1] — 2026-11-05
+
+### Fixed
+
+- **`oidcprovider`: a client naming a grant type the provider does not offer is no longer
+  refused** when it also names the authorization code or refresh tokens. The extra grant is left
+  out: a client metadata document's client gets the code (and refresh tokens when it asks), and a
+  dynamic registration's response lists what it got (RFC 7591 lets the server replace what was
+  asked). claude.ai's client metadata lists `urn:ietf:params:oauth:grant-type:jwt-bearer` beside
+  the code, so its connectors failed at `/authorize` with "unable to retrieve client by id". A
+  client asking only for grants not offered is still refused.
+
 ## [0.10.0] — 2026-10-29
 
 ### Added

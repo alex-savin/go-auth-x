@@ -62,18 +62,12 @@ func (p *Provider) register(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid_client_metadata", "only the code response type is supported")
 		return
 	}
-	if len(m.GrantTypes) == 0 {
-		m.GrantTypes = []string{string(oidc.GrantTypeCode)}
+	grants, ok := supportedGrants(m.GrantTypes)
+	if !ok {
+		writeErr(w, http.StatusBadRequest, "invalid_client_metadata", "grant_types must include authorization_code or refresh_token")
+		return
 	}
-	for _, g := range m.GrantTypes {
-		if g != string(oidc.GrantTypeCode) && g != string(oidc.GrantTypeRefreshToken) {
-			writeErr(w, http.StatusBadRequest, "invalid_client_metadata", "grant_types may be authorization_code and refresh_token")
-			return
-		}
-	}
-	if !slices.Contains(m.GrantTypes, string(oidc.GrantTypeCode)) {
-		m.GrantTypes = append(m.GrantTypes, string(oidc.GrantTypeCode))
-	}
+	m.GrantTypes = grants
 	if m.TokenEndpointAuthMethod == "" {
 		m.TokenEndpointAuthMethod = string(oidc.AuthMethodBasic) // RFC 7591's default
 	}
@@ -147,6 +141,23 @@ func (p *Provider) RegisterClient(c authx.OAuthClient) (secret string, err error
 // redirectOK allows https, http to a loopback address (a native app's local listener), and a
 // private-use scheme in reverse-domain form ("com.example.app:/cb", RFC 8252) — never javascript:,
 // data: or the like, and no fragments.
+// supportedGrants keeps of a client's grant types those this provider issues tokens for (the
+// code, and refresh tokens), the code always among them. Others it also names (a JWT bearer grant,
+// say, which claude.ai's client metadata lists) are left out rather than refused: the client
+// simply cannot use them here (RFC 7591 lets the server replace what was asked; the registration
+// response says what it got). A client asking only for grants not supported is refused (ok false).
+func supportedGrants(asked []string) (grants []string, ok bool) {
+	code, refresh := slices.Contains(asked, string(oidc.GrantTypeCode)), slices.Contains(asked, string(oidc.GrantTypeRefreshToken))
+	if len(asked) > 0 && !code && !refresh {
+		return nil, false
+	}
+	grants = []string{string(oidc.GrantTypeCode)}
+	if refresh {
+		grants = append(grants, string(oidc.GrantTypeRefreshToken))
+	}
+	return grants, true
+}
+
 func (p *Provider) redirectOK(raw string) bool {
 	u, err := url.Parse(raw)
 	if err != nil || u.Fragment != "" || u.Scheme == "" {

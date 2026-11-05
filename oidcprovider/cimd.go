@@ -354,14 +354,9 @@ func (p *Provider) metadataToClient(rawURL string, doc *metadataDoc) (*authx.OAu
 	if len(doc.ResponseTypes) > 0 && !slices.Equal(doc.ResponseTypes, []string{string(oidc.ResponseTypeCode)}) {
 		return nil, fmt.Errorf("%w: only the code response type is supported", errMetadata)
 	}
-	grants := slices.Clone(doc.GrantTypes)
-	for _, g := range grants {
-		if g != string(oidc.GrantTypeCode) && g != string(oidc.GrantTypeRefreshToken) {
-			return nil, fmt.Errorf("%w: grant type %q is not supported", errMetadata, g)
-		}
-	}
-	if !slices.Contains(grants, string(oidc.GrantTypeCode)) {
-		grants = append(grants, string(oidc.GrantTypeCode))
+	grants, ok := supportedGrants(doc.GrantTypes)
+	if !ok {
+		return nil, fmt.Errorf("%w: grant_types %q include neither authorization_code nor refresh_token", errMetadata, doc.GrantTypes)
 	}
 	return &authx.OAuthClient{
 		ID: rawURL, Name: cleanName(doc.ClientName), URI: httpsOrEmpty(doc.ClientURI), LogoURI: httpsOrEmpty(doc.LogoURI),

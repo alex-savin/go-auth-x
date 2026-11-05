@@ -55,6 +55,11 @@ func newDocServer(t *testing.T) *docServer {
 	doc("/jwt.json", func(m map[string]any) { m["token_endpoint_auth_method"] = "private_key_jwt" })
 	doc("/secret.json", func(m map[string]any) { m["client_secret"] = "s3cret" })
 	doc("/evil-redirect.json", func(m map[string]any) { m["redirect_uris"] = []string{"http://evil.example/cb"} })
+	doc("/other-grants.json", func(m map[string]any) { m["grant_types"] = []string{"client_credentials"} })
+	// As claude.ai's client metadata does: a grant this provider does not offer, beside the code.
+	doc("/extra-grant.json", func(m map[string]any) {
+		m["grant_types"] = []string{"authorization_code", "refresh_token", "urn:ietf:params:oauth:grant-type:jwt-bearer"}
+	})
 	mux.HandleFunc("/moved.json", func(w http.ResponseWriter, r *http.Request) {
 		http.Redirect(w, r, "http://"+strings.TrimPrefix(d.srv.URL, "https://")+"/client.json", http.StatusFound)
 	})
@@ -139,8 +144,13 @@ func TestClientMetadataDocument(t *testing.T) {
 		t.Fatalf("after max-age the document must be fetched again, fetched %d times", n)
 	}
 
+	// A grant not offered here, beside the code, is left out, not refused.
+	if h.refused(docs.url("/extra-grant.json")) {
+		t.Error("a document naming a grant not offered here, beside the code, must be accepted")
+	}
+
 	// Refused documents.
-	for _, path := range []string{"/mismatch.json", "/big.json", "/text.json", "/jwt.json", "/secret.json", "/evil-redirect.json", "/moved.json", "/missing.json"} {
+	for _, path := range []string{"/mismatch.json", "/big.json", "/text.json", "/jwt.json", "/secret.json", "/evil-redirect.json", "/moved.json", "/missing.json", "/other-grants.json"} {
 		if !h.refused(docs.url(path)) {
 			t.Errorf("%s must be refused", path)
 		}
