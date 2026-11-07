@@ -81,9 +81,10 @@ func TestMaxAge(t *testing.T) {
 func TestAuthTimeIsSignInTime(t *testing.T) {
 	h := setup(t)
 	cid := h.publicClient()
-	signedIn := time.Now()
+	before := time.Now()
 	h.signIn(h.web, "u@x.com", "correct horse battery staple")
-	time.Sleep(2100 * time.Millisecond) // the approval lands at least two whole seconds later
+	after := time.Now()                 // the session's sign-in is stamped in [before, after]
+	time.Sleep(2100 * time.Millisecond) // the approval lands at least two whole seconds after that
 	tok := h.idToken(cid)
 	jws, err := jose.ParseSignedCompact(tok, []jose.SignatureAlgorithm{jose.RS256})
 	if err != nil {
@@ -95,10 +96,9 @@ func TestAuthTimeIsSignInTime(t *testing.T) {
 	if err := json.Unmarshal(jws.UnsafePayloadWithoutVerification(), &claims); err != nil {
 		t.Fatal(err)
 	}
-	// Whole seconds: the sign-in's, or the next if the server stamped it just after.
-	first := signedIn.Truncate(time.Second)
-	if got := time.Unix(claims.AuthTime, 0); got.Before(first) || got.After(first.Add(time.Second)) {
-		t.Fatalf("auth_time = %v, want the sign-in at %v (not the later approval)", got, signedIn)
+	// auth_time has whole seconds.
+	if got := time.Unix(claims.AuthTime, 0); got.Before(before.Truncate(time.Second)) || got.After(after) {
+		t.Fatalf("auth_time = %v, want the sign-in, between %v and %v (not the later approval)", got, before, after)
 	}
 }
 
