@@ -65,6 +65,11 @@ func (c *reqCtx) tooMany(msg string) {
 // by rotating within it), while IPv4 is unchanged. Not for audit/display — use ClientIP() there.
 func (c *reqCtx) rateIP() string { return maskIPForRateLimit(c.ClientIP()) }
 
+// RateLimitKey normalizes a client IP (e.g. from Authenticator.ClientIP) into a rate-limit key the
+// way the built-in limiters do: an IPv6 address collapses to its /64, IPv4 stays exact — for
+// limiters outside this package, so rotating addresses within one /64 doesn't dodge them.
+func RateLimitKey(ip string) string { return maskIPForRateLimit(ip) }
+
 func maskIPForRateLimit(ip string) string {
 	parsed := net.ParseIP(ip)
 	if parsed == nil {

@@ -225,6 +225,11 @@ func testOAuthStore(t *testing.T, newStore func(t *testing.T) authx.OAuthStore) 
 		if err := s.CreateOAuthGrant(g); err != nil {
 			t.Fatal(err)
 		}
+		// A taken ID must be refused: the provider derives a grant's ID from its code, and this
+		// refusal is what makes a code single-use across replicas.
+		if err := s.CreateOAuthGrant(&authx.OAuthGrant{ID: "g1", ClientID: "c2", Subject: "u2", CreatedAt: at(0)}); err == nil {
+			t.Fatal("a duplicate grant ID must fail")
+		}
 		got, err := s.OAuthGrant("g1")
 		if err != nil {
 			t.Fatal(err)

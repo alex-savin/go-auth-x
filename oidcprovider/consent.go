@@ -76,6 +76,13 @@ func (p *Provider) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if p.cfg.ConsentURL == nil {
+		// No consent screen: only a client the app registered itself is approved unasked. A client
+		// that registered itself (or a metadata document's) could be anyone's, and approving it
+		// silently would hand a signed-in user's tokens to whoever sent them the link.
+		if c, err := p.client(r.Context(), req.ClientID); err != nil || c.Dynamic {
+			p.redirectError(w, r, req, "access_denied", "this client needs the user's consent, and no consent screen is configured")
+			return
+		}
 		to, err := p.Approve(r.Context(), id, sc.Subject, Decision{})
 		if err != nil {
 			http.Error(w, "server error", http.StatusInternalServerError)
@@ -286,8 +293,10 @@ type Grant struct {
 	ExpiresAt  time.Time // the access token's expiry
 }
 
-// Verify checks an access token: issued here, not expired, and its grant not revoked. A caller
-// serving a resource must also check that Resources includes it (VerifyFor does).
+// Verify checks an access token: issued here, not expired, its grant neither revoked nor past its
+// end, and its user still allowed to sign in (a disabled, banned or deleted user's tokens stop at
+// once, not when they expire). A caller serving a resource must also check that Resources
+// includes it (VerifyFor does).
 func (p *Provider) Verify(_ context.Context, token string) (*Grant, error) {
 	plain, err := p.op.Crypto().Decrypt(token)
 	if err != nil {
@@ -297,12 +306,9 @@ func (p *Provider) Verify(_ context.Context, token string) (*Grant, error) {
 	if !ok {
 		return nil, ErrInvalidToken
 	}
-	t, err := p.cfg.Store.OAuthAccessToken(id)
-	if err != nil || t.Subject != sub || !time.Now().Before(t.ExpiresAt) {
-		return nil, ErrInvalidToken
-	}
-	g, err := p.cfg.Store.OAuthGrant(t.GrantID)
-	if err != nil || g.RevokedAt != nil || (!g.ExpiresAt.IsZero() && time.Now().After(g.ExpiresAt)) {
+	sub = unescapeSubject(sub)
+	t, g, err := p.store.liveToken(id, sub)
+	if err != nil {
 		return nil, ErrInvalidToken
 	}
 	name := ""

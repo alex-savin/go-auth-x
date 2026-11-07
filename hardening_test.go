@@ -375,3 +375,16 @@ func TestHIBPFailOpen(t *testing.T) {
 		t.Fatal("fail-closed checker must surface a transport error")
 	}
 }
+
+// RateLimitKey keys IPv6 by its /64 (rotating within one doesn't dodge a limit) and IPv4 exactly.
+func TestRateLimitKey(t *testing.T) {
+	if RateLimitKey("2001:db8:1:2::1") != RateLimitKey("2001:db8:1:2:ffff::9") {
+		t.Fatal("two addresses in one /64 must share a key")
+	}
+	if RateLimitKey("2001:db8:1:2::1") == RateLimitKey("2001:db8:1:3::1") {
+		t.Fatal("different /64s must not share a key")
+	}
+	if RateLimitKey("203.0.113.7") != "203.0.113.7" || RateLimitKey("203.0.113.7") == RateLimitKey("203.0.113.8") {
+		t.Fatal("IPv4 addresses must be keyed exactly")
+	}
+}

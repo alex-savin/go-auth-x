@@ -1,13 +1,17 @@
 package oidcprovider
 
 import (
+	"bytes"
 	"context"
+	"crypto/aes"
+	"crypto/cipher"
 	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	jose "github.com/go-jose/go-jose/v4"
@@ -25,6 +29,11 @@ import (
 // is deleted. Each replica caches the keys and reads them again every keyRefresh, so a key another
 // replica added is published (and used) everywhere within that time; a verifier that meets an
 // unknown key id fetches the JWKS again.
+//
+// At rest each key is sealed with AES-GCM under a key derived from Config.CryptoKey, bound to its
+// id, so a copy of the store alone can't sign tokens. Keys stored in the clear (v0.10 and earlier)
+// still load and are sealed by the next upkeep. A key the CryptoKey can't open (it changed, or
+// replicas disagree on it) is ignored, and deleted once it would have expired anyway.
 
 const (
 	keyRefresh = 5 * time.Minute // how old the cached keys may get before they are read again
@@ -36,6 +45,61 @@ type signingKey struct {
 	key     *rsa.PrivateKey
 	at      time.Time // created
 	retired time.Time // zero while it signs
+	plain   bool      // stored in the clear (before keys were sealed): the upkeep seals it
+}
+
+// sealedPrefix marks a sealed key: the prefix, then the GCM nonce, then the sealed PEM.
+var sealedPrefix = []byte("authx-sealed-v1:")
+
+// seal encrypts a key's PEM for storage, with its id as additional data.
+func (s *storage) seal(id string, pemBytes []byte) ([]byte, error) {
+	gcm, err := s.gcm()
+	if err != nil {
+		return nil, err
+	}
+	nonce := make([]byte, gcm.NonceSize())
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, err
+	}
+	out := append(slices.Clip(sealedPrefix), nonce...)
+	return gcm.Seal(out, nonce, pemBytes, []byte(id)), nil
+}
+
+// open returns a stored key's PEM: unsealed, or as stored when it predates sealing (plain).
+func (s *storage) open(id string, stored []byte) (pemBytes []byte, plain bool, err error) {
+	if bytes.HasPrefix(stored, []byte("-----BEGIN")) {
+		return stored, true, nil
+	}
+	rest, ok := bytes.CutPrefix(stored, sealedPrefix)
+	if !ok {
+		return nil, false, errors.New("not a sealed key")
+	}
+	gcm, err := s.gcm()
+	if err != nil {
+		return nil, false, err
+	}
+	if len(rest) < gcm.NonceSize() {
+		return nil, false, errors.New("sealed key too short")
+	}
+	pemBytes, err = gcm.Open(nil, rest[:gcm.NonceSize()], rest[gcm.NonceSize():], []byte(id))
+	return pemBytes, false, err
+}
+
+func (s *storage) gcm() (cipher.AEAD, error) {
+	block, err := aes.NewCipher(s.kek)
+	if err != nil {
+		return nil, err
+	}
+	return cipher.NewGCM(block)
+}
+
+// keyPEM renders a key as the PKCS#8 PEM block that gets sealed.
+func keyPEM(rk *rsa.PrivateKey) ([]byte, error) {
+	der, err := x509.MarshalPKCS8PrivateKey(rk)
+	if err != nil {
+		return nil, err
+	}
+	return pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), nil
 }
 
 func (k signingKey) SignatureAlgorithm() jose.SignatureAlgorithm { return jose.RS256 }
@@ -64,30 +128,67 @@ func newest(keys []signingKey) *signingKey {
 	return best
 }
 
-// readKeys reads the stored keys; one that doesn't parse is skipped.
-func (s *storage) readKeys() ([]signingKey, error) {
+// readKeys reads the stored keys, returning apart those that can't be opened or parsed.
+func (s *storage) readKeys() (keys []signingKey, unreadable []authx.OAuthSigningKey, err error) {
 	stored, err := s.st().OAuthSigningKeys()
 	if err != nil {
-		return nil, fmt.Errorf("oidcprovider: signing keys: %w", err)
+		return nil, nil, fmt.Errorf("oidcprovider: signing keys: %w", err)
 	}
-	keys := make([]signingKey, 0, len(stored))
+	keys = make([]signingKey, 0, len(stored))
 	for _, k := range stored {
-		blk, _ := pem.Decode(k.PrivatePEM)
-		if blk == nil {
+		rk, plain, err := s.parseKey(k)
+		if err != nil {
+			unreadable = append(unreadable, k)
 			continue
 		}
-		pk, err := x509.ParsePKCS8PrivateKey(blk.Bytes)
-		rk, ok := pk.(*rsa.PrivateKey)
-		if err != nil || !ok {
-			continue
-		}
-		sk := signingKey{id: k.ID, key: rk, at: k.CreatedAt}
+		sk := signingKey{id: k.ID, key: rk, at: k.CreatedAt, plain: plain}
 		if k.RetiredAt != nil {
 			sk.retired = *k.RetiredAt
 		}
 		keys = append(keys, sk)
 	}
-	return keys, nil
+	return keys, unreadable, nil
+}
+
+func (s *storage) parseKey(k authx.OAuthSigningKey) (*rsa.PrivateKey, bool, error) {
+	pemBytes, plain, err := s.open(k.ID, k.PrivatePEM)
+	if err != nil {
+		return nil, false, err
+	}
+	blk, _ := pem.Decode(pemBytes)
+	if blk == nil {
+		return nil, false, errors.New("no PEM block")
+	}
+	pk, err := x509.ParsePKCS8PrivateKey(blk.Bytes)
+	if err != nil {
+		return nil, false, err
+	}
+	rk, ok := pk.(*rsa.PrivateKey)
+	if !ok {
+		return nil, false, errors.New("not an RSA key")
+	}
+	return rk, plain, nil
+}
+
+// storeKey seals k and stores it (adding it, or replacing the stored key with its id).
+func (s *storage) storeKey(k signingKey) error {
+	pemBytes, err := keyPEM(k.key)
+	if err != nil {
+		return err
+	}
+	sealed, err := s.seal(k.id, pemBytes)
+	if err != nil {
+		return err
+	}
+	rec := &authx.OAuthSigningKey{ID: k.id, Algorithm: "RS256", PrivatePEM: sealed, CreatedAt: k.at.UTC()}
+	if !k.retired.IsZero() {
+		t := k.retired.UTC()
+		rec.RetiredAt = &t
+	}
+	if err := s.st().AddOAuthSigningKey(rec); err != nil {
+		return fmt.Errorf("oidcprovider: saving a signing key: %w", err)
+	}
+	return nil
 }
 
 // addKey generates a key and stores it, created at now.
@@ -96,20 +197,12 @@ func (s *storage) addKey(now time.Time) error {
 	if err != nil {
 		return err
 	}
-	der, err := x509.MarshalPKCS8PrivateKey(rk)
-	if err != nil {
-		return err
-	}
-	k := &authx.OAuthSigningKey{ID: randomID(12), Algorithm: "RS256", PrivatePEM: pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der}), CreatedAt: now.UTC()}
-	if err := s.st().AddOAuthSigningKey(k); err != nil {
-		return fmt.Errorf("oidcprovider: saving a signing key: %w", err)
-	}
-	return nil
+	return s.storeKey(signingKey{id: randomID(12), key: rk, at: now})
 }
 
 // loadKeys reads the keys into the cache, creating one when none is in use (the first start).
 func (s *storage) loadKeys() error {
-	keys, err := s.readKeys()
+	keys, _, err := s.readKeys()
 	if err != nil {
 		return err
 	}
@@ -117,7 +210,7 @@ func (s *storage) loadKeys() error {
 		if err := s.addKey(s.p.now()); err != nil {
 			return err
 		}
-		if keys, err = s.readKeys(); err != nil {
+		if keys, _, err = s.readKeys(); err != nil {
 			return err
 		}
 	}
@@ -160,7 +253,7 @@ func (s *storage) currentKeys() []signingKey {
 // which stays published, so its tokens verify.
 func (s *storage) rotateKeys(force bool) error {
 	now := s.p.now()
-	keys, err := s.readKeys()
+	keys, unreadable, err := s.readKeys()
 	if err != nil {
 		return err
 	}
@@ -169,7 +262,7 @@ func (s *storage) rotateKeys(force bool) error {
 		if err := s.addKey(now); err != nil {
 			return err
 		}
-		if keys, err = s.readKeys(); err != nil {
+		if keys, unreadable, err = s.readKeys(); err != nil {
 			return err
 		}
 		if cur = newest(keys); cur == nil {
@@ -178,21 +271,56 @@ func (s *storage) rotateKeys(force bool) error {
 	}
 	var errs []error
 	for _, k := range keys {
-		switch {
-		case k.retired.IsZero() && k.id != cur.id:
-			if err := s.st().RetireOAuthSigningKey(k.id, now.UTC()); err != nil && !errors.Is(err, authx.ErrOAuthNotFound) {
+		if !k.retired.IsZero() && now.Sub(k.retired) >= s.p.cfg.KeyGrace {
+			if err := s.st().DeleteOAuthSigningKey(k.id); err != nil {
 				errs = append(errs, err)
 			}
-		case !k.retired.IsZero() && now.Sub(k.retired) >= s.p.cfg.KeyGrace:
-			if err := s.st().DeleteOAuthSigningKey(k.id); err != nil {
+			continue
+		}
+		if k.plain { // stored in the clear before keys were sealed: seal it in place
+			if err := s.storeKey(k); err != nil {
+				errs = append(errs, err)
+			}
+		}
+		if k.retired.IsZero() && k.id != cur.id {
+			if err := s.st().RetireOAuthSigningKey(k.id, now.UTC()); err != nil && !errors.Is(err, authx.ErrOAuthNotFound) {
 				errs = append(errs, err)
 			}
 		}
 	}
+	errs = append(errs, s.dropUnreadable(unreadable, now)...)
 	if err := s.loadKeys(); err != nil {
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)
+}
+
+// dropUnreadable deals with keys this CryptoKey can't open: never usable here, they are reported,
+// and deleted once they would have been deleted had they been readable — retired longer than
+// KeyGrace ago, or (still signing somewhere) older than a rotation, the grace and an upkeep's slack.
+func (s *storage) dropUnreadable(keys []authx.OAuthSigningKey, now time.Time) []error {
+	if len(keys) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(keys))
+	var errs []error
+	for _, k := range keys {
+		ids = append(ids, k.ID)
+		expired := false
+		switch {
+		case k.RetiredAt != nil:
+			expired = now.Sub(*k.RetiredAt) >= s.p.cfg.KeyGrace
+		case s.p.cfg.KeyRotation > 0:
+			expired = now.Sub(k.CreatedAt) >= s.p.cfg.KeyRotation+s.p.cfg.KeyGrace+time.Hour
+		}
+		if expired {
+			if err := s.st().DeleteOAuthSigningKey(k.ID); err != nil {
+				errs = append(errs, err)
+			}
+		}
+	}
+	s.p.cfg.Logger.Warn("oidcprovider: ignoring signing keys this CryptoKey can't open (did it change, or do replicas disagree on it?)", "keys", ids)
+	return errs
 }
 
 // RotateKeys adds a new signing key now and retires the others, which stay published for

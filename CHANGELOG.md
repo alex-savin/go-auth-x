@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+
+- **`oidcprovider`: no silent approval of self-registered clients.** With no consent screen
+  (`ConsentURL` nil) the login step approved *any* client, so with `Registration` or
+  `ClientMetadataDocuments` on, anyone could register a client and receive a signed-in user's code
+  by sending them an `/authorize` link. `New` now refuses a nil `ConsentURL` with either option, and
+  without a consent screen only clients the app registered (`RegisterClient`) are approved — a
+  dynamic client (one left in the store from an earlier configuration, say) is refused with
+  `access_denied`.
+- **`oidcprovider`: authorization codes are single-use across replicas.** Single use was tracked
+  per process, and zitadel deletes the request only after minting the tokens, so two replicas could
+  both redeem one code. A grant's ID is now derived from its code, so the store's unique ID refuses
+  the second exchange on any replica; a code presented again ends the grant it made (RFC 6749
+  §4.1.2). Single use is spent only by an exchange that passed client and PKCE checks, so a code
+  stolen without its verifier can no longer be burned — and the per-process map of used codes
+  (which unauthenticated junk codes could grow) is gone. `OAuthStore.CreateOAuthGrant` must refuse
+  an existing ID (both reference stores do; a primary key does it).
+- **`oidcprovider`: access tokens end with their user.** `Verify`, `/userinfo` and `/introspect`
+  now share one check — token live, grant neither revoked nor past its end, user still allowed to
+  sign in — so a disabled, banned or deleted user's tokens stop at once instead of at expiry, and
+  `/userinfo` no longer serves a token whose grant was revoked.
+- **`oidcprovider`: metadata-document fetches are throttled.** Anyone could make the provider fetch
+  a fresh URL with every `/authorize`; fetches the cache can't answer are now limited per address
+  (30 an hour; being limited is not cached against the document), and concurrent lookups of one
+  document share a single fetch.
+- **`oidcprovider`: signing keys are sealed at rest** with AES-GCM under a key derived (HKDF) from
+  `CryptoKey`, bound to the key's id, so a copy of the store alone can't forge ID tokens. Keys stored
+  in the clear by v0.10 load as before and are sealed by the next key upkeep. A key this
+  `CryptoKey` can't open is ignored with a warning, and deleted once it would have expired anyway;
+  changing `CryptoKey` therefore replaces the signing keys (as it already ended access tokens).
+- **`oidcprovider`: the registration limit keys IPv6 by /64**, like the built-in limiters, so
+  rotating addresses within one /64 no longer dodges it.
+
+### Fixed
+
+- **`oidcprovider`: `/userinfo`, `/introspect` and access-token revocation work for go-auth-x
+  subjects.** zitadel splits a decrypted access token (`id:subject`) on every colon and wants two
+  parts; go-auth-x subjects (`local:…`, `google:…`) have one more, so userinfo answered 401 for
+  every user, introspection reported every token inactive, and a client revoking an access token got
+  a 200 while the token kept working. The token's wire format is unchanged — tokens already issued
+  keep working.
+- **`oidcprovider`: a narrowed refresh keeps the grant's scopes.** A refresh asking for fewer scopes
+  narrowed the new refresh token too, losing the rest for good; the access token is narrowed, the
+  refresh token keeps the presented one's scopes (RFC 6749 §6).
+- **`oidcprovider`: `New` no longer rewrites the caller's `Config.Resources`** slice while
+  normalizing it.
+
+### Added
+
+- **`authx.RateLimitKey`** — normalizes a client IP into a rate-limit key the way the built-in
+  limiters do (IPv6 by /64), for limiters outside the package.
+
 ## [0.10.1] — 2026-11-05
 
 ### Fixed

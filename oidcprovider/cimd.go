@@ -34,7 +34,9 @@ import (
 // resolves the host itself, refuses any address that is not public (private, loopback,
 // link-local, CGNAT, multicast and the like, IPv4 and IPv6), dials only the address it checked
 // (so DNS rebinding can't swap in another between the check and the connection), checks the
-// connected address again, ignores proxy settings, and limits time, size and redirects.
+// connected address again, ignores proxy settings, and limits time, size and redirects. And since
+// anyone can name a fresh URL with every request, fetches the cache can't answer are limited per
+// address, and concurrent requests for one URL share a single fetch.
 
 const (
 	metadataTimeout  = 5 * time.Second
@@ -44,9 +46,13 @@ const (
 	metadataDefAge   = time.Hour
 	metadataFailAge  = time.Minute // a failed fetch is not tried again for this long
 	metadataCacheMax = 1000
+	metadataFetches  = 30 // documents one address may make the provider fetch per hour
 )
 
-var errMetadata = errors.New("oidcprovider: client metadata document refused")
+var (
+	errMetadata     = errors.New("oidcprovider: client metadata document refused")
+	errMetadataBusy = errors.New("oidcprovider: too many client metadata documents fetched for this address; try again later")
+)
 
 // metadataDoc is a client's metadata document: RFC 7591 client metadata plus its client_id.
 type metadataDoc struct {
@@ -67,8 +73,18 @@ type metadataFetcher struct {
 	http   *http.Client
 	public func(netip.Addr) bool // whether an address may be fetched from
 
-	mu    sync.Mutex
-	cache map[string]metadataEntry
+	limit *limiter // uncached fetches per client address
+
+	mu       sync.Mutex
+	cache    map[string]metadataEntry
+	inflight map[string]*metadataCall // fetches under way, which concurrent lookups wait for
+}
+
+// metadataCall is a fetch under way; done closes when c and err are set.
+type metadataCall struct {
+	done chan struct{}
+	c    *authx.OAuthClient
+	err  error
 }
 
 type metadataEntry struct {
@@ -80,7 +96,8 @@ type metadataEntry struct {
 // newMetadataFetcher builds the fetcher. roots and loopback are for tests only: the CA of a test
 // server, and permission to fetch from 127.0.0.1 / ::1.
 func newMetadataFetcher(p *Provider, roots *x509.CertPool, loopback bool) *metadataFetcher {
-	f := &metadataFetcher{p: p, cache: map[string]metadataEntry{}, public: publicAddr}
+	f := &metadataFetcher{p: p, cache: map[string]metadataEntry{}, inflight: map[string]*metadataCall{},
+		public: publicAddr, limit: newLimiter(metadataFetches, time.Hour)}
 	if loopback {
 		f.public = func(a netip.Addr) bool { return publicAddr(a) || a.Unmap().IsLoopback() }
 	}
@@ -227,19 +244,55 @@ func (p *Provider) metadataClient(id string) bool {
 	return p.cfg.ClientMetadataDocuments && isMetadataURL(id)
 }
 
-// get returns the client described at rawURL, from the cache or fetched.
+// get returns the client described at rawURL: from the cache, from a fetch another lookup already
+// started, or fetched — when the caller's address (from ctx, set by Handler) is within its limit.
 func (f *metadataFetcher) get(ctx context.Context, rawURL string) (*authx.OAuthClient, error) {
 	now := f.p.now()
 	f.mu.Lock()
-	e, ok := f.cache[rawURL]
-	f.mu.Unlock()
-	if ok && now.Before(e.exp) {
+	if e, ok := f.cache[rawURL]; ok && now.Before(e.exp) {
+		f.mu.Unlock()
 		if e.c == nil {
 			return nil, e.err
 		}
 		c := *e.c
 		return &c, nil
 	}
+	call := f.inflight[rawURL]
+	if call == nil {
+		// Only a fetch that will really go out counts against the caller's address. Being over the
+		// limit is not cached: it says nothing about the document, which others may still fetch.
+		if key, _ := ctx.Value(clientKey).(string); key != "" && !f.limit.allow(key, now) {
+			f.mu.Unlock()
+			return nil, fmt.Errorf("%w: %w", authx.ErrOAuthNotFound, errMetadataBusy)
+		}
+		call = &metadataCall{done: make(chan struct{})}
+		f.inflight[rawURL] = call
+		f.mu.Unlock()
+		// Detached from the caller's cancellation: the lookups waiting on it shouldn't fail
+		// because the first one went away (fetch has its own timeout).
+		call.c, call.err = f.fetchAndCache(context.WithoutCancel(ctx), rawURL, now)
+		f.mu.Lock()
+		delete(f.inflight, rawURL)
+		f.mu.Unlock()
+		close(call.done)
+	} else {
+		f.mu.Unlock()
+		select {
+		case <-call.done:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	if call.err != nil {
+		return nil, call.err
+	}
+	c := *call.c
+	return &c, nil
+}
+
+// fetchAndCache fetches the document at rawURL and caches the outcome, a refusal included (for
+// metadataFailAge, so a broken document isn't fetched on every request).
+func (f *metadataFetcher) fetchAndCache(ctx context.Context, rawURL string, now time.Time) (*authx.OAuthClient, error) {
 	c, age, err := f.fetch(ctx, rawURL)
 	if err != nil {
 		f.p.cfg.Logger.Warn("oidcprovider: client metadata document refused", "client", rawURL, "err", err)
@@ -248,8 +301,7 @@ func (f *metadataFetcher) get(ctx context.Context, rawURL string) (*authx.OAuthC
 		return nil, err
 	}
 	f.put(rawURL, metadataEntry{c: c, exp: now.Add(age)}, now)
-	out := *c
-	return &out, nil
+	return c, nil
 }
 
 // cached returns the client described at rawURL if the cache holds it, without fetching.
