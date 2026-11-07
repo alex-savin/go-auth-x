@@ -540,7 +540,8 @@ First tagged release. A self-contained, embeddable authentication library for Go
 - **Trusted-proxy client-IP** — `X-Forwarded-For` honored only when the direct peer is a
   trusted proxy (`TRUSTED_PROXIES`, or private-range default), so the client IP can't be spoofed.
 
-[Unreleased]: https://github.com/alex-savin/go-auth-x/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/alex-savin/go-auth-x/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/alex-savin/go-auth-x/releases/tag/v0.10.1
 [0.10.0]: https://github.com/alex-savin/go-auth-x/releases/tag/v0.10.0
 [0.9.0]: https://github.com/alex-savin/go-auth-x/releases/tag/v0.9.0
 [0.8.0]: https://github.com/alex-savin/go-auth-x/releases/tag/v0.8.0

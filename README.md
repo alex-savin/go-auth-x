@@ -705,7 +705,10 @@ go-auth-x/
 
 See **[ROADMAP.md](./ROADMAP.md)** for the full list and **[CHANGELOG.md](./CHANGELOG.md)** for details.
 
-- **v0.10.0** (latest): **OIDC provider key rotation + Client ID Metadata Documents** — the
+- **v0.10.1** (latest): **`oidcprovider` fix** — a client whose metadata also lists grant types the
+  provider doesn't offer (claude.ai's connectors list the JWT bearer grant) is accepted with those
+  left out, instead of being refused at `/authorize`.
+- **v0.10.0**: **OIDC provider key rotation + Client ID Metadata Documents** — the
   provider rotates its ID-token signing key (`KeyRotation`, default 90 days; retired keys stay
   published for `KeyGrace`; `RotateKeys` forces one), and an https URL can be a `client_id` (MCP
   2025-11-25), fetched with SSRF protection. Custom `OAuthStore`s add two key methods.

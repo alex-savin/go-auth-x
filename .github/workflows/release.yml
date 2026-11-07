@@ -1,0 +1,66 @@
+# Publishes a GitHub Release for every version tag, so a tag never goes out without one.
+#
+# Cut a release by adding its "## [X.Y.Z] — YYYY-MM-DD" section to CHANGELOG.md, then pushing an
+# annotated tag whose subject is the release title:
+#
+#   git tag -a v0.11.0 -m "v0.11.0 — what this release is about" && git push origin v0.11.0
+#
+# The job vets and tests the tagged commit, takes the version's CHANGELOG section as the notes,
+# and fails (publishing nothing) when that section is missing. A release that already exists is
+# left as it is.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # the annotated tag object, for the release title
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+
+      - name: Vet and test
+        run: |
+          go vet ./...
+          go test ./...
+
+      - name: Release notes from CHANGELOG.md
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          heading=$(grep -m1 -F "## [${version}]" CHANGELOG.md || true)
+          if [ -z "$heading" ]; then
+            echo "::error::CHANGELOG.md has no '## [${version}]' section"
+            exit 1
+          fi
+          awk -v h="$heading" '$0 == h { on = 1; next } on && /^## \[/ { exit } on' CHANGELOG.md > notes.md
+          # GitHub's anchor for the heading: lower-cased, punctuation dropped, spaces to hyphens.
+          anchor=$(printf '%s' "${heading#\#\# }" | LC_ALL=C tr 'A-Z' 'a-z' | LC_ALL=C sed 's/[^a-z0-9 -]//g; s/ /-/g')
+          printf '\nFull details in [CHANGELOG.md](%s/%s/blob/main/CHANGELOG.md#%s).\n' \
+            "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$anchor" >> notes.md
+
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$GITHUB_REF_NAME"
+          if gh release view "$tag" > /dev/null 2>&1; then
+            echo "release $tag already exists; leaving it"
+            exit 0
+          fi
+          # Title: the annotated tag's subject, as "vX.Y.Z — summary" (a lightweight tag: just the tag).
+          title="$tag"
+          if [ "$(git cat-file -t "refs/tags/$tag")" = "tag" ]; then
+            summary=$(git tag -l --format='%(contents:subject)' "$tag" | sed -E "s/^${tag//./\\.}[[:space:]]*((:|—|-)[[:space:]]*)?//")
+            [ -n "$summary" ] && title="$tag — $summary"
+          fi
+          gh release create "$tag" --verify-tag --title "$title" --notes-file notes.md
