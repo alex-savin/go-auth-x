@@ -5,6 +5,21 @@ Direction and planned work for the library. Authoritative usage/feature docs liv
 
 ## Shipped
 
+### v0.11.0 — OIDC provider hardening · additive, with two behavior changes
+
+- **Consent** — without a consent screen only app-registered clients are approved; `New` refuses a
+  nil `ConsentURL` with `Registration` or `ClientMetadataDocuments`.
+- **Codes single-use across replicas** — the grant's ID is derived from its code, so the store
+  refuses a second exchange anywhere; a reused code ends its grant (RFC 6749 §4.1.2).
+- **Token liveness** — `Verify`, `/userinfo` and `/introspect` refuse a token whose grant was
+  revoked or whose user is disabled, banned or deleted.
+- **Sealed signing keys** (AES-GCM under a key derived from `CryptoKey`), throttled and
+  deduplicated metadata-document fetches, IPv6 /64 registration limits (`authx.RateLimitKey`).
+- **Fixed** — `/userinfo`, `/introspect` and access-token revocation, broken for every go-auth-x
+  subject (they contain a colon, which zitadel's token split rejected).
+- **Behavior changes** — a reused code (even a client retry) revokes its grant; a custom
+  `OAuthStore`'s `CreateOAuthGrant` must refuse an existing ID.
+
 ### v0.10.0 — OIDC provider: key rotation, Client ID Metadata Documents · additive (two new `OAuthStore` methods)
 
 - **Signing-key rotation** — keys older than `KeyRotation` (90 days) are replaced by the clean-up;
@@ -170,4 +185,4 @@ demands it** — it's the IdP-shaped edge the README's positioning deliberately 
 
 ---
 
-_Updated 2026-10-06._
+_Updated 2026-11-07._

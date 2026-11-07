@@ -716,7 +716,11 @@ go-auth-x/
 
 See **[ROADMAP.md](./ROADMAP.md)** for the full list and **[CHANGELOG.md](./CHANGELOG.md)** for details.
 
-- **v0.10.1** (latest): **`oidcprovider` fix** — a client whose metadata also lists grant types the
+- **v0.11.0** (latest): **`oidcprovider` hardening** — no silent approval of self-registered
+  clients, codes single-use across replicas (a reused code ends its grant), access tokens that end
+  with their grant and user, signing keys sealed at rest, throttled metadata-document fetches; and
+  `/userinfo`, `/introspect` and access-token revocation fixed for go-auth-x subjects.
+- **v0.10.1**: **`oidcprovider` fix** — a client whose metadata also lists grant types the
   provider doesn't offer (claude.ai's connectors list the JWT bearer grant) is accepted with those
   left out, instead of being refused at `/authorize`.
 - **v0.10.0**: **OIDC provider key rotation + Client ID Metadata Documents** — the
