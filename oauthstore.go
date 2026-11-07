@@ -53,12 +53,13 @@ type OAuthAuthRequest struct {
 	CodeChallengeMethod string
 	Resources           []string // RFC 8707 resource indicators the tokens are bound to
 	Prompt              []string
-	Subject             string    // the user who signed in for it ("" until then)
-	Ref                 string    // the app's reference for the approval (e.g. its own connection id)
-	GrantExpiresAt      time.Time // the end the approval sets for the grant (zero = none)
-	AuthTime            time.Time // when the user approved
-	Done                bool      // approved: the code may be issued
-	CodeHash            string    // SHA-256 hex of the issued code
+	MaxAge              *time.Duration // OIDC max_age: how long ago the user may have signed in (nil = any)
+	Subject             string         // the user who signed in for it ("" until then)
+	Ref                 string         // the app's reference for the approval (e.g. its own connection id)
+	GrantExpiresAt      time.Time      // the end the approval sets for the grant (zero = none)
+	AuthTime            time.Time      // when the user signed in (the session's auth_time)
+	Done                bool           // approved: the code may be issued
+	CodeHash            string         // SHA-256 hex of the issued code
 	CodeAt              time.Time
 	CreatedAt           time.Time
 }
@@ -159,7 +160,9 @@ type OAuthStore interface {
 
 	// DeleteExpiredOAuth removes what can no longer be used: auth requests created before
 	// requestsBefore, tokens expired before now, grants revoked or expired before now (with their
-	// tokens), and dynamic clients last used (or, never used, created) before clientsBefore.
+	// tokens), grants created before requestsBefore with no token left (their refresh tokens all
+	// expired, so they can never issue again), and dynamic clients last used (or, never used,
+	// created) before clientsBefore.
 	DeleteExpiredOAuth(now, requestsBefore, clientsBefore time.Time) error
 }
 

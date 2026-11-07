@@ -100,6 +100,8 @@ type CredentialStore interface {
 	// DeleteUser hard-deletes a user and everything keyed to it (credentials, passkeys, tokens, OAuth
 	// links, 2FA, group memberships). Audit rows are retained but any PII (email/IP) is anonymized, so
 	// the forensic count survives an erasure. Idempotent: deleting an absent user is not an error.
+	// A store that also implements OAuthStore should remove the user's OAuth records too (grants,
+	// tokens, auth requests — keyed by the user's Sub); both reference stores do.
 	DeleteUser(userID string) error
 
 	// Passkeys (WebAuthn)

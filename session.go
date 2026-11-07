@@ -46,6 +46,11 @@ type SessionClaims struct {
 	// OrgRole is the user's role in Org AT MINT TIME — a display hint. Enforcement (RequireOrgHTTP,
 	// the org endpoints) re-reads the live role from the store, so a demotion doesn't ride out the TTL.
 	OrgRole string `json:"orgRole,omitempty"`
+	// AuthTime is when the user signed in (every factor done). A re-mint that is not a sign-in
+	// (switching the active org) carries it over where IssuedAt moves, so it answers "how fresh is
+	// this sign-in" — e.g. the oidcprovider's prompt=login / max_age. Absent on cookies minted before
+	// the claim existed.
+	AuthTime *jwt.NumericDate `json:"auth_time,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -131,8 +136,12 @@ func mintSession(secret []byte, sub, email, name, role, idToken string, groups [
 }
 
 // mintSessionWith signs a session cookie from a caller-provided base (which may carry SID / IDToken /
-// ImpersonatedBy), stamping the subject, audience, and validity window.
+// ImpersonatedBy), stamping the subject, audience, and validity window. A base without AuthTime is
+// a sign-in, stamped now; a re-mint passes the old claims and keeps theirs.
 func mintSessionWith(secret []byte, base SessionClaims, sub string, now time.Time, ttl time.Duration) (string, error) {
+	if base.AuthTime == nil {
+		base.AuthTime = jwt.NewNumericDate(now)
+	}
 	base.RegisteredClaims = jwt.RegisteredClaims{
 		Subject:   sub,
 		Audience:  jwt.ClaimStrings{audSession},

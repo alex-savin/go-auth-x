@@ -5,6 +5,7 @@ import (
 	"html"
 	"net/url"
 	"strings"
+	"unicode/utf8"
 )
 
 // baseURL returns the app's public origin for email links and post-login redirects:
@@ -49,11 +50,22 @@ func (a *Authenticator) sendAuthEmail(to, subject, heading, intro, ctaLabel, cta
 	htmlBody := emailShell(a.brandName(), heading, intro, ctaLabel, ctaURL, footer)
 	textBody := intro + "\n\n" + ctaLabel + ":\n" + ctaURL + "\n\n" + footer
 	if err := a.email.Send(to, subject, htmlBody, textBody); err != nil {
-		a.log().Error("auth: email FAILED", "subject", subject, "to", to, "error", err)
+		a.log().Error("auth: email FAILED", "subject", subject, "to", maskEmail(to), "error", err)
 		return err
 	}
-	a.log().Info("auth: email sent", "subject", subject, "to", to)
+	a.log().Debug("auth: email sent", "subject", subject, "to", maskEmail(to))
 	return nil
+}
+
+// maskEmail keeps an address recognizable in logs without recording it: the local part's first
+// character and the domain ("a***@example.com"), which is what diagnosing delivery needs.
+func maskEmail(addr string) string {
+	local, domain, ok := strings.Cut(addr, "@")
+	if !ok || local == "" {
+		return "***"
+	}
+	r, _ := utf8.DecodeRuneInString(local)
+	return string(r) + "***@" + domain
 }
 
 // emailShell wraps the message in the dark branded chrome (inline styles for mail clients). ctaURL is

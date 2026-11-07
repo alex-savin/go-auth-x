@@ -52,6 +52,7 @@ type OAuthAuthRequest struct {
 	CodeChallengeMethod string
 	Resources           string `gorm:"type:text"` // JSON list
 	Prompt              string `gorm:"type:text"` // JSON list
+	MaxAge              *int64 // seconds; NULL = no max_age
 	Subject             string
 	Ref                 string
 	GrantExpiresAt      *time.Time
@@ -168,6 +169,22 @@ func utcPtr(t *time.Time) *time.Time {
 	return &u
 }
 
+func maxAgeSeconds(d *time.Duration) *int64 {
+	if d == nil {
+		return nil
+	}
+	s := int64(*d / time.Second)
+	return &s
+}
+
+func maxAgeDuration(s *int64) *time.Duration {
+	if s == nil {
+		return nil
+	}
+	d := time.Duration(*s) * time.Second
+	return &d
+}
+
 func notFound(err error) error {
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return authx.ErrOAuthNotFound
@@ -217,6 +234,21 @@ func (s *Store) DeleteOAuthClient(id string) error {
 	})
 }
 
+// deleteOAuthSubject removes a user's OAuth records (DeleteUser's cascade): their grants with every
+// token issued under them, and their auth requests in flight.
+func deleteOAuthSubject(tx *gorm.DB, sub string) error {
+	grants := tx.Model(&OAuthGrant{}).Select("id").Where("subject = ?", sub)
+	for _, m := range []any{&OAuthAccessToken{}, &OAuthRefreshToken{}} {
+		if err := tx.Where("grant_id IN (?) OR subject = ?", grants, sub).Delete(m).Error; err != nil {
+			return err
+		}
+	}
+	if err := tx.Where("subject = ?", sub).Delete(&OAuthGrant{}).Error; err != nil {
+		return err
+	}
+	return tx.Where("subject = ?", sub).Delete(&OAuthAuthRequest{}).Error
+}
+
 // deleteClients deletes the clients whose ids the subquery selects, and everything issued to them.
 func deleteClients(tx *gorm.DB, ids *gorm.DB) error {
 	for _, m := range []any{&OAuthAccessToken{}, &OAuthRefreshToken{}, &OAuthGrant{}, &OAuthAuthRequest{}} {
@@ -234,7 +266,7 @@ func (s *Store) SaveOAuthAuthRequest(r *authx.OAuthAuthRequest) error {
 		ID: r.ID, ClientID: r.ClientID, RedirectURI: r.RedirectURI, State: r.State, Nonce: r.Nonce,
 		Scopes: encodeList(r.Scopes), ResponseType: r.ResponseType, ResponseMode: r.ResponseMode,
 		CodeChallenge: r.CodeChallenge, CodeChallengeMethod: r.CodeChallengeMethod,
-		Resources: encodeList(r.Resources), Prompt: encodeList(r.Prompt),
+		Resources: encodeList(r.Resources), Prompt: encodeList(r.Prompt), MaxAge: maxAgeSeconds(r.MaxAge),
 		Subject: r.Subject, Ref: r.Ref, GrantExpiresAt: optTime(r.GrantExpiresAt),
 		AuthTime: optTime(r.AuthTime), Done: r.Done,
 		CodeHash: r.CodeHash, CodeAt: optTime(r.CodeAt), CreatedAt: r.CreatedAt.UTC(),
@@ -261,7 +293,7 @@ func (s *Store) authRequestWhere(query string, arg string) (*authx.OAuthAuthRequ
 		ID: r.ID, ClientID: r.ClientID, RedirectURI: r.RedirectURI, State: r.State, Nonce: r.Nonce,
 		Scopes: decodeList(r.Scopes), ResponseType: r.ResponseType, ResponseMode: r.ResponseMode,
 		CodeChallenge: r.CodeChallenge, CodeChallengeMethod: r.CodeChallengeMethod,
-		Resources: decodeList(r.Resources), Prompt: decodeList(r.Prompt),
+		Resources: decodeList(r.Resources), Prompt: decodeList(r.Prompt), MaxAge: maxAgeDuration(r.MaxAge),
 		Subject: r.Subject, Ref: r.Ref, GrantExpiresAt: fromOptTime(r.GrantExpiresAt),
 		AuthTime: fromOptTime(r.AuthTime), Done: r.Done,
 		CodeHash: r.CodeHash, CodeAt: fromOptTime(r.CodeAt), CreatedAt: r.CreatedAt,
@@ -456,6 +488,13 @@ func (s *Store) DeleteExpiredOAuth(now, requestsBefore, clientsBefore time.Time)
 			}
 		}
 		if err := tx.Where("revoked_at < ? OR (expires_at IS NOT NULL AND expires_at < ?)", now, now).
+			Delete(&OAuthGrant{}).Error; err != nil {
+			return err
+		}
+		// A grant left without any token (its refresh tokens all expired) can never issue again.
+		if err := tx.Where("created_at < ?", requestsBefore).
+			Where("NOT EXISTS (SELECT 1 FROM authx_oauth_access_tokens t WHERE t.grant_id = authx_oauth_grants.id)").
+			Where("NOT EXISTS (SELECT 1 FROM authx_oauth_refresh_tokens t WHERE t.grant_id = authx_oauth_grants.id)").
 			Delete(&OAuthGrant{}).Error; err != nil {
 			return err
 		}

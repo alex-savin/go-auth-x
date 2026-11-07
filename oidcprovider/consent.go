@@ -70,7 +70,23 @@ func (p *Provider) login(w http.ResponseWriter, r *http.Request) {
 		p.redirectError(w, r, req, "access_denied", "this account may not sign in")
 		return
 	}
+	authAt := sessionAuthTime(sc)
+	if !freshEnough(req, authAt, time.Now()) {
+		// The client wants a fresher sign-in (prompt=login or max_age). Coming back still stale
+		// (the app's page sent the signed-in user straight back) ends it rather than looping.
+		if slices.Contains(req.Prompt, oidc.PromptNone) || r.URL.Query().Get("reauth") != "" {
+			p.redirectError(w, r, req, "login_required", "a fresh sign-in is required")
+			return
+		}
+		http.Redirect(w, r, p.cfg.ReauthURL(p.prefix+"/login?id="+url.QueryEscape(id)+"&reauth=1"), http.StatusFound)
+		return
+	}
 	req.Subject = sc.Subject
+	// auth_time is when the user signed in; a session from before the claim existed offers only
+	// when its cookie was issued, the closest there is.
+	if req.AuthTime = authAt; authAt.IsZero() && sc.IssuedAt != nil {
+		req.AuthTime = sc.IssuedAt.Time.UTC()
+	}
 	if err := p.cfg.Store.SaveOAuthAuthRequest(req); err != nil {
 		http.Error(w, "server error", http.StatusInternalServerError)
 		return
@@ -96,6 +112,32 @@ func (p *Provider) login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	http.Redirect(w, r, p.cfg.ConsentURL(id), http.StatusFound)
+}
+
+// sessionAuthTime is when the session's user signed in, zero when the cookie predates the claim.
+func sessionAuthTime(sc *authx.SessionClaims) time.Time {
+	if sc.AuthTime == nil {
+		return time.Time{}
+	}
+	return sc.AuthTime.Time.UTC()
+}
+
+// freshEnough reports whether a sign-in at authAt satisfies the request's prompt=login (the user
+// signed in during this request) and max_age (or, either way, did so since the request began). An
+// unknown sign-in time is never fresh enough for a request that asks.
+func freshEnough(req *authx.OAuthAuthRequest, authAt, now time.Time) bool {
+	login := slices.Contains(req.Prompt, oidc.PromptLogin)
+	if !login && req.MaxAge == nil {
+		return true
+	}
+	if authAt.IsZero() {
+		return false
+	}
+	// The session's time has whole seconds; the request's is finer.
+	if !authAt.Before(req.CreatedAt.Truncate(time.Second)) {
+		return true
+	}
+	return !login && now.Sub(authAt) <= *req.MaxAge
 }
 
 // Request is an authorization request waiting for the user's decision, for the consent screen.
@@ -179,7 +221,9 @@ func (p *Provider) Approve(_ context.Context, id, subject string, d Decision) (s
 	if d.Expires.IsZero() {
 		req.GrantExpiresAt = time.Time{}
 	}
-	req.AuthTime = time.Now().UTC()
+	if req.AuthTime.IsZero() { // set by the login step from the session's sign-in
+		req.AuthTime = time.Now().UTC()
+	}
 	if err := p.cfg.Store.SaveOAuthAuthRequest(req); err != nil {
 		return "", err
 	}
@@ -342,6 +386,17 @@ func (p *Provider) RevokeRef(_ context.Context, ref string) error {
 		return nil
 	}
 	_, err := p.cfg.Store.RevokeOAuthGrants(authx.OAuthGrantFilter{Ref: ref}, time.Now().UTC())
+	return err
+}
+
+// RevokeUser ends every grant of the user with this subject — e.g. "disconnect all apps", or on
+// deleting the account with a store that doesn't remove OAuth records itself (both reference stores
+// do); the clean-up then deletes them.
+func (p *Provider) RevokeUser(_ context.Context, subject string) error {
+	if subject == "" {
+		return nil
+	}
+	_, err := p.cfg.Store.RevokeOAuthGrants(authx.OAuthGrantFilter{Subject: subject}, time.Now().UTC())
 	return err
 }
 

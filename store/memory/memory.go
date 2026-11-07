@@ -448,11 +448,14 @@ func (s *Store) DeleteUser(userID string) error {
 	if !ok {
 		return nil // idempotent: an ID that can't exist is already gone
 	}
-	email := ""
+	email, sub := "", ""
 	if u := s.users[n]; u != nil {
-		email = u.email
+		email, sub = u.email, u.sub
 	}
 	s.deleteUserCascadeLocked(n)
+	if sub != "" {
+		s.deleteOAuthSubjectLocked(sub) // the embedded OAuth provider's grants, tokens and requests
+	}
 	if email != "" {
 		for k := range s.otps {
 			if strings.HasSuffix(k, "|"+email) {
