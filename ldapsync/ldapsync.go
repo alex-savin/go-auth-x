@@ -71,14 +71,23 @@ const ldapPageSize = 500
 
 // Syncer pulls from LDAP into a directory.
 type Syncer struct {
-	cfg Config
-	dir authx.DirectoryStore
+	cfg     Config
+	dir     authx.DirectoryStore
+	connect func() (searcher, error) // dial by default; tests substitute a fake directory
+}
+
+// searcher is what Sync needs of an LDAP connection (*ldap.Conn has it).
+type searcher interface {
+	SearchWithPaging(req *ldap.SearchRequest, pagingSize uint32) (*ldap.SearchResult, error)
+	Close() error
 }
 
 // New builds a Syncer. The directory store must be set on your Authenticator too (SetDirectoryStore).
 func New(cfg Config, dir authx.DirectoryStore) *Syncer {
 	cfg.withDefaults()
-	return &Syncer{cfg: cfg, dir: dir}
+	s := &Syncer{cfg: cfg, dir: dir}
+	s.connect = func() (searcher, error) { return s.dial() }
+	return s
 }
 
 // Result reports what a sync touched.
@@ -130,7 +139,7 @@ func (s *Syncer) dial() (*ldap.Conn, error) {
 
 // Sync connects, pulls users then groups, and upserts them into the directory.
 func (s *Syncer) Sync() (*Result, error) {
-	conn, err := s.dial()
+	conn, err := s.connect()
 	if err != nil {
 		return nil, err
 	}
