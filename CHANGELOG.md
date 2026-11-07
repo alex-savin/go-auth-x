@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-11-07
+
+Security hardening of the `oidcprovider` from a review of v0.9–v0.10.1, and a fix that makes
+`/userinfo`, `/introspect` and access-token revocation work for go-auth-x users.
+
 ### Security
 
 - **`oidcprovider`: no silent approval of self-registered clients.** With no consent screen
@@ -592,7 +597,8 @@ First tagged release. A self-contained, embeddable authentication library for Go
 - **Trusted-proxy client-IP** — `X-Forwarded-For` honored only when the direct peer is a
   trusted proxy (`TRUSTED_PROXIES`, or private-range default), so the client IP can't be spoofed.
 
-[Unreleased]: https://github.com/alex-savin/go-auth-x/compare/v0.10.1...HEAD
+[Unreleased]: https://github.com/alex-savin/go-auth-x/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/alex-savin/go-auth-x/releases/tag/v0.11.0
 [0.10.1]: https://github.com/alex-savin/go-auth-x/releases/tag/v0.10.1
 [0.10.0]: https://github.com/alex-savin/go-auth-x/releases/tag/v0.10.0
 [0.9.0]: https://github.com/alex-savin/go-auth-x/releases/tag/v0.9.0
