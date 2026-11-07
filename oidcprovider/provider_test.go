@@ -273,12 +273,20 @@ func TestFlow(t *testing.T) {
 		t.Fatal("a tampered token must not verify")
 	}
 
-	// A code is used once.
+	// A code is used once; presented again, it may have been stolen, so its grant ends
+	// (RFC 6749 §4.1.2) — the tokens already issued for it stop working.
 	if st, _ := h.exchange(cid, code); st == 200 {
 		t.Fatal("a code must not be exchanged twice")
 	}
+	if _, err := h.p.Verify(ctx, access); err == nil {
+		t.Fatal("reusing a code must end the grant it made")
+	}
+	if st, _ := h.post("/oauth/token", url.Values{"grant_type": {"refresh_token"}, "refresh_token": {refresh}, "client_id": {cid}}); st == 200 {
+		t.Fatal("a reused code's refresh token must not work")
+	}
 
 	// Refreshing rotates; replaying the old refresh token ends the grant.
+	_, refresh = h.connect(cid, "conn-r")
 	st, tok = h.post("/oauth/token", url.Values{"grant_type": {"refresh_token"}, "refresh_token": {refresh}, "client_id": {cid}})
 	if st != 200 || tok["refresh_token"] == refresh {
 		t.Fatalf("refresh = %d %v", st, tok)

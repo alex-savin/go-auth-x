@@ -18,10 +18,8 @@ import (
 
 // storage adapts an authx.OAuthStore to zitadel's op.Storage.
 type storage struct {
-	p *Provider
-
-	mu    sync.Mutex
-	codes map[string]time.Time // codes already exchanged in this process (a code is used once)
+	p   *Provider
+	kek []byte // seals the signing keys at rest (derived from Config.CryptoKey)
 
 	kmu    sync.Mutex
 	keys   []signingKey // replaced, never changed in place
@@ -32,7 +30,10 @@ var _ op.Storage = (*storage)(nil)
 
 type ctxKey int
 
-const resourcesKey ctxKey = 0
+const (
+	resourcesKey ctxKey = iota // the request's checked resource indicators ([]string)
+	clientKey                  // the client's rate-limit key (string), set by Handler
+)
 
 var errNotFound = errors.New("not found")
 
@@ -98,18 +99,16 @@ func (s *storage) AuthRequestByID(_ context.Context, id string) (op.AuthRequest,
 	return &authRequest{r}, nil
 }
 
+// AuthRequestByCode finds the approved request a code was issued for. Single use is enforced when
+// the code is exchanged (grantFor), after zitadel has checked the client and PKCE — so a code
+// stolen without its verifier can't be burned — and the request is deleted after that exchange.
 func (s *storage) AuthRequestByCode(_ context.Context, code string) (op.AuthRequest, error) {
 	h := hash(code)
-	// A code is exchanged once: the second attempt fails even before the first one's request is
-	// deleted (and across replicas, the deletion after the first exchange ends it).
-	s.mu.Lock()
-	if _, used := s.codes[h]; used {
-		s.mu.Unlock()
-		return nil, oidc.ErrInvalidGrant().WithDescription("the code was already used")
-	}
-	s.codes[h] = time.Now()
-	s.mu.Unlock()
 	r, err := s.st().OAuthAuthRequestByCode(h)
+	if errors.Is(err, authx.ErrOAuthNotFound) {
+		s.endReusedCode(h) // exchanged already (its request is gone), or never issued
+		return nil, oidc.ErrInvalidGrant().WithDescription("the code is invalid or was already used")
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -119,13 +118,17 @@ func (s *storage) AuthRequestByCode(_ context.Context, code string) (op.AuthRequ
 	return &authRequest{r}, nil
 }
 
-func (s *storage) forgetCodes(now time.Time) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for h, at := range s.codes {
-		if now.Sub(at) > authRequestTTL {
-			delete(s.codes, h)
-		}
+// codeGrantID is the ID of the grant a code is exchanged for. Deriving it from the code makes the
+// store's unique grant ID the code's single-use guard on every replica, and lets a code presented
+// again find the grant it already made.
+func codeGrantID(codeHash string) string { return hash("grant:" + codeHash)[:32] }
+
+// endReusedCode ends the grant a code was already exchanged for, if any: a code used twice may have
+// been stolen, so the tokens issued for it are revoked (RFC 6749 §4.1.2).
+func (s *storage) endReusedCode(codeHash string) {
+	id := codeGrantID(codeHash)
+	if g, err := s.st().OAuthGrant(id); err == nil && g.RevokedAt == nil {
+		s.revokeGrant(id, "authorization code used again")
 	}
 }
 
@@ -180,10 +183,16 @@ func (s *storage) CreateAccessAndRefreshTokens(ctx context.Context, req op.Token
 	if err != nil {
 		return "", "", time.Time{}, err
 	}
+	// A refresh asking for fewer scopes narrows the access token only: the new refresh token keeps
+	// the presented one's scopes (RFC 6749 §6), so a later refresh can ask for them again.
+	rscopes := req.GetScopes()
+	if rr, ok := req.(*refreshRequest); ok {
+		rscopes = rr.token.Scopes
+	}
 	refresh := "rt_" + randomID(32)
 	rexp := capTime(time.Now().UTC().Add(s.p.cfg.RefreshTokenTTL), g.ExpiresAt)
 	if err := s.st().CreateOAuthRefreshToken(&authx.OAuthRefreshToken{
-		Hash: hash(refresh), GrantID: g.ID, ClientID: g.ClientID, Subject: g.Subject, Scopes: req.GetScopes(), ExpiresAt: rexp, CreatedAt: time.Now().UTC(),
+		Hash: hash(refresh), GrantID: g.ID, ClientID: g.ClientID, Subject: g.Subject, Scopes: rscopes, ExpiresAt: rexp, CreatedAt: time.Now().UTC(),
 	}); err != nil {
 		return "", "", time.Time{}, err
 	}
@@ -197,7 +206,7 @@ func (s *storage) grantFor(req op.TokenRequest) (*authx.OAuthGrant, error) {
 	case *refreshRequest:
 		return r.grant, s.live(r.grant)
 	case *authRequest:
-		if !r.OAuthAuthRequest.Done {
+		if !r.OAuthAuthRequest.Done || r.CodeHash == "" {
 			return nil, oidc.ErrInvalidGrant()
 		}
 		if err := s.userOK(r.Subject); err != nil {
@@ -205,10 +214,16 @@ func (s *storage) grantFor(req op.TokenRequest) (*authx.OAuthGrant, error) {
 		}
 		now := time.Now().UTC()
 		g := &authx.OAuthGrant{
-			ID: randomID(18), ClientID: r.ClientID, Subject: r.Subject, Scopes: r.Scopes, Resources: r.Resources,
+			ID: codeGrantID(r.CodeHash), ClientID: r.ClientID, Subject: r.Subject, Scopes: r.Scopes, Resources: r.Resources,
 			Ref: r.Ref, AuthTime: r.AuthTime, CreatedAt: now, ExpiresAt: r.GrantExpiresAt,
 		}
 		if err := s.st().CreateOAuthGrant(g); err != nil {
+			// The ID is taken: this code was exchanged already — racing on another replica, or
+			// just before its request was deleted. Used twice, it ends the grant it made.
+			if _, gerr := s.st().OAuthGrant(g.ID); gerr == nil {
+				s.revokeGrant(g.ID, "authorization code used again")
+				return nil, oidc.ErrInvalidGrant().WithDescription("the code was already used")
+			}
 			return nil, err
 		}
 		return g, nil
@@ -223,6 +238,21 @@ func (s *storage) live(g *authx.OAuthGrant) error {
 		return op.ErrInvalidRefreshToken
 	}
 	return s.userOK(g.Subject)
+}
+
+// liveToken returns an access token and its grant while the token may be used: issued to subject,
+// not expired, and its grant live (see live). Verify, userinfo and introspection all check through
+// it, so a revoked grant or a blocked user ends a token everywhere at once.
+func (s *storage) liveToken(id, subject string) (*authx.OAuthAccessToken, *authx.OAuthGrant, error) {
+	t, err := s.st().OAuthAccessToken(id)
+	if err != nil || t.Subject != subject || !time.Now().Before(t.ExpiresAt) {
+		return nil, nil, ErrInvalidToken
+	}
+	g, err := s.st().OAuthGrant(t.GrantID)
+	if err != nil || s.live(g) != nil {
+		return nil, nil, ErrInvalidToken
+	}
+	return t, g, nil
 }
 
 func (s *storage) userOK(sub string) error {
@@ -282,11 +312,14 @@ func (s *storage) TokenRequestByRefreshToken(_ context.Context, token string) (o
 }
 
 func (s *storage) revokeGrant(id, why string) {
-	if _, err := s.st().RevokeOAuthGrants(authx.OAuthGrantFilter{ID: id}, time.Now().UTC()); err != nil {
+	n, err := s.st().RevokeOAuthGrants(authx.OAuthGrantFilter{ID: id}, time.Now().UTC())
+	if err != nil {
 		s.p.cfg.Logger.Warn("oidcprovider: revoking a grant failed", "grant", id, "err", err)
 		return
 	}
-	s.p.cfg.Logger.Warn("oidcprovider: grant revoked", "grant", id, "reason", why)
+	if n > 0 {
+		s.p.cfg.Logger.Warn("oidcprovider: grant revoked", "grant", id, "reason", why)
+	}
 }
 
 func (s *storage) TerminateSession(_ context.Context, userID, clientID string) error {
@@ -309,6 +342,7 @@ func (s *storage) GetRefreshTokenInfo(_ context.Context, clientID, token string)
 // RevokeToken revokes a refresh token (ending its grant) or an access token (that token alone).
 // An unknown or foreign token is not an error (RFC 7009).
 func (s *storage) RevokeToken(_ context.Context, tokenOrID, userID, clientID string) *oidc.Error {
+	userID = unescapeSubject(userID)
 	if h, ok := strings.CutPrefix(tokenOrID, "rt:"); ok {
 		t, err := s.st().OAuthRefreshToken(h)
 		if err == nil && t.ClientID == clientID {
@@ -355,9 +389,10 @@ func (s *storage) SetUserinfoFromRequest(ctx context.Context, ui *oidc.UserInfo,
 }
 
 func (s *storage) SetUserinfoFromToken(ctx context.Context, ui *oidc.UserInfo, tokenID, subject, _ string) error {
-	t, err := s.st().OAuthAccessToken(tokenID)
-	if err != nil || t.Subject != subject || time.Now().After(t.ExpiresAt) {
-		return errors.New("invalid token")
+	subject = unescapeSubject(subject)
+	t, _, err := s.liveToken(tokenID, subject)
+	if err != nil {
+		return err
 	}
 	return s.userinfo(ctx, ui, subject, t.Scopes)
 }
@@ -387,13 +422,10 @@ func (s *storage) userinfo(ctx context.Context, ui *oidc.UserInfo, subject strin
 }
 
 func (s *storage) SetIntrospectionFromToken(ctx context.Context, resp *oidc.IntrospectionResponse, tokenID, subject, _ string) error {
-	t, err := s.st().OAuthAccessToken(tokenID)
-	if err != nil || t.Subject != subject || time.Now().After(t.ExpiresAt) {
-		return errors.New("invalid token")
-	}
-	g, err := s.st().OAuthGrant(t.GrantID)
-	if err != nil || g.RevokedAt != nil {
-		return errors.New("invalid token")
+	subject = unescapeSubject(subject)
+	t, g, err := s.liveToken(tokenID, subject)
+	if err != nil {
+		return err
 	}
 	resp.Active = true
 	resp.Scope = t.Scopes

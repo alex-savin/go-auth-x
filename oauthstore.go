@@ -11,9 +11,10 @@ import (
 // dynamically by the client itself), the authorization requests in flight, the grants a user made
 // (one per approval, the family every token of it belongs to), the access and refresh tokens, and
 // the signing keys. The interface lives here — like SessionStore and DirectoryStore — so the
-// reference stores implement it without importing the provider's dependencies. Secrets are never
-// stored: client secrets, codes and refresh tokens are kept as SHA-256 hashes (hex), and an access
-// token's ID is useless without the provider's encryption key.
+// reference stores implement it without importing the provider's dependencies. No secret is stored
+// in the clear: client secrets, codes and refresh tokens are kept as SHA-256 hashes (hex), an
+// access token's ID is useless without the provider's encryption key, and the signing keys are
+// encrypted with a key derived from it.
 
 var (
 	// ErrOAuthNotFound is returned for an absent client, request, grant, token or key.
@@ -101,7 +102,9 @@ type OAuthRefreshToken struct {
 	UsedAt    *time.Time
 }
 
-// OAuthSigningKey is a key the provider signs ID tokens with. PrivatePEM is a PKCS#8 PEM block.
+// OAuthSigningKey is a key the provider signs ID tokens with. PrivatePEM is opaque to the store: the
+// provider seals the PKCS#8 PEM block with AES-GCM before storing it (keys stored by v0.10 and
+// earlier are plain PEM, and are sealed by the provider's next key upkeep).
 type OAuthSigningKey struct {
 	ID         string
 	Algorithm  string // "RS256"
@@ -124,6 +127,9 @@ type OAuthStore interface {
 	OAuthAuthRequestByCode(codeHash string) (*OAuthAuthRequest, error)
 	DeleteOAuthAuthRequest(id string) error
 
+	// CreateOAuthGrant must fail when a grant with g.ID already exists (a primary key does it): a
+	// grant's ID is derived from the authorization code it was exchanged for, so this is what makes
+	// a code single-use across replicas.
 	CreateOAuthGrant(g *OAuthGrant) error
 	OAuthGrant(id string) (*OAuthGrant, error)
 	// RevokeOAuthGrants ends grants: by id, or every grant with this ref, or every grant of a

@@ -555,7 +555,7 @@ p, err := oidcprovider.New(ctx, oidcprovider.Config{
     Issuer:        "https://app.example.com",
     Auth:          authn,
     Store:         store,                       // gormstore / memory implement authx.OAuthStore
-    CryptoKey:     key32,                       // encrypts the opaque access tokens
+    CryptoKey:     key32,                       // encrypts access tokens + seals signing keys
     Scopes:        []string{"notes:read"},
     DefaultScopes: []string{"notes:read"},
     Resources:     []string{"https://app.example.com/mcp"},
@@ -581,19 +581,30 @@ g, err := p.VerifyFor(ctx, bearer, "https://app.example.com/mcp") // g.Subject, 
 - **Metadata:** `/.well-known/oauth-authorization-server` (RFC 8414) and
   `/.well-known/openid-configuration`.
 - **Public clients** must use PKCE with S256.
-- **Access tokens** are opaque and bound to their resource.
-- **Refresh tokens** rotate and are single-use. Replaying one ends the whole grant.
+- **Access tokens** are opaque and bound to their resource. One stops working at once when its grant
+  is revoked or its user is disabled, banned or deleted — at `Verify`, `/userinfo` and
+  `/introspect` alike.
+- **Codes** are single-use across replicas (a grant's ID is derived from its code, so the store
+  refuses a second exchange); a code presented twice ends the grant it made (RFC 6749 §4.1.2).
+- **Refresh tokens** rotate and are single-use. Replaying one ends the whole grant. A refresh asking
+  for fewer scopes narrows that access token only.
 - **Revoking:** `RevokeRef` ends every grant tied to the app's record.
-- **Registration** is limited per address. A dynamic client that is never used is removed after
-  `UnusedClientTTL`.
+- **Registration** is limited per address (IPv6 by /64). A dynamic client that is never used is
+  removed after `UnusedClientTTL`.
+- **No consent screen** (`ConsentURL` nil) approves only clients the app registered itself
+  (`RegisterClient`); a self-registered client is refused, and `New` refuses a nil `ConsentURL`
+  together with `Registration` or `ClientMetadataDocuments`.
 - **Client ID Metadata Documents** (`ClientMetadataDocuments`): a client may use an https URL as its
   `client_id`; the provider fetches its metadata there (the document's `client_id` must equal the
   URL; public clients only, PKCE required). Documents are cached in memory (`Cache-Control` max-age,
   5 min – 24 h, default 1 h), never stored. The fetch only reaches public addresses, is pinned to
   the address it checked (no DNS rebinding), and is limited to 5 s, 64 KB and https redirects.
+  Fetches the cache can't answer are limited per address, and concurrent lookups share one fetch.
 - **Signing keys** rotate: after `KeyRotation` (default 90 days) a new key signs and the old one
   stays in the JWKS for `KeyGrace` (default 24 h), then is deleted. Replicas re-read the keys
-  every five minutes. `RotateKeys` forces a rotation.
+  every five minutes. `RotateKeys` forces a rotation. Keys are sealed at rest (AES-GCM, under a key
+  derived from `CryptoKey`), so a copy of the database alone can't sign tokens; changing
+  `CryptoKey` replaces them.
 - **Consent screen:** show the client's self-chosen name as a claim, together with `RedirectHost`,
   which is where the browser really goes back to. For a metadata-document client, `Client.ID` is
   its URL.

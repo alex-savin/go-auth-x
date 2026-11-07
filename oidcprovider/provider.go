@@ -15,6 +15,7 @@ package oidcprovider
 
 import (
 	"context"
+	"crypto/hkdf"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -57,8 +58,9 @@ type Config struct {
 	Auth Sessions
 	// Store keeps clients, requests, grants, tokens and signing keys. Share it between replicas.
 	Store authx.OAuthStore
-	// CryptoKey (32 bytes) encrypts access tokens. Keep it secret and stable: changing it ends every
-	// access token (refresh tokens keep working).
+	// CryptoKey (32 bytes) encrypts access tokens, and (through a key derived from it) the signing
+	// keys in the store. Keep it secret and stable: changing it ends every access token and replaces
+	// the signing keys (refresh tokens keep working).
 	CryptoKey []byte
 
 	// Scopes are the scopes, beyond openid, profile, email and offline_access, clients may ask for.
@@ -73,8 +75,10 @@ type Config struct {
 	// LoginURL is where a browser without a session signs in, coming back to returnTo (a path on
 	// this site) afterwards. Default: "/welcome?next=" + returnTo.
 	LoginURL func(returnTo string) string
-	// ConsentURL is the app's consent screen for a request id. Nil approves every request as soon
-	// as the user is signed in, with everything it asks — only for first-party clients.
+	// ConsentURL is the app's consent screen for a request id. Nil approves a request as soon as
+	// the user is signed in, with everything it asks — only for first-party clients: it applies to
+	// clients the app registered (RegisterClient), a self-registered client is refused, and New
+	// refuses a nil ConsentURL with Registration or ClientMetadataDocuments.
 	ConsentURL func(requestID string) string
 	// Registration enables dynamic client registration at Prefix + "/register" (needed by most MCP
 	// clients; anyone may register a client, but only a user's approval gives it access).
@@ -139,8 +143,13 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 	if len(cfg.CryptoKey) != 32 {
 		return nil, errors.New("oidcprovider: CryptoKey must be 32 bytes")
 	}
-	iss, err := url.Parse(cfg.Issuer)
-	if err != nil || iss.Host == "" || (iss.Scheme != "https" && !(cfg.Insecure && iss.Scheme == "http")) || iss.RawQuery != "" || iss.Fragment != "" {
+	if cfg.ConsentURL == nil && (cfg.Registration || cfg.ClientMetadataDocuments) {
+		// Anyone can register a client or name a metadata document; approving such a client
+		// without asking would hand a signed-in user's tokens to whoever sent them the link.
+		return nil, errors.New("oidcprovider: Registration and ClientMetadataDocuments need a ConsentURL")
+	}
+	iss, perr := url.Parse(cfg.Issuer)
+	if perr != nil || iss.Host == "" || (iss.Scheme != "https" && !(cfg.Insecure && iss.Scheme == "http")) || iss.RawQuery != "" || iss.Fragment != "" {
 		return nil, fmt.Errorf("oidcprovider: Issuer %q must be an https URL", cfg.Issuer)
 	}
 	cfg.Issuer = strings.TrimRight(cfg.Issuer, "/")
@@ -170,12 +179,17 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
+	cfg.Resources = slices.Clone(cfg.Resources) // normalized below; the caller's slice stays as given
 	for i, r := range cfg.Resources {
 		cfg.Resources[i] = normResource(r)
 	}
+	kek, err := hkdf.Key(sha256.New, cfg.CryptoKey, nil, "go-auth-x oidcprovider signing keys", 32)
+	if err != nil {
+		return nil, fmt.Errorf("oidcprovider: %w", err)
+	}
 
 	p := &Provider{cfg: cfg, prefix: cfg.Prefix, stop: make(chan struct{}), reg: newLimiter(20, time.Hour), now: time.Now}
-	p.store = &storage{p: p, codes: map[string]time.Time{}}
+	p.store = &storage{p: p, kek: kek}
 	p.cimd = newMetadataFetcher(p, nil, false)
 	if err := p.store.rotateKeys(false); err != nil {
 		return nil, err
@@ -191,10 +205,14 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 		SupportedScopes:       append([]string{oidc.ScopeOpenID, oidc.ScopeProfile, oidc.ScopeEmail, oidc.ScopeOfflineAccess}, cfg.Scopes...),
 	}
 	ep := func(s string) *op.Endpoint { e := op.NewEndpoint(p.prefix + s); return e }
+	// zitadel's own crypto for CryptoKey (same wire format, so tokens already issued keep working),
+	// wrapped so the subjects in decrypted access tokens survive its "id:subject" split.
+	gcm := op.NewAES256GCMCrypto(key, "")
 	opts := []op.Option{
 		op.WithCustomEndpoints(ep("/authorize"), ep("/token"), ep("/userinfo"), ep("/revoke"), ep("/end_session"), ep("/keys")),
 		op.WithCustomIntrospectionEndpoint(ep("/introspect")),
 		op.WithLogger(cfg.Logger),
+		op.WithCrypto(subjectCrypto{op.NewCompositeCrypto(gcm, []op.Decrypter{gcm, op.NewAESDecrypter(key)})}),
 	}
 	if cfg.Insecure {
 		opts = append(opts, op.WithAllowInsecure())
@@ -224,7 +242,10 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 func (p *Provider) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
-		p.mux.ServeHTTP(w, r)
+		// The client's rate-limit key rides along, for the limits deep inside zitadel's handlers
+		// (fetching a metadata document happens wherever a client is looked up).
+		key := authx.RateLimitKey(p.cfg.Auth.ClientIP(r))
+		p.mux.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), clientKey, key)))
 	})
 }
 
@@ -254,13 +275,38 @@ func (p *Provider) gc() {
 			if err := p.store.rotateKeys(false); err != nil {
 				p.cfg.Logger.Warn("oidcprovider: signing-key upkeep failed", "err", err)
 			}
-			p.store.forgetCodes(now)
 			p.reg.sweep(now)
+			p.cimd.limit.sweep(now)
 		}
 	}
 }
 
 // --- helpers ---
+
+// subjectCrypto is zitadel's token crypto with one change: a decrypted access token "id:subject"
+// comes back with the subject's colons escaped. zitadel splits it on every ":" and wants exactly
+// two parts, so go-auth-x subjects ("local:…", "google:…") broke userinfo, introspection and the
+// revocation of access tokens. The storage methods those reach unescape it (unescapeSubject).
+type subjectCrypto struct{ op.Crypto }
+
+var (
+	subjectEscaper   = strings.NewReplacer("%", "%25", ":", "%3A")
+	subjectUnescaper = strings.NewReplacer("%3A", ":", "%25", "%")
+)
+
+func (c subjectCrypto) Decrypt(s string) (string, error) {
+	plain, err := c.Crypto.Decrypt(s)
+	if err != nil {
+		return "", err
+	}
+	if id, sub, ok := strings.Cut(plain, ":"); ok {
+		return id + ":" + subjectEscaper.Replace(sub), nil
+	}
+	return plain, nil // not an access token (an auth request's code)
+}
+
+// unescapeSubject undoes subjectCrypto's escaping of a subject zitadel passes back.
+func unescapeSubject(s string) string { return subjectUnescaper.Replace(s) }
 
 func randomID(n int) string {
 	b := make([]byte, n)

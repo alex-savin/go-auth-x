@@ -36,7 +36,7 @@ func (p *Provider) register(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusMethodNotAllowed)
 		return
 	}
-	if !p.reg.allow(p.cfg.Auth.ClientIP(r), time.Now()) {
+	if !p.reg.allow(authx.RateLimitKey(p.cfg.Auth.ClientIP(r)), time.Now()) {
 		writeErr(w, http.StatusTooManyRequests, "too_many_requests", "too many registrations; try again later")
 		return
 	}
@@ -138,9 +138,6 @@ func (p *Provider) RegisterClient(c authx.OAuthClient) (secret string, err error
 	return secret, p.cfg.Store.CreateOAuthClient(&c)
 }
 
-// redirectOK allows https, http to a loopback address (a native app's local listener), and a
-// private-use scheme in reverse-domain form ("com.example.app:/cb", RFC 8252) — never javascript:,
-// data: or the like, and no fragments.
 // supportedGrants keeps of a client's grant types those this provider issues tokens for (the
 // code, and refresh tokens), the code always among them. Others it also names (a JWT bearer grant,
 // say, which claude.ai's client metadata lists) are left out rather than refused: the client
@@ -158,6 +155,9 @@ func supportedGrants(asked []string) (grants []string, ok bool) {
 	return grants, true
 }
 
+// redirectOK allows https, http to a loopback address (a native app's local listener), and a
+// private-use scheme in reverse-domain form ("com.example.app:/cb", RFC 8252) — never javascript:,
+// data: or the like, and no fragments.
 func (p *Provider) redirectOK(raw string) bool {
 	u, err := url.Parse(raw)
 	if err != nil || u.Fragment != "" || u.Scheme == "" {

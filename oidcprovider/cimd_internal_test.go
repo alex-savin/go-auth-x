@@ -3,13 +3,18 @@ package oidcprovider
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/netip"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/zitadel/oidc/v3/pkg/op"
 )
 
 func TestPublicAddr(t *testing.T) {
@@ -147,5 +152,102 @@ func TestMetadataCacheBounded(t *testing.T) {
 	}
 	if n := len(f.cache); n > metadataCacheMax {
 		t.Fatalf("cache holds %d entries, more than %d", n, metadataCacheMax)
+	}
+}
+
+// subjectCrypto escapes a decrypted access token's subject so zitadel's "id:subject" split sees
+// two parts, and unescapeSubject restores it exactly — colons and percent signs included.
+func TestSubjectCryptoRoundTrip(t *testing.T) {
+	var key [32]byte
+	c := subjectCrypto{op.NewAES256GCMCrypto(key, "")}
+	for _, sub := range []string{"local:abc", "scim:org7:jdoe", "plain", "odd%3A:%25:%"} {
+		enc, err := c.Encrypt("tok123:" + sub)
+		if err != nil {
+			t.Fatal(err)
+		}
+		dec, err := c.Decrypt(enc)
+		if err != nil {
+			t.Fatal(err)
+		}
+		parts := strings.Split(dec, ":")
+		if len(parts) != 2 || parts[0] != "tok123" || unescapeSubject(parts[1]) != sub {
+			t.Errorf("%q decrypted to %q", sub, dec)
+		}
+	}
+	if enc, _ := c.Encrypt("requestid"); func() string { d, _ := c.Decrypt(enc); return d }() != "requestid" {
+		t.Error("a value without a colon must decrypt unchanged")
+	}
+}
+
+// Fetches the cache can't answer are limited per address; being over the limit isn't cached against
+// the document (another address still fetches it), and cached answers don't count.
+func TestMetadataFetchLimit(t *testing.T) {
+	var hits atomic.Int32
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	p := &Provider{now: time.Now, cfg: Config{Logger: slog.New(slog.DiscardHandler)}}
+	f := newMetadataFetcher(p, srv.Client().Transport.(*http.Transport).TLSClientConfig.RootCAs, true)
+	from := func(key string) context.Context { return context.WithValue(context.Background(), clientKey, key) }
+
+	for i := range metadataFetches {
+		if _, err := f.get(from("a"), fmt.Sprintf("%s/c%d.json", srv.URL, i)); errors.Is(err, errMetadataBusy) {
+			t.Fatalf("fetch %d refused as over the limit", i)
+		}
+	}
+	if _, err := f.get(from("a"), srv.URL+"/one-more.json"); !errors.Is(err, errMetadataBusy) {
+		t.Fatalf("a fetch past the limit = %v, want errMetadataBusy", err)
+	}
+	if n := hits.Load(); n != metadataFetches {
+		t.Fatalf("the server saw %d fetches, want %d", n, metadataFetches)
+	}
+	if _, err := f.get(from("b"), srv.URL+"/one-more.json"); errors.Is(err, errMetadataBusy) || !errors.Is(err, errMetadata) {
+		t.Fatalf("another address must fetch the document, got %v", err)
+	}
+	if _, err := f.get(from("a"), srv.URL+"/c0.json"); errors.Is(err, errMetadataBusy) {
+		t.Fatal("a cached answer must not count against the limit")
+	}
+	if n := hits.Load(); n != metadataFetches+1 {
+		t.Fatalf("the server saw %d fetches, want %d", n, metadataFetches+1)
+	}
+}
+
+// Concurrent lookups of one document share a single fetch.
+func TestMetadataFetchShared(t *testing.T) {
+	var hits atomic.Int32
+	release := make(chan struct{})
+	var once sync.Once
+	unblock := func() { once.Do(func() { close(release) }) }
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		<-release
+		http.NotFound(w, r)
+	}))
+	defer srv.Close()
+	defer unblock() // runs first: a failing test must not leave handlers blocking srv.Close
+	p := &Provider{now: time.Now, cfg: Config{Logger: slog.New(slog.DiscardHandler)}}
+	f := newMetadataFetcher(p, srv.Client().Transport.(*http.Transport).TLSClientConfig.RootCAs, true)
+
+	var wg sync.WaitGroup
+	for range 5 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = f.get(context.Background(), srv.URL+"/c.json")
+		}()
+	}
+	for hits.Load() == 0 {
+		time.Sleep(5 * time.Millisecond)
+	}
+	time.Sleep(100 * time.Millisecond) // the others arrive and wait on the fetch under way
+	if n := hits.Load(); n != 1 {
+		t.Fatalf("%d fetches under way, want 1", n)
+	}
+	unblock()
+	wg.Wait()
+	if n := hits.Load(); n != 1 {
+		t.Fatalf("the document was fetched %d times, want once", n)
 	}
 }
