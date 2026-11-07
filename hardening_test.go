@@ -196,7 +196,7 @@ func TestSessionSecretRotation(t *testing.T) {
 }
 
 func TestNewRejectsShortPreviousSecret(t *testing.T) {
-	_, err := New(nil, Config{
+	_, err := New(context.TODO(), Config{
 		SessionSecret:          []byte("0123456789abcdef0123456789abcdef"),
 		PreviousSessionSecrets: [][]byte{[]byte("too-short")},
 	})

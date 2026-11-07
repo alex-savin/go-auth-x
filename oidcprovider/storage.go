@@ -35,8 +35,6 @@ const (
 	clientKey                  // the client's rate-limit key (string), set by Handler
 )
 
-var errNotFound = errors.New("not found")
-
 func (s *storage) st() authx.OAuthStore { return s.p.cfg.Store }
 
 // --- auth requests ---
