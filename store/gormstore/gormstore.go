@@ -740,16 +740,10 @@ func (s *Store) UpsertUserOnLogin(sub, email, name string, emailVerified bool) (
 	return toAuthUser(&u), nil
 }
 
-// deleteUserCascade removes a user and everything keyed to it (credentials, tokens, OAuth links,
-// group memberships) in one transaction. Used to reclaim an email from an unverified squatter.
-// LoginAudit rows are deliberately NOT deleted — the forensic trail is kept, and orphaned audit
-// rows grant no access (they can't resolve to a login).
-func (s *Store) deleteUserCascade(id uint) error {
-	return s.db.Transaction(func(tx *gorm.DB) error { return cascadeDeletes(tx, id) })
-}
-
-// cascadeDeletes removes a user + everything keyed to it on the given tx handle (no transaction of
-// its own, so a caller can compose it with a create for an atomic reclaim).
+// cascadeDeletes removes a user + everything keyed to it (credentials, tokens, OAuth links, group
+// memberships) on the given tx handle — no transaction of its own, so DeleteUser and the squatter
+// reclaim compose it atomically. LoginAudit rows are deliberately NOT deleted — the forensic trail
+// is kept, and orphaned audit rows grant no access (they can't resolve to a login).
 func cascadeDeletes(tx *gorm.DB, id uint) error {
 	// NOTE: Session rows are intentionally NOT deleted here. Deleting them would make IsRevoked (an
 	// absent SID reads as "not revoked") silently re-admit a hard-deleted user on their other devices.

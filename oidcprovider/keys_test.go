@@ -68,7 +68,7 @@ func (h *harness) jwks() jose.JSONWebKeySet {
 // keyID is the id of the key that signed tok.
 func keyID(t *testing.T, tok string) string {
 	t.Helper()
-	jws, err := jose.ParseSigned(tok, []jose.SignatureAlgorithm{jose.RS256})
+	jws, err := jose.ParseSignedCompact(tok, []jose.SignatureAlgorithm{jose.RS256})
 	if err != nil || len(jws.Signatures) != 1 {
 		t.Fatalf("parse %q: %v", tok, err)
 	}
@@ -78,7 +78,7 @@ func keyID(t *testing.T, tok string) string {
 // verifies reports whether tok's signature checks out against the published keys.
 func (h *harness) verifies(tok string) bool {
 	h.t.Helper()
-	jws, err := jose.ParseSigned(tok, []jose.SignatureAlgorithm{jose.RS256})
+	jws, err := jose.ParseSignedCompact(tok, []jose.SignatureAlgorithm{jose.RS256})
 	if err != nil {
 		h.t.Fatal(err)
 	}

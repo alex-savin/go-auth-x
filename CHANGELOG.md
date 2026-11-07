@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Dependencies updated** — `golang.org/x/crypto` v0.58.0 (clears three advisories in `x/crypto/ssh`,
+  none reachable from this module; the remaining one, the unmaintained `openpgp` package, isn't
+  imported and has no tagged fix), `go-ntlmssp` v0.1.1 (via `go-ldap`), `go-jose` v4.1.9,
+  `zitadel/oidc` v3.51.17, `go-oidc` v3.21.0, `go-ldap` v3.4.15, `go-webauthn` v0.18.2, and the
+  test-only SQLite driver.
+- **CI** — every pull request and push to `main` runs gofmt, a tidy-`go.mod` check, vet,
+  `go test -race` on Go 1.26.x and the current release, staticcheck and govulncheck.
+
 ## [0.11.0] — 2026-11-07
 
 Security hardening of the `oidcprovider` from a review of v0.9–v0.10.1, and a fix that makes

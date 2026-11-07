@@ -178,7 +178,3 @@ func parseFlowMulti(secrets [][]byte, token string) (*flowClaims, error) {
 	}
 	return &c, nil
 }
-
-func parseFlow(secret []byte, token string) (*flowClaims, error) {
-	return parseFlowMulti([][]byte{secret}, token)
-}

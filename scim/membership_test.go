@@ -101,10 +101,12 @@ func TestGroupMembership_FallbackIsBestEffort(t *testing.T) {
 	assertMembers("eng", u2.ID, u3.ID)
 
 	// PATCH add — the common IdP incremental push.
-	w := do(http.MethodPost, "/scim/v2/Groups", `{"displayName":"ops"}`)
+	if w := do(http.MethodPost, "/scim/v2/Groups", `{"displayName":"ops"}`); w.Code != http.StatusCreated {
+		t.Fatalf("create ops: %d %s", w.Code, w.Body.String())
+	}
 	ops, _ := mem.GroupByName("ops")
 	patch := `{"Operations":[{"op":"add","path":"members","value":` + membersBody(u1.ID, u2.ID) + `}]}`
-	if w = do(http.MethodPatch, "/scim/v2/Groups/"+ops.ID, patch); w.Code != http.StatusOK {
+	if w := do(http.MethodPatch, "/scim/v2/Groups/"+ops.ID, patch); w.Code != http.StatusOK {
 		t.Fatalf("patch: %d %s", w.Code, w.Body.String())
 	}
 	assertMembers("ops", u2.ID)

@@ -394,7 +394,7 @@ func TestDenyAndRefusals(t *testing.T) {
 	}
 
 	// A confidential client gets a secret and must use it.
-	code, m = h.register(map[string]any{"redirect_uris": []string{"https://ok.example/cb"}, "client_name": "Web‮app\x07"})
+	code, m = h.register(map[string]any{"redirect_uris": []string{"https://ok.example/cb"}, "client_name": "Web\u202eapp\x07"})
 	if code != 201 || m["client_secret"] == nil || m["client_name"] != "Webapp" {
 		t.Fatalf("confidential register = %d %v", code, m)
 	}
