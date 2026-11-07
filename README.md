@@ -722,7 +722,11 @@ go-auth-x/
 
 See **[ROADMAP.md](./ROADMAP.md)** for the full list and **[CHANGELOG.md](./CHANGELOG.md)** for details.
 
-- **v0.11.0** (latest): **`oidcprovider` hardening** — no silent approval of self-registered
+- **v0.12.0** (latest): **fresh sign-ins + OAuth lifecycle** — the `oidcprovider` honors
+  `prompt=login` and `max_age` (re-auth via `ReauthURL`; ID tokens carry the real sign-in time),
+  deleting an account removes the user's OAuth records, grants left without tokens are cleaned up,
+  auth-email logs are masked, dependencies are updated, and CI checks every pull request.
+- **v0.11.0**: **`oidcprovider` hardening** — no silent approval of self-registered
   clients, codes single-use across replicas (a reused code ends its grant), access tokens that end
   with their grant and user, signing keys sealed at rest, throttled metadata-document fetches; and
   `/userinfo`, `/introspect` and access-token revocation fixed for go-auth-x subjects.

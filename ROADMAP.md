@@ -5,6 +5,17 @@ Direction and planned work for the library. Authoritative usage/feature docs liv
 
 ## Shipped
 
+### v0.12.0 — fresh sign-ins, OAuth lifecycle, CI · additive (a `DeleteExpiredOAuth` contract addition)
+
+- **`prompt=login` / `max_age`** honored by the `oidcprovider`: a stale sign-in goes to
+  `Config.ReauthURL`; a page that bounces back fails with `login_required`. The session cookie's new
+  `auth_time` claim (kept across re-mints) is the sign-in time, also used for ID tokens' `auth_time`.
+- **OAuth records go with the user** — `DeleteUser` removes grants, tokens and requests (both
+  reference stores); `Provider.RevokeUser`; the clean-up drops grants left without any token.
+- **Private logs** — auth emails log a masked address, successes only at Debug.
+- **Dependencies** updated (`x/crypto` advisories cleared) and **CI** on every PR: gofmt, tidy,
+  vet, race tests on two Go versions, staticcheck, govulncheck. `ldapsync` sync logic now tested.
+
 ### v0.11.0 — OIDC provider hardening · additive, with two behavior changes
 
 - **Consent** — without a consent screen only app-registered clients are approved; `New` refuses a
