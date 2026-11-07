@@ -705,7 +705,19 @@ go-auth-x/
 
 See **[ROADMAP.md](./ROADMAP.md)** for the full list and **[CHANGELOG.md](./CHANGELOG.md)** for details.
 
-- **v0.8.0** (latest): **opaque entity IDs** (issue #2) — every public entity ID is now an opaque
+- **v0.10.1** (latest): **`oidcprovider` fix** — a client whose metadata also lists grant types the
+  provider doesn't offer (claude.ai's connectors list the JWT bearer grant) is accepted with those
+  left out, instead of being refused at `/authorize`.
+- **v0.10.0**: **OIDC provider key rotation + Client ID Metadata Documents** — the
+  provider rotates its ID-token signing key (`KeyRotation`, default 90 days; retired keys stay
+  published for `KeyGrace`; `RotateKeys` forces one), and an https URL can be a `client_id` (MCP
+  2025-11-25), fetched with SSRF protection. Custom `OAuthStore`s add two key methods.
+- **v0.9.0**: **embeddable OAuth 2.1 / OIDC provider** (`oidcprovider`, built on `zitadel/oidc`) —
+  the go-auth-x session is the login, the consent screen is yours; dynamic registration, resource
+  indicators, rotating refresh tokens, and a pluggable `OAuthStore`. Plus a **pluggable `slog`
+  logger** (`Config.Logger` / `SetLogger`) and **batch group membership** (`BatchGroupStore`) for
+  SCIM group syncs. Additive.
+- **v0.8.0**: **opaque entity IDs** (issue #2) — every public entity ID is now an opaque
   `string` across the store interfaces, so uuid/ULID/KSUID-keyed stores pass their IDs straight
   through. **Breaking**, but no DB migration and no change for consumers of the reference stores (they
   keep `uint` PKs and convert at the boundary); custom store implementers update signatures to the
