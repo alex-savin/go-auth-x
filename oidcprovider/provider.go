@@ -75,6 +75,11 @@ type Config struct {
 	// LoginURL is where a browser without a session signs in, coming back to returnTo (a path on
 	// this site) afterwards. Default: "/welcome?next=" + returnTo.
 	LoginURL func(returnTo string) string
+	// ReauthURL is where a signed-in browser goes when the client wants a fresher sign-in than its
+	// session has (OIDC prompt=login, or max_age): the app signs the user in again — a password or
+	// passkey, not just the existing session — and comes back to returnTo. Default: LoginURL. A
+	// page that sends a signed-in user straight back fails the request with login_required.
+	ReauthURL func(returnTo string) string
 	// ConsentURL is the app's consent screen for a request id. Nil approves a request as soon as
 	// the user is signed in, with everything it asks — only for first-party clients: it applies to
 	// clients the app registered (RegisterClient), a self-registered client is refused, and New
@@ -159,6 +164,9 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 	cfg.Prefix = "/" + strings.Trim(cfg.Prefix, "/")
 	if cfg.LoginURL == nil {
 		cfg.LoginURL = func(returnTo string) string { return "/welcome?next=" + url.QueryEscape(returnTo) }
+	}
+	if cfg.ReauthURL == nil {
+		cfg.ReauthURL = cfg.LoginURL
 	}
 	if cfg.AccessTokenTTL <= 0 {
 		cfg.AccessTokenTTL = time.Hour

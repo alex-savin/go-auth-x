@@ -493,6 +493,11 @@ func (s *Store) DeleteUser(userID string) error {
 		if err := cascadeDeletes(tx, n); err != nil {
 			return err
 		}
+		if u.Sub != "" { // the embedded OAuth provider's records are keyed by subject
+			if err := deleteOAuthSubject(tx, u.Sub); err != nil {
+				return err
+			}
+		}
 		if u.Email != "" { // OTPs and org invites are keyed by email, not user_id
 			if err := tx.Where("email = ?", u.Email).Delete(&EmailOTP{}).Error; err != nil {
 				return err

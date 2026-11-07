@@ -63,6 +63,10 @@ func cloneRequest(r *authx.OAuthAuthRequest) *authx.OAuthAuthRequest {
 	o.Scopes = cloneStrings(r.Scopes)
 	o.Resources = cloneStrings(r.Resources)
 	o.Prompt = cloneStrings(r.Prompt)
+	if r.MaxAge != nil {
+		d := *r.MaxAge
+		o.MaxAge = &d
+	}
 	return &o
 }
 
@@ -254,6 +258,31 @@ func (s *Store) RevokeOAuthGrants(f authx.OAuthGrantFilter, at time.Time) (int, 
 }
 
 // deleteGrantLocked drops a grant and its tokens. Caller holds s.mu.
+// deleteOAuthSubjectLocked removes a user's OAuth records (DeleteUser's cascade): their grants with
+// every token issued under them, and their auth requests in flight. Caller holds s.mu.
+func (s *Store) deleteOAuthSubjectLocked(sub string) {
+	for id, g := range s.oauthGrants {
+		if g.Subject == sub {
+			s.deleteGrantLocked(id)
+		}
+	}
+	for k, t := range s.oauthAccess {
+		if t.Subject == sub {
+			delete(s.oauthAccess, k)
+		}
+	}
+	for k, t := range s.oauthRefresh {
+		if t.Subject == sub {
+			delete(s.oauthRefresh, k)
+		}
+	}
+	for id, r := range s.oauthRequests {
+		if r.Subject == sub {
+			delete(s.oauthRequests, id)
+		}
+	}
+}
+
 func (s *Store) deleteGrantLocked(id string) {
 	delete(s.oauthGrants, id)
 	for k, t := range s.oauthAccess {
@@ -417,6 +446,19 @@ func (s *Store) DeleteExpiredOAuth(now, requestsBefore, clientsBefore time.Time)
 	for id, g := range s.oauthGrants {
 		if (g.RevokedAt != nil && g.RevokedAt.Before(now)) || (!g.ExpiresAt.IsZero() && g.ExpiresAt.Before(now)) {
 			s.deleteGrantLocked(id)
+		}
+	}
+	// A grant left without any token (its refresh tokens all expired) can never issue again.
+	hasToken := map[string]bool{}
+	for _, t := range s.oauthAccess {
+		hasToken[t.GrantID] = true
+	}
+	for _, t := range s.oauthRefresh {
+		hasToken[t.GrantID] = true
+	}
+	for id, g := range s.oauthGrants {
+		if !hasToken[id] && g.CreatedAt.Before(requestsBefore) {
+			delete(s.oauthGrants, id)
 		}
 	}
 	for id, c := range s.oauthClients {

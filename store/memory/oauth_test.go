@@ -10,6 +10,38 @@ import (
 	authx "github.com/alex-savin/go-auth-x"
 )
 
+// Deleting a user removes their OAuth provider records too (grants with their tokens, requests),
+// and nobody else's.
+func TestDeleteUserRemovesOAuthRecords(t *testing.T) {
+	s := New()
+	u, _ := s.CreateLocalUser("u@x.com", "U")
+	other, _ := s.CreateLocalUser("o@x.com", "O")
+	now := time.Now()
+	for _, sub := range []string{u.Sub, other.Sub} {
+		g := "g-" + sub
+		if err := s.CreateOAuthGrant(&authx.OAuthGrant{ID: g, ClientID: "c", Subject: sub, CreatedAt: now}); err != nil {
+			t.Fatal(err)
+		}
+		_ = s.CreateOAuthAccessToken(&authx.OAuthAccessToken{ID: "a-" + sub, GrantID: g, ClientID: "c", Subject: sub, ExpiresAt: now.Add(time.Hour), CreatedAt: now})
+		_ = s.CreateOAuthRefreshToken(&authx.OAuthRefreshToken{Hash: "r-" + sub, GrantID: g, ClientID: "c", Subject: sub, ExpiresAt: now.Add(time.Hour), CreatedAt: now})
+		_ = s.SaveOAuthAuthRequest(&authx.OAuthAuthRequest{ID: "q-" + sub, ClientID: "c", Subject: sub, CreatedAt: now})
+	}
+	if err := s.DeleteUser(u.ID); err != nil {
+		t.Fatal(err)
+	}
+	for sub, gone := range map[string]bool{u.Sub: true, other.Sub: false} {
+		_, e1 := s.OAuthGrant("g-" + sub)
+		_, e2 := s.OAuthAccessToken("a-" + sub)
+		_, e3 := s.OAuthRefreshToken("r-" + sub)
+		_, e4 := s.OAuthAuthRequest("q-" + sub)
+		for _, err := range []error{e1, e2, e3, e4} {
+			if gone != errors.Is(err, authx.ErrOAuthNotFound) {
+				t.Fatalf("subject %s (deleted=%v): record lookup = %v", sub, gone, err)
+			}
+		}
+	}
+}
+
 func TestOAuthStore(t *testing.T) {
 	testOAuthStore(t, func(*testing.T) authx.OAuthStore { return New() })
 }
@@ -161,6 +193,18 @@ func testOAuthStore(t *testing.T, newStore func(t *testing.T) authx.OAuthStore) 
 		}
 		if _, err := s.OAuthAuthRequestByCode(""); !errors.Is(err, authx.ErrOAuthNotFound) {
 			t.Fatal("an empty code hash must never match a request without a code")
+		}
+		// max_age round-trips, and 0 ("sign in again now") stays distinct from unset.
+		if got.MaxAge != nil {
+			t.Fatalf("an unset MaxAge must stay nil, got %v", *got.MaxAge)
+		}
+		for _, ma := range []time.Duration{0, 5 * time.Minute} {
+			if err := s.SaveOAuthAuthRequest(&authx.OAuthAuthRequest{ID: "r-maxage", ClientID: "c1", MaxAge: &ma, CreatedAt: at(0)}); err != nil {
+				t.Fatal(err)
+			}
+			if got, err := s.OAuthAuthRequest("r-maxage"); err != nil || got.MaxAge == nil || *got.MaxAge != ma {
+				t.Fatalf("MaxAge %v round-trip: %v %+v", ma, err, got)
+			}
 		}
 
 		// Save again: replaces (approval + code issued).
@@ -484,6 +528,9 @@ func testOAuthStore(t *testing.T, newStore func(t *testing.T) authx.OAuthStore) 
 		// Grants.
 		must(s.CreateOAuthGrant(&authx.OAuthGrant{ID: "g-live", ClientID: "app", CreatedAt: at(-time.Hour)}))
 		must(s.CreateOAuthGrant(&authx.OAuthGrant{ID: "g-live-end", ClientID: "app", CreatedAt: at(-time.Hour), ExpiresAt: at(time.Hour)}))
+		// No token left: can never issue again — unless just created (its tokens are on the way).
+		must(s.CreateOAuthGrant(&authx.OAuthGrant{ID: "g-orphan", ClientID: "app", CreatedAt: at(-time.Hour)}))
+		must(s.CreateOAuthGrant(&authx.OAuthGrant{ID: "g-orphan-new", ClientID: "app", CreatedAt: at(-time.Minute)}))
 		must(s.CreateOAuthGrant(&authx.OAuthGrant{ID: "g-expired", ClientID: "app", CreatedAt: at(-time.Hour), ExpiresAt: at(-time.Minute)}))
 		must(s.CreateOAuthGrant(&authx.OAuthGrant{ID: "g-revoked", ClientID: "app", CreatedAt: at(-time.Hour), RevokedAt: tp(-time.Minute)}))
 		must(s.CreateOAuthGrant(&authx.OAuthGrant{ID: "g-stale-client", ClientID: "dyn-stale", CreatedAt: at(-time.Hour)}))
@@ -498,6 +545,7 @@ func testOAuthStore(t *testing.T, newStore func(t *testing.T) authx.OAuthStore) 
 		tok("t-of-expired", "g-expired", "app", time.Hour)
 		tok("t-of-revoked", "g-revoked", "app", time.Hour)
 		tok("t-of-stale", "g-stale-client", "dyn-stale", time.Hour)
+		tok("t-live-end", "g-live-end", "app", time.Hour)
 
 		must(s.DeleteExpiredOAuth(now, at(-10*time.Minute), at(-24*time.Hour)))
 
@@ -519,7 +567,7 @@ func testOAuthStore(t *testing.T, newStore func(t *testing.T) authx.OAuthStore) 
 		check("request", func(id string) error { _, err := s.OAuthAuthRequest(id); return err },
 			[]string{"req-new"}, []string{"req-old"})
 		check("grant", func(id string) error { _, err := s.OAuthGrant(id); return err },
-			[]string{"g-live", "g-live-end"}, []string{"g-expired", "g-revoked", "g-stale-client"})
+			[]string{"g-live", "g-live-end", "g-orphan-new"}, []string{"g-expired", "g-revoked", "g-stale-client", "g-orphan"})
 		gone := []string{"t-expired", "t-of-expired", "t-of-revoked", "t-of-stale"}
 		check("access token", func(id string) error { _, err := s.OAuthAccessToken(id); return err },
 			[]string{"t-live"}, gone)

@@ -65,6 +65,10 @@ func (s *storage) CreateAuthRequest(ctx context.Context, ar *oidc.AuthRequest, _
 		Prompt:              ar.Prompt,
 		CreatedAt:           time.Now().UTC(),
 	}
+	if ar.MaxAge != nil {
+		d := time.Duration(*ar.MaxAge) * time.Second
+		r.MaxAge = &d
+	}
 	// Public clients must use PKCE (OAuth 2.1); S256 only.
 	if r.CodeChallenge == "" && c.AuthMethod == string(oidc.AuthMethodNone) {
 		return nil, oidc.ErrInvalidRequest().WithDescription("code_challenge is required")

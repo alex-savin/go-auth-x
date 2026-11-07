@@ -7,7 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`oidcprovider` honors `prompt=login` and `max_age`.** The login step used to accept any
+  existing session; a client asking for a fresh sign-in now gets one. A session signed in before
+  the request (`prompt=login`, or `max_age=0`) or longer ago than `max_age` is sent to the new
+  `Config.ReauthURL` (default `LoginURL`) to sign in again; coming back still stale fails with
+  `login_required` rather than looping, as does `prompt=none`. `OAuthAuthRequest.MaxAge` stores the
+  request's `max_age` (both reference stores persist it).
+- **`SessionClaims.AuthTime`** — the session cookie's `auth_time` claim: when the user signed in.
+  Unlike `iat`, a re-mint that isn't a sign-in (switching the active org) keeps it. Cookies minted
+  before it existed have none, and count as not fresh for `prompt=login` / `max_age`.
+- **`Provider.RevokeUser(ctx, subject)`** — ends every grant of a user ("disconnect all apps", or
+  account deletion with a store that doesn't remove OAuth records itself).
+
+### Fixed
+
+- **Deleting an account removes the user's `oidcprovider` records** — grants, the tokens issued
+  under them, and auth requests in flight — in both reference stores (keyed by the user's subject).
+  They were left behind; since v0.11 they couldn't be used, but they were kept. A custom store that
+  implements both `CredentialStore` and `OAuthStore` should do the same (documented on `DeleteUser`).
+- **Grants left without any token are cleaned up** — a grant with no end date whose refresh tokens
+  had all expired could never issue again, yet stayed forever. `DeleteExpiredOAuth` now also
+  removes grants with no token left (created before `requestsBefore`); both reference stores do.
+- **ID tokens' `auth_time` is the sign-in time**, from the session's `auth_time`, instead of the
+  time the user approved the consent screen; refreshed ID tokens keep it.
+
 ### Changed
+
+- **Auth emails no longer log the recipient's address** — a failure logs it masked
+  (`a***@example.com`) at Error, a successful send only at Debug (it was Info, unmasked).
 
 - **Dependencies updated** — `golang.org/x/crypto` v0.58.0 (clears three advisories in `x/crypto/ssh`,
   none reachable from this module; the remaining one, the unmaintained `openpgp` package, isn't

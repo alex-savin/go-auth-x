@@ -588,7 +588,13 @@ g, err := p.VerifyFor(ctx, bearer, "https://app.example.com/mcp") // g.Subject, 
   refuses a second exchange); a code presented twice ends the grant it made (RFC 6749 §4.1.2).
 - **Refresh tokens** rotate and are single-use. Replaying one ends the whole grant. A refresh asking
   for fewer scopes narrows that access token only.
-- **Revoking:** `RevokeRef` ends every grant tied to the app's record.
+- **Revoking:** `RevokeRef` ends every grant tied to the app's record, `RevokeUser` every grant of a
+  user. Deleting an account removes the user's OAuth records (both reference stores), and the
+  clean-up drops grants left without any token.
+- **Fresh sign-in:** `prompt=login` and `max_age` are honored. A session signed in too long ago is
+  sent to `ReauthURL` (default `LoginURL`) to sign in again; a page that sends a signed-in user
+  straight back fails the request with `login_required`. ID tokens carry the real sign-in time as
+  `auth_time` (the session's new `auth_time` claim, kept across re-mints such as an org switch).
 - **Registration** is limited per address (IPv6 by /64). A dynamic client that is never used is
   removed after `UnusedClientTTL`.
 - **No consent screen** (`ConsentURL` nil) approves only clients the app registered itself
