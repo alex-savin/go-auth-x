@@ -27,6 +27,7 @@ type oidcProvider struct {
 	verifier       *oidc.IDTokenVerifier
 	clientID       string
 	assumeVerified bool // trust the token email when the provider omits email_verified
+	upnEmail       bool // with no email claim, take an email-shaped preferred_username (the Entra preset only)
 }
 
 // enableOIDCSocial registers every configured generic OIDC provider — the Microsoft/Entra preset
@@ -34,6 +35,7 @@ type oidcProvider struct {
 // slug collides with a built-in/duplicate, or discovery fails.
 func (a *Authenticator) enableOIDCSocial(ctx context.Context) {
 	providers := append([]SocialOIDCProvider(nil), a.cfg.SocialOIDC...)
+	entraPreset := -1 // index of the built-in Microsoft preset in providers, if configured
 
 	// Microsoft / Entra ID preset over the same generic OIDC machinery.
 	if a.cfg.MicrosoftClientID != "" && a.cfg.MicrosoftClientSecret != "" {
@@ -51,6 +53,7 @@ func (a *Authenticator) enableOIDCSocial(ctx context.Context) {
 		if a.cfg.MicrosoftTenant == "" || isMultiTenantMicrosoft(a.cfg.MicrosoftTenant) {
 			a.log().Warn("authx: Microsoft login is configured for a multi-tenant endpoint; token email is not trusted there — set MICROSOFT_TENANT to a single tenant/domain to enable email-based sign-in", "tenant", tenant)
 		}
+		entraPreset = len(providers)
 		providers = append(providers, SocialOIDCProvider{
 			Name:           "microsoft",
 			Issuer:         "https://login.microsoftonline.com/" + tenant + "/v2.0",
@@ -60,7 +63,7 @@ func (a *Authenticator) enableOIDCSocial(ctx context.Context) {
 		})
 	}
 
-	for _, sp := range providers {
+	for i, sp := range providers {
 		name := strings.ToLower(strings.TrimSpace(sp.Name))
 		if name == "" || sp.Issuer == "" || sp.ClientID == "" || sp.ClientSecret == "" {
 			continue
@@ -87,6 +90,9 @@ func (a *Authenticator) enableOIDCSocial(ctx context.Context) {
 			verifier:       p.Verifier(&oidc.Config{ClientID: sp.ClientID}),
 			clientID:       sp.ClientID,
 			assumeVerified: sp.AssumeVerified,
+			// preferred_username is any string the user (or their IdP) chose, not a verified address;
+			// only Entra with a pinned tenant puts the user's UPN — an address it owns — there.
+			upnEmail: i == entraPreset,
 		}
 	}
 }
@@ -95,7 +101,7 @@ func (a *Authenticator) enableOIDCSocial(ctx context.Context) {
 // provider-verified identity. It enforces nonce, azp, and email_verified — unless assumeVerified is
 // set, in which case a present token email (or an email-shaped preferred_username) is trusted when
 // the provider omits the claim (e.g. Entra, whose tenant owns the address).
-func oidcSocialIdentity(ctx context.Context, verifier *oidc.IDTokenVerifier, clientID string, tok *oauth2.Token, wantNonce string, assumeVerified bool) (subject, email, name string, err error) {
+func oidcSocialIdentity(ctx context.Context, verifier *oidc.IDTokenVerifier, clientID string, tok *oauth2.Token, wantNonce string, assumeVerified, upnEmail bool) (subject, email, name string, err error) {
 	rawID, ok := tok.Extra("id_token").(string)
 	if !ok || verifier == nil {
 		return "", "", "", errors.New("no id_token in the provider response")
@@ -123,7 +129,7 @@ func oidcSocialIdentity(ctx context.Context, verifier *oidc.IDTokenVerifier, cli
 	// assumeVerified only fills in for an ABSENT claim (the pointer is nil); an explicit
 	// email_verified:false is always honored — a provider that says "not verified" is never trusted.
 	if cl.EmailVerified == nil && assumeVerified {
-		if email == "" && strings.Contains(cl.PreferredUsername, "@") {
+		if email == "" && upnEmail && strings.Contains(cl.PreferredUsername, "@") {
 			email = cl.PreferredUsername // Entra puts the UPN (an email) here when email is absent
 		}
 		verified = email != ""

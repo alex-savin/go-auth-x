@@ -165,19 +165,6 @@ func (a *Authenticator) defaultOrgClaims(userID string) (orgID, role string) {
 	return ms[0].Org.ID, ms[0].Role
 }
 
-// defaultOrgClaimsForSub is defaultOrgClaims for mint sites that only hold the subject (OIDC
-// callback, 2FA completion). Best-effort: any miss yields no active org, never an error.
-func (a *Authenticator) defaultOrgClaimsForSub(sub string) (orgID, role string) {
-	if !a.OrgsEnabled() {
-		return "", ""
-	}
-	u, err := a.creds.UserBySub(sub)
-	if err != nil {
-		return "", ""
-	}
-	return a.defaultOrgClaims(u.ID)
-}
-
 // liveOrgMember resolves the gated session's credential user AND their LIVE role in the active org.
 // The cookie only names the org — membership and role are re-checked against the store on every
 // call, so a removal or demotion takes effect immediately instead of riding out the session TTL

@@ -158,7 +158,9 @@ func idStr(id uint) string { return strconv.FormatUint(uint64(id), 10) }
 // no-op for idempotent deletes — never index a map with a coerced 0.
 func parseID(s string) (uint, bool) {
 	n, err := strconv.ParseUint(s, 10, 64)
-	if err != nil || n == 0 {
+	// Canonical form only: "01" must not name the entity "1" (it would slip past a string
+	// comparison of ids, e.g. the last-owner guard), nor may a 64-bit id wrap a 32-bit uint.
+	if err != nil || n == 0 || strconv.FormatUint(n, 10) != s || uint64(uint(n)) != n {
 		return 0, false
 	}
 	return uint(n), true
@@ -364,6 +366,10 @@ func (s *Store) SetPasswordHash(userID, hash, algo string) error {
 	defer s.mu.Unlock()
 	n, ok := parseID(userID)
 	if !ok {
+		return nil
+	}
+	if hash == "" { // removes the password (see authx.CredentialStore.SetPasswordHash)
+		delete(s.passwords, n)
 		return nil
 	}
 	s.passwords[n] = struct{ hash, algo string }{hash, algo}
@@ -604,7 +610,11 @@ func (s *Store) Authorizer() authx.Authorizer { return &authorizer{s} }
 type authorizer struct{ s *Store }
 
 func (a *authorizer) Authorize(_ context.Context, id authx.Identity) (string, error) {
-	_, err := a.s.UpsertUserOnLogin(id.Subject, id.Email, id.Name, id.EmailVerified)
+	email := id.Email
+	if id.Local { // the stored address, read earlier: writing it back could undo an email change
+		email = ""
+	}
+	_, err := a.s.UpsertUserOnLogin(id.Subject, email, id.Name, id.EmailVerified)
 	return "", err
 }
 
@@ -616,20 +626,25 @@ func (s *Store) UpsertUserOnLogin(sub, email, name string, emailVerified bool) (
 	defer s.mu.Unlock()
 	email = norm(email)
 	if u := s.findBySub(sub); u != nil {
-		// Uphold the one-user-per-email invariant gormstore enforces with a unique index: refuse to
-		// move this row onto an email another row already owns.
-		if email != u.email {
+		switch {
+		case email == "": // an identity that asserts no address leaves the stored one alone
+		case email != u.email:
+			// Uphold the one-user-per-email invariant gormstore enforces with a unique index: refuse
+			// to move this row onto an email another row already owns.
 			if other := s.findByEmail(email); other != nil && other.id != u.id {
 				return nil, authx.ErrEmailConflict
 			}
-		}
-		u.email, u.name = email, name
-		if emailVerified {
+			// A new address is exactly as verified as this assertion proves — verification of the
+			// old one doesn't carry over.
+			u.email, u.emailVerified = email, emailVerified
+		case emailVerified:
 			u.emailVerified = true
 		}
+		u.name = name
 		return view(u), nil
 	}
-	if existing := s.findByEmail(email); existing != nil {
+	// No address, no account to link: an empty email never matches another row.
+	if existing := s.findByEmail(email); email != "" && existing != nil {
 		bootstrap := strings.HasPrefix(existing.sub, "bootstrap:")
 		if bootstrap || existing.emailVerified {
 			// Rebind a verified row to a new subject only when THIS login proved the email; an
@@ -638,9 +653,13 @@ func (s *Store) UpsertUserOnLogin(sub, email, name string, emailVerified bool) (
 			if !bootstrap && !emailVerified {
 				return nil, authx.ErrEmailConflict
 			}
+			s.moveSubjectLocked(existing.sub, sub)
 			existing.sub, existing.name = sub, name
 			if emailVerified {
 				existing.emailVerified = true
+			}
+			if bootstrap { // a placeholder's claimant gets no credential someone else put on it
+				delete(s.passwords, existing.id)
 			}
 			return view(existing), nil
 		}
@@ -659,6 +678,7 @@ func (s *Store) UpsertUserOnLogin(sub, email, name string, emailVerified bool) (
 
 // deleteUserCascadeLocked removes a user + everything keyed to it. Caller holds s.mu.
 func (s *Store) deleteUserCascadeLocked(id uint) {
+	s.revokeUserSessionsLocked(id) // before the row goes: sessions are matched by its subject too
 	delete(s.users, id)
 	delete(s.passwords, id)
 	delete(s.memberships, id)
@@ -684,12 +704,53 @@ func (s *Store) deleteUserCascadeLocked(id uint) {
 		}
 	}
 	s.tokens = kept
-	// Tombstone (do not delete) the user's sessions so IsRevoked keeps denying them on other devices
-	// after a hard delete — deleting would make an absent SID read as "not revoked". (Reclaim targets
-	// have no sessions, so this is a no-op for the squatter-reclaim caller.)
+}
+
+// revokeUserSessionsLocked tombstones (never deletes: an absent SID reads as "not revoked") every
+// session of a user — recorded under their id, or under their subject (an OIDC session records no id).
+// Caller holds s.mu.
+func (s *Store) revokeUserSessionsLocked(id uint) {
+	sub := ""
+	if u := s.users[id]; u != nil {
+		sub = u.sub
+	}
 	for _, r := range s.sessions {
-		if r.rec.UserID == idStr(id) {
+		if r.rec.UserID == idStr(id) || (sub != "" && r.rec.Subject == sub) {
 			r.revoked = true
+		}
+	}
+}
+
+// moveSubjectLocked re-keys a user's sessions and OAuth provider records from an old subject to the
+// new one their account was rebound to, so revoking or listing by the account's subject still finds
+// them. Caller holds s.mu.
+func (s *Store) moveSubjectLocked(from, to string) {
+	if from == "" || from == to {
+		return
+	}
+	for _, r := range s.sessions {
+		if r.rec.Subject == from {
+			r.rec.Subject = to
+		}
+	}
+	for _, g := range s.oauthGrants {
+		if g.Subject == from {
+			g.Subject = to
+		}
+	}
+	for _, t := range s.oauthAccess {
+		if t.Subject == from {
+			t.Subject = to
+		}
+	}
+	for _, t := range s.oauthRefresh {
+		if t.Subject == from {
+			t.Subject = to
+		}
+	}
+	for _, r := range s.oauthRequests {
+		if r.Subject == from {
+			r.Subject = to
 		}
 	}
 }

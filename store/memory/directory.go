@@ -219,6 +219,9 @@ func (s *Store) SetUserDisabled(userID string, disabled bool) error {
 	}
 	if u := s.users[n]; u != nil {
 		u.disabled = disabled
+		if disabled { // a deprovisioned user's sessions end now, not when their cookies expire
+			s.revokeUserSessionsLocked(n)
+		}
 	}
 	return nil
 }
@@ -233,6 +236,7 @@ func (s *Store) SetUserBan(userID string, banned bool, until *time.Time, reason 
 	if u := s.users[n]; u != nil {
 		u.banned = banned
 		if banned {
+			s.revokeUserSessionsLocked(n) // a banned user's sessions end now
 			u.banReason = reason
 			if until != nil {
 				u.bannedUntil = *until

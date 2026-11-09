@@ -20,6 +20,18 @@ import (
 // primary passkey login). It is carried into the 2fa-pending cookie so passkey-as-2FA can refuse the
 // SAME credential as the second factor (a different passkey, or TOTP/recovery, is still accepted).
 func (a *Authenticator) completeLogin(c *reqCtx, id Identity, remember bool, firstFactorCred []byte) (twoFactorRequired bool, err error) {
+	return a.completeLoginWith(c, id, remember, firstFactorCred, "")
+}
+
+// loginBlockedError refuses a session to a user who may not sign in (disabled or banned); its
+// message is safe to show.
+type loginBlockedError struct{ msg string }
+
+func (e loginBlockedError) Error() string { return e.msg }
+
+// completeLoginWith is completeLogin carrying the IdP's raw id_token (the OIDC callback's), kept in
+// the session for RP-initiated logout. A login that stops for the second factor drops it.
+func (a *Authenticator) completeLoginWith(c *reqCtx, id Identity, remember bool, firstFactorCred []byte, idToken string) (twoFactorRequired bool, err error) {
 	var role string
 	if a.authorizer != nil {
 		r, aerr := a.authorizer.Authorize(c.Request.Context(), id)
@@ -33,20 +45,26 @@ func (a *Authenticator) completeLogin(c *reqCtx, id Identity, remember bool, fir
 	if a.creds != nil {
 		u, _ = a.creds.UserBySub(id.Subject)
 	}
+	// Every method funnels here, so this is the one place a disabled or banned user is stopped
+	// (callers check too, with their own responses).
+	if blocked, msg := u.loginBlocked(); blocked {
+		return false, loginBlockedError{msg}
+	}
 	// Enrich the session with the user's GLOBAL groups (for per-group access control) when a
 	// directory is wired and the upstream identity didn't already carry groups (e.g. local/social
 	// logins; OIDC logins keep the IdP-asserted groups). Org-scoped groups are filtered out —
 	// their names collide across orgs, so they are checked live (RequireOrgGroupsHTTP), never
 	// baked into the cookie.
+	dirGroups := false
 	if a.dir != nil && u != nil && len(id.Groups) == 0 {
 		if gs, gerr := a.dir.UserGroups(u.ID); gerr == nil {
-			id.Groups = groupNames(globalGroups(gs))
+			id.Groups, dirGroups = groupNames(globalGroups(gs)), true
 		}
 	}
 	// Second-factor gate: if the user has confirmed TOTP, don't mint the session yet — stash the
 	// half-authenticated identity in a signed, short-lived pending cookie and require a code.
 	if u != nil && a.userHasTOTP(u.ID) {
-		pending, perr := a.mintPending(Identity{Subject: id.Subject, Email: id.Email, Name: id.Name, Groups: id.Groups}, role, remember, firstFactorCred)
+		pending, perr := a.mintPending(Identity{Subject: id.Subject, Email: id.Email, Name: id.Name, Groups: id.Groups}, dirGroups, role, remember, firstFactorCred)
 		if perr != nil {
 			return false, perr
 		}
@@ -66,7 +84,7 @@ func (a *Authenticator) completeLogin(c *reqCtx, id Identity, remember bool, fir
 	}
 	sid := a.newSessionID()
 	session, serr := mintSessionWith(a.cfg.SessionSecret, SessionClaims{
-		Email: id.Email, Name: id.Name, Groups: id.Groups, Role: role, SID: sid, Org: orgID, OrgRole: orgRole,
+		Email: id.Email, Name: id.Name, Groups: id.Groups, DirGroups: dirGroups, Role: role, IDToken: idToken, SID: sid, Org: orgID, OrgRole: orgRole,
 	}, id.Subject, time.Now(), ttl)
 	if serr != nil {
 		return false, serr

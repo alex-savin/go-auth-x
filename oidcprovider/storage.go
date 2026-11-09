@@ -66,7 +66,7 @@ func (s *storage) CreateAuthRequest(ctx context.Context, ar *oidc.AuthRequest, _
 		CreatedAt:           time.Now().UTC(),
 	}
 	if ar.MaxAge != nil {
-		d := time.Duration(*ar.MaxAge) * time.Second
+		d := time.Duration(min(*ar.MaxAge, 10*365*24*3600)) * time.Second // a decade: no overflow
 		r.MaxAge = &d
 	}
 	// Public clients must use PKCE (OAuth 2.1); S256 only.
@@ -324,13 +324,11 @@ func (s *storage) revokeGrant(id, why string) {
 	}
 }
 
-func (s *storage) TerminateSession(_ context.Context, userID, clientID string) error {
-	if userID == "" || clientID == "" {
-		return nil
-	}
-	_, err := s.st().RevokeOAuthGrants(authx.OAuthGrantFilter{ClientID: clientID, Subject: userID}, time.Now().UTC())
-	return err
-}
+// TerminateSession is RP-initiated logout's hook. It revokes nothing: the go-auth-x session is the
+// app's (it signs the user out), and a logout request — an unauthenticated GET that only needs an
+// id_token_hint, even an expired one — must not end grants (OIDC Core §11: offline access outlives
+// logout). Grants end through RevokeUser/RevokeRef/RevokeGrant or the client's own revocation.
+func (s *storage) TerminateSession(context.Context, string, string) error { return nil }
 
 // GetRefreshTokenInfo identifies a refresh token for revocation: "rt:" + its hash.
 func (s *storage) GetRefreshTokenInfo(_ context.Context, clientID, token string) (string, string, error) {

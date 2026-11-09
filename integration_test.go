@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -114,6 +115,7 @@ type client struct {
 	t       *testing.T
 	h       http.Handler
 	cookies map[string]string
+	remote  string // the request's remote IP, when set
 }
 
 func newClient(t *testing.T, a *authx.Authenticator) *client {
@@ -132,6 +134,9 @@ func (c *client) do(method, path string, body any) *httptest.ResponseRecorder {
 	}
 	for k, v := range c.cookies {
 		r.AddCookie(&http.Cookie{Name: k, Value: v})
+	}
+	if c.remote != "" {
+		r.RemoteAddr = net.JoinHostPort(c.remote, "4242")
 	}
 	if method != http.MethodGet {
 		if tok := c.cookies["sweep_csrf"]; tok != "" {
@@ -481,15 +486,23 @@ func TestCSRFRequiredOnStateChange(t *testing.T) {
 	}
 }
 
+// Changing to a taken address answers like a free one (no account-existence oracle), changes nothing,
+// and tells the address's owner instead.
 func TestChangeEmail_Conflict(t *testing.T) {
-	a, s, _ := newTestAuth(t)
-	seedUser(t, s, "old@x.com", "correct-horse-9!", true)
+	a, s, m := newTestAuth(t)
+	u := seedUser(t, s, "old@x.com", "correct-horse-9!", true)
 	seedUser(t, s, "taken@x.com", "", true)
 	c := newClient(t, a)
 	c.login("old@x.com", "correct-horse-9!")
 	c.reauth("correct-horse-9!")
-	if w := c.do("POST", "/auth/api/account/email", map[string]any{"newEmail": "taken@x.com"}); w.Code != http.StatusConflict {
-		t.Fatalf("changing to a taken email must be 409, got %d: %s", w.Code, w.Body.String())
+	if w := c.do("POST", "/auth/api/account/email", map[string]any{"newEmail": "taken@x.com"}); w.Code != http.StatusOK {
+		t.Fatalf("changing to a taken email must answer like a free one, got %d: %s", w.Code, w.Body.String())
+	}
+	if got := m.waitFor(t, "already belongs to an account"); got.to != "taken@x.com" {
+		t.Fatalf("the notice went to %q", got.to)
+	}
+	if got, _ := s.UserByID(u.ID); got.Email != "old@x.com" {
+		t.Fatalf("email changed to %q", got.Email)
 	}
 }
 

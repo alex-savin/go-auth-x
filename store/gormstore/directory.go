@@ -302,7 +302,15 @@ func (s *Store) SetUserDisabled(userID string, disabled bool) error {
 	if !ok {
 		return authx.ErrNoUser
 	}
-	return s.db.Model(&User{}).Where("id = ?", n).Update("disabled", disabled).Error
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&User{}).Where("id = ?", n).Update("disabled", disabled).Error; err != nil {
+			return err
+		}
+		if disabled { // a deprovisioned user's sessions end now, not when their cookies expire
+			return revokeUserSessions(tx, n)
+		}
+		return nil
+	})
 }
 
 func (s *Store) SetUserBan(userID string, banned bool, until *time.Time, reason string) error {
@@ -315,7 +323,15 @@ func (s *Store) SetUserBan(userID string, banned bool, until *time.Time, reason 
 		updates["banned_until"] = nil
 		updates["ban_reason"] = ""
 	}
-	return s.db.Model(&User{}).Where("id = ?", n).Updates(updates).Error
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&User{}).Where("id = ?", n).Updates(updates).Error; err != nil {
+			return err
+		}
+		if banned { // a banned user's sessions end now
+			return revokeUserSessions(tx, n)
+		}
+		return nil
+	})
 }
 
 // UpsertExternalUser provisions a directory-sourced user (LDAP/SCIM) via the safe linking rule.

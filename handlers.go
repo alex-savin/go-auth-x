@@ -168,7 +168,7 @@ func (a *Authenticator) Callback(c *reqCtx) {
 
 	var claims struct {
 		Email             string   `json:"email"`
-		EmailVerified     bool     `json:"email_verified"`
+		EmailVerified     *bool    `json:"email_verified"` // pointer: distinguish absent from false
 		Name              string   `json:"name"`
 		PreferredUsername string   `json:"preferred_username"`
 		Groups            []string `json:"groups"`
@@ -181,10 +181,21 @@ func (a *Authenticator) Callback(c *reqCtx) {
 	}
 
 	// Trust the token's email only when the issuer proved it (email_verified), or OIDC_ASSUME_VERIFIED
-	// is set for a single trusted issuer. Without this an IdP that permits unverified email claims
-	// could hand an attacker a session under a victim's address (matches the social login gate).
-	if claims.Email != "" && !(claims.EmailVerified || a.cfg.OIDCAssumeVerified) {
+	// is set for a single trusted issuer AND the claim is absent — an explicit email_verified:false is
+	// always honored. Without this an IdP that permits unverified email claims could hand an attacker a
+	// session under a victim's address (matches the social login gate). No email is never verified.
+	verified := claims.EmailVerified != nil && *claims.EmailVerified ||
+		claims.EmailVerified == nil && a.cfg.OIDCAssumeVerified
+	verified = verified && claims.Email != ""
+	if claims.Email != "" && !verified {
 		c.JSON(http.StatusUnauthorized, H{"error": "your email is not verified with this provider"})
+		return
+	}
+
+	// The IdP's subject keys the account directly, so it must not name one of the library's own
+	// subject namespaces ("scim:alice" would be the SCIM-provisioned Alice).
+	if reservedSubject(idToken.Subject) {
+		c.JSON(http.StatusUnauthorized, H{"error": "this identity can't sign in here"})
 		return
 	}
 
@@ -198,42 +209,39 @@ func (a *Authenticator) Callback(c *reqCtx) {
 		name = claims.PreferredUsername
 	}
 
-	// Optional post-login hook (multi-tenant provisioning / fine-grained allow).
-	var role string
-	if a.authorizer != nil {
-		role, err = a.authorizer.Authorize(ctx, Identity{
-			Subject: idToken.Subject, Email: claims.Email, Name: name, Groups: claims.Groups,
-			EmailVerified: claims.EmailVerified || a.cfg.OIDCAssumeVerified,
-		})
-		if err != nil {
-			if errors.Is(err, ErrAccessDenied) {
-				c.JSON(http.StatusForbidden, H{"error": "your account is not authorized"})
-			} else {
-				c.JSON(http.StatusInternalServerError, H{"error": "authorization failed"})
-			}
-			return
+	// The same funnel as every other method: the Authorizer (provisioning / fine-grained allow), the
+	// disabled/banned refusal, the user's second factor, and session recording.
+	tfr, err := a.completeLoginWith(c, Identity{
+		Subject: idToken.Subject, Email: claims.Email, Name: name, Groups: claims.Groups, EmailVerified: verified,
+	}, false, nil, rawID)
+	var blocked loginBlockedError
+	switch {
+	case errors.Is(err, ErrAccessDenied):
+		c.JSON(http.StatusForbidden, H{"error": "your account is not authorized"})
+		return
+	case errors.As(err, &blocked):
+		c.JSON(http.StatusForbidden, H{"error": blocked.msg})
+		return
+	case err != nil:
+		c.JSON(http.StatusInternalServerError, H{"error": "sign-in failed"})
+		return
+	}
+	if tfr {
+		c.Redirect(http.StatusFound, withMFAMarker(fc.Next))
+		return
+	}
+	c.Redirect(http.StatusFound, fc.Next)
+}
+
+// reservedSubject reports whether an IdP subject falls in a namespace the library mints subjects in
+// (local accounts, bootstrap placeholders, SCIM and LDAP provisioning, social identities).
+func reservedSubject(sub string) bool {
+	for _, p := range []string{"local:", "bootstrap:", "scim:", "ldap:", "social:"} {
+		if strings.HasPrefix(strings.ToLower(sub), p) {
+			return true
 		}
 	}
-
-	// Active-org enrichment (see completeLogin) — effective only when a CredentialStore also
-	// persists OIDC users (defaultOrgClaimsForSub resolves the subject through it).
-	orgID, orgRole := a.defaultOrgClaimsForSub(idToken.Subject)
-	sid := a.newSessionID()
-	session, err := mintSessionWith(a.cfg.SessionSecret, SessionClaims{
-		Email: claims.Email, Name: name, Groups: claims.Groups, Role: role, IDToken: rawID, SID: sid, Org: orgID, OrgRole: orgRole,
-	}, idToken.Subject, time.Now(), sessionTTL)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, H{"error": "session creation failed"})
-		return
-	}
-	// Record before the cookie (see completeLogin) so a lost session-store write fails the login.
-	if rerr := a.recordSession(c.Request, sid, idToken.Subject, "", sessionTTL); rerr != nil {
-		c.JSON(http.StatusInternalServerError, H{"error": "session creation failed"})
-		return
-	}
-	a.setCookie(c, sessionCookie, session, int(sessionTTL/time.Second))
-	a.issueCSRF(c) // parity with the in-app login funnel — the SPA needs a CSRF cookie for its first POST
-	c.Redirect(http.StatusFound, fc.Next)
+	return false
 }
 
 // Logout clears the session and, if the IdP advertises one, redirects to its

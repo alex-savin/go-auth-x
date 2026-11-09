@@ -11,6 +11,7 @@ package scim
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -489,6 +490,31 @@ func (s *Server) putUser(w http.ResponseWriter, r *http.Request) {
 	if in.Name != nil && in.Name.Formatted != "" {
 		name = in.Name.Formatted
 	}
+	active := activeWithDefault(raw)
+	// Only an account SCIM provisioned has an address SCIM may re-point. Another one — a local
+	// password account, an OIDC or social sign-in, the owner — keeps its email: moving it would hand
+	// that account's password reset and magic links to whoever the new address belongs to.
+	if normEmail(email) != normEmail(cur.Email) && !strings.HasPrefix(cur.Sub, "scim:") {
+		scimErrorType(w, http.StatusBadRequest, "mutability", "the email of an account not provisioned by SCIM can't be changed here")
+		return
+	}
+	// A deprovisioning PUT only deprovisions: refused (an org owner), it must not have changed anything.
+	if !active {
+		if derr := s.dir.SetUserDisabled(cur.ID, true); errors.Is(derr, authx.ErrOrgOwnerDeprovision) {
+			scimError(w, http.StatusForbidden, derr.Error())
+			return
+		} else if derr != nil {
+			s.scimInternal(w, "putUser", derr)
+			return
+		}
+		u, uerr := s.dir.UserByID(cur.ID)
+		if uerr != nil { // an org-scoped directory removes a deprovisioned user from view (see patchUser)
+			u = cur
+			u.Disabled = true
+		}
+		writeResource(w, http.StatusOK, s.toSCIMUser(u), userVersion(u))
+		return
+	}
 	if _, uerr := s.dir.UpsertExternalUser(cur.Sub, email, name, true); uerr != nil { // preserve Sub
 		if errors.Is(uerr, authx.ErrEmailConflict) { // PUT would move this user onto another's email
 			scimErrorType(w, http.StatusConflict, "uniqueness", "a user with this email already exists")
@@ -497,19 +523,20 @@ func (s *Server) putUser(w http.ResponseWriter, r *http.Request) {
 		s.scimInternal(w, "putUser", uerr)
 		return
 	}
-	if derr := s.dir.SetUserDisabled(cur.ID, !activeWithDefault(raw)); errors.Is(derr, authx.ErrOrgOwnerDeprovision) {
-		scimError(w, http.StatusForbidden, derr.Error())
+	if derr := s.dir.SetUserDisabled(cur.ID, false); derr != nil {
+		s.scimInternal(w, "putUser", derr)
 		return
 	}
 	u, uerr := s.dir.UserByID(cur.ID)
 	if uerr != nil {
-		// See patchUser: an org-scoped directory removes a deprovisioned user from view — render
-		// the pre-PUT resource with the applied state instead of dereferencing a miss.
-		u = cur
-		u.Disabled = !activeWithDefault(raw)
+		s.scimInternal(w, "putUser", uerr)
+		return
 	}
 	writeResource(w, http.StatusOK, s.toSCIMUser(u), userVersion(u))
 }
+
+// normEmail compares addresses as the stores key them: trimmed, lower-cased.
+func normEmail(e string) string { return strings.ToLower(strings.TrimSpace(e)) }
 
 func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
 	id := pathID(r)
@@ -549,7 +576,17 @@ func (s *Server) listGroups(w http.ResponseWriter, r *http.Request) {
 		filtered := gs[:0]
 		for i := range gs {
 			g := gs[i]
-			if p(groupResource(&g, func() []authx.AuthUser { m, _ := s.dir.GroupMembers(g.ID); return m })) {
+			// Members load once per group, however many members[...] terms the filter has.
+			var members []authx.AuthUser
+			loaded := false
+			load := func() []authx.AuthUser {
+				if !loaded {
+					members, _ = s.dir.GroupMembers(g.ID)
+					loaded = true
+				}
+				return members
+			}
+			if p(groupResource(&g, load)) {
 				filtered = append(filtered, gs[i])
 			}
 		}
@@ -794,7 +831,16 @@ func (s *Server) deleteGroup(w http.ResponseWriter, r *http.Request) {
 // (the /Bulk entry is already authenticated, so sub-requests skip auth). Operations apply in order;
 // a failing op records its status and the batch continues (failOnErrors is not honored — a v0
 // simplification). bulkId cross-references in payloads are not resolved.
+// bulkOpKey marks a request dispatched by /Bulk, which may not itself be a /Bulk: however its path is
+// spelled ("/Bulk?", "/%42ulk", an absolute URL), a nested Bulk would multiply the operation cap and
+// recurse with the whole body held at each level.
+type bulkOpKey struct{}
+
 func (s *Server) bulk(w http.ResponseWriter, r *http.Request) {
+	if r.Context().Value(bulkOpKey{}) != nil {
+		scimError(w, http.StatusBadRequest, "a bulk operation can't be a bulk request")
+		return
+	}
 	var req struct {
 		Operations []struct {
 			Method string          `json:"method"`
@@ -819,9 +865,17 @@ func (s *Server) bulk(w http.ResponseWriter, r *http.Request) {
 				"response": json.RawMessage(`{"detail":"unsupported bulk operation"}`)})
 			continue
 		}
-		rec := httptest.NewRecorder()
-		sub := httptest.NewRequest(strings.ToUpper(op.Method), op.Path, bytes.NewReader(op.Data))
+		// A path relative to the SCIM root, nothing else; a malformed path or method is this operation's
+		// 400, not a panic. The sub-request runs in the client's context: it stops if they go away.
+		sub, serr := http.NewRequestWithContext(context.WithValue(r.Context(), bulkOpKey{}, true),
+			strings.ToUpper(op.Method), op.Path, bytes.NewReader(op.Data))
+		if serr != nil || !strings.HasPrefix(op.Path, "/") || sub.URL.IsAbs() || sub.URL.Host != "" {
+			results = append(results, map[string]any{"method": op.Method, "status": "400",
+				"response": json.RawMessage(`{"detail":"invalid bulk operation"}`)})
+			continue
+		}
 		sub.Header.Set("Content-Type", "application/scim+json")
+		rec := httptest.NewRecorder()
 		s.mux.ServeHTTP(rec, sub)
 
 		res := map[string]any{"method": strings.ToUpper(op.Method), "status": strconv.Itoa(rec.Code)}

@@ -28,7 +28,7 @@ func (a *Authenticator) AccountInfo(c *reqCtx) {
 	for _, p := range pks {
 		views = append(views, passkeyView{ID: p.ID, Name: p.Name, CreatedAt: p.CreatedAt, LastUsedAt: p.LastUsedAt})
 	}
-	_, _, perr := a.creds.PasswordHash(au.ID)
+	_, _, perr := a.passwordHash(au.ID)
 	oauthIDs, _ := a.creds.OAuthIdentities(au.ID)
 	c.JSON(http.StatusOK, H{
 		"email":           au.Email,
@@ -45,7 +45,7 @@ func (a *Authenticator) AccountInfo(c *reqCtx) {
 // signInMethods counts a user's independent sign-in methods: a password, each passkey, and each linked
 // OAuth provider. Used to refuse removing the LAST one (which would lock the user out).
 func (a *Authenticator) signInMethods(userID string) (total int) {
-	if _, _, perr := a.creds.PasswordHash(userID); perr == nil {
+	if _, _, perr := a.passwordHash(userID); perr == nil {
 		total++
 	}
 	pks, _ := a.creds.Passkeys(userID)
@@ -68,11 +68,22 @@ func (a *Authenticator) AccountSetPassword(c *reqCtx) {
 		c.JSON(http.StatusBadRequest, H{"error": "invalid request"})
 		return
 	}
-	if hash, _, perr := a.creds.PasswordHash(au.ID); perr == nil {
+	if hash, _, perr := a.passwordHash(au.ID); perr == nil {
+		// Checking the current password is a password guess: throttled and audited like /auth/reauth.
+		if (a.ipLimiter != nil && !a.ipLimiter.Allow("reauth:"+c.rateIP())) ||
+			(a.acctLimiter != nil && !a.acctLimiter.Allow("reauth:"+au.Sub)) {
+			c.tooMany("too many attempts — wait and try again")
+			return
+		}
 		if bcrypt.CompareHashAndPassword([]byte(hash), []byte(body.Current)) != nil {
+			a.creds.RecordAudit(au.ID, au.Email, c.ClientIP(), "password", "password_change", false, "")
 			c.JSON(http.StatusForbidden, H{"error": "current password is incorrect"})
 			return
 		}
+	} else if !a.factorChangeAllowed(c, au) {
+		// A first password is a new factor (see factorChangeAllowed): a TOTP user steps up first.
+		c.JSON(http.StatusForbidden, H{"error": "reauth_required"})
+		return
 	}
 	if msg := a.passwordPolicyError(c.Request.Context(), body.New, au.Email); msg != "" {
 		c.JSON(http.StatusBadRequest, H{"error": msg})
@@ -82,6 +93,10 @@ func (a *Authenticator) AccountSetPassword(c *reqCtx) {
 	if herr != nil || a.creds.SetPasswordHash(au.ID, hash, "bcrypt") != nil {
 		c.JSON(http.StatusInternalServerError, H{"error": "could not update password"})
 		return
+	}
+	// The other sessions end (a changed password is often a response to a stolen one); this one stays.
+	if sc := a.sessionOf(c); sc != nil {
+		a.revokeOtherSessions(au.Sub, sc.SID)
 	}
 	a.creds.RecordAudit(au.ID, au.Email, c.ClientIP(), "password", "password_changed", true, "")
 	c.JSON(http.StatusOK, H{"ok": true})
@@ -186,5 +201,8 @@ func (a *Authenticator) OAuthUnlink(c *reqCtx) {
 		return
 	}
 	a.creds.RecordAudit(au.ID, au.Email, c.ClientIP(), "oauth", "unlinked", true, provider)
+	// Unlinked is disconnected: the provider no longer signs in to this account by email until the user
+	// reconnects it while signed in (see resolveSocialUserFor). A mark already there is fine.
+	_ = a.creds.CreateToken(purposeUnlinkedOAuth, au.ID, au.Email, unlinkMark(au.ID, provider), time.Now().AddDate(100, 0, 0))
 	c.JSON(http.StatusOK, H{"ok": true})
 }

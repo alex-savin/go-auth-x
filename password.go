@@ -99,24 +99,30 @@ func (a *Authenticator) PasswordSignup(c *reqCtx) {
 	case err != nil:
 		c.JSON(http.StatusInternalServerError, H{"error": "could not create account"})
 		return
-	case u.EmailVerified:
-		// Account already exists and is verified: do NOT touch its password. Nudge them to
+	case u.EmailVerified || strings.HasPrefix(u.Sub, "bootstrap:"):
+		// Account already exists and is verified (or is an operator-seeded placeholder its owner
+		// claims by signing in): do NOT touch its password. Nudge them to
 		// sign in / reset instead, and still answer generically. Burn a bcrypt hash first so this
 		// branch costs ~the same as the new-account path below — otherwise the response time would
 		// reveal that the address is already registered.
 		_, _ = bcrypt.GenerateFromPassword([]byte(body.Password), bcryptCost)
 		base := a.baseURL()
-		_ = a.sendAuthEmail(email, "You already have an account",
-			"You already have an account",
-			"Someone tried to sign up with this email. If it was you, just sign in — or reset your password if you've forgotten it.",
-			"Sign in", base+"/login",
-			"If you didn't try to sign up, you can ignore this email.")
+		if a.acctLimiter == nil || a.acctLimiter.Allow("signup-mail:"+email) { // no mail flood to one address
+			_ = a.sendAuthEmail(email, "You already have an account",
+				"You already have an account",
+				"Someone tried to sign up with this email. If it was you, just sign in — or reset your password if you've forgotten it.",
+				"Sign in", base+"/login",
+				"If you didn't try to sign up, you can ignore this email.")
+		}
 		a.creds.RecordAudit(u.ID, email, c.ClientIP(), "password", "signup_existing", false, "")
 		c.JSON(http.StatusOK, H{"ok": true, "message": generic})
 		return
 	}
 
-	// New or still-unverified account: (re)set the password and send a fresh verify link.
+	// New or still-unverified account: (re)set the password and send a fresh verify link. The
+	// password is unproven until the address is: anyone may sign up with any address, so the verify
+	// link keeps it only when opened in THIS browser with THIS password (setSignupBinding); any other
+	// mailbox proof drops it (claimMailbox).
 	hash, herr := hashPassword(body.Password)
 	if herr != nil {
 		c.JSON(http.StatusInternalServerError, H{"error": "could not create account"})
@@ -126,7 +132,10 @@ func (a *Authenticator) PasswordSignup(c *reqCtx) {
 		c.JSON(http.StatusInternalServerError, H{"error": "could not create account"})
 		return
 	}
-	a.sendVerifyEmail(u.ID, email)
+	a.setSignupBinding(c, u.ID, hash)
+	if a.acctLimiter == nil || a.acctLimiter.Allow("signup-mail:"+email) { // no mail flood to one address
+		a.sendVerifyEmail(u.ID, email)
+	}
 	a.creds.RecordAudit(u.ID, email, c.ClientIP(), "password", "signup", true, "")
 	c.JSON(http.StatusOK, H{"ok": true, "message": generic})
 }
@@ -170,7 +179,7 @@ func (a *Authenticator) PasswordLogin(c *reqCtx) {
 		c.JSON(http.StatusInternalServerError, H{"error": "login failed"})
 		return
 	}
-	hash, _, perr := a.creds.PasswordHash(u.ID)
+	hash, _, perr := a.passwordHash(u.ID)
 	if errors.Is(perr, ErrNoCredential) {
 		_ = bcrypt.CompareHashAndPassword(dummyHash, []byte(body.Password))
 		a.creds.RecordAudit(u.ID, email, ip, "password", "login", false, "no_password")
@@ -207,7 +216,7 @@ func (a *Authenticator) PasswordLogin(c *reqCtx) {
 		return
 	}
 	a.creds.RecordAudit(u.ID, email, ip, "password", "login", true, "")
-	tfr, err := a.completeLogin(c, Identity{Subject: u.Sub, Email: u.Email, Name: u.Name, EmailVerified: true}, body.Remember, nil)
+	tfr, err := a.completeLogin(c, Identity{Subject: u.Sub, Email: u.Email, Name: u.Name, EmailVerified: true, Local: true}, body.Remember, nil)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, H{"error": "login failed"})
 		return
@@ -265,6 +274,13 @@ func (a *Authenticator) PasswordResetConfirm(c *reqCtx) {
 		c.JSON(http.StatusBadRequest, H{"error": "this reset link is invalid or has expired"})
 		return
 	}
+	// The link was mailed to an address; if the account has moved to another address since, the old
+	// mailbox no longer speaks for it.
+	u, uerr := a.creds.UserByEmail(claim.Email)
+	if uerr != nil || u.ID != claim.UserID {
+		c.JSON(http.StatusBadRequest, H{"error": "this reset link is invalid or has expired"})
+		return
+	}
 	if msg := a.passwordPolicyError(c.Request.Context(), body.Password, claim.Email); msg != "" {
 		c.JSON(http.StatusBadRequest, H{"error": msg})
 		return
@@ -280,6 +296,10 @@ func (a *Authenticator) PasswordResetConfirm(c *reqCtx) {
 		return
 	}
 	_ = a.creds.SetEmailVerified(claim.UserID, true)
+	// A reset is how someone takes their account back: every session it had ends, whoever holds it.
+	if a.sessions != nil {
+		_ = a.sessions.RevokeAllForUser(u.Sub)
+	}
 	a.creds.RecordAudit(claim.UserID, claim.Email, c.ClientIP(), "password", "reset", true, "")
 	c.JSON(http.StatusOK, H{"ok": true, "message": "Your password has been updated. You can now sign in."})
 }

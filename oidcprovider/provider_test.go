@@ -196,7 +196,7 @@ func (h *harness) exchange(clientID, code string) (int, map[string]any) {
 func (h *harness) connect(clientID, ref string) (access, refresh string) {
 	h.t.Helper()
 	id := h.authorize(clientID, nil)
-	next, err := h.p.Approve(context.Background(), id, h.user.Sub, oidcprovider.Decision{Scopes: []string{"tree:read"}, Ref: ref})
+	next, err := h.p.Approve(context.Background(), id, h.user.Sub, oidcprovider.Decision{Scopes: []string{"tree:read", "offline_access"}, Ref: ref})
 	if err != nil {
 		h.t.Fatal(err)
 	}
@@ -249,7 +249,7 @@ func TestFlow(t *testing.T) {
 	}
 
 	// Approved with less than asked: the token carries only that, and the app's reference.
-	next, err := h.p.Approve(ctx, id, h.user.Sub, oidcprovider.Decision{Scopes: []string{"tree:read"}, Ref: "conn-1"})
+	next, err := h.p.Approve(ctx, id, h.user.Sub, oidcprovider.Decision{Scopes: []string{"tree:read", "offline_access"}, Ref: "conn-1"})
 	if err != nil {
 		t.Fatal(err)
 	}

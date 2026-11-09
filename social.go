@@ -210,15 +210,23 @@ func (a *Authenticator) SocialCallback(c *reqCtx) {
 			c.JSON(http.StatusNotFound, H{"error": "provider not enabled"})
 			return
 		}
-		subject, email, name, err = oidcSocialIdentity(ctx, p.verifier, p.clientID, tok, fc.Nonce, p.assumeVerified)
+		subject, email, name, err = oidcSocialIdentity(ctx, p.verifier, p.clientID, tok, fc.Nonce, p.assumeVerified, p.upnEmail)
 		if err != nil {
 			c.JSON(http.StatusForbidden, H{"error": err.Error()}) // 403, matching the other providers' identity failures
 			return
 		}
 	}
 
-	au, err := a.resolveSocialUser(provider, subject, email, name)
+	signedInSub := ""
+	if sc := a.sessionOf(c); sc != nil {
+		signedInSub = sc.Subject
+	}
+	au, err := a.resolveSocialUserFor(provider, subject, email, name, signedInSub)
 	if err != nil {
+		if errors.Is(err, errProviderDisconnected) {
+			c.JSON(http.StatusConflict, H{"error": provider + " was disconnected from this account — sign in another way, then connect " + provider + " again"})
+			return
+		}
 		if errors.Is(err, ErrEmailConflict) {
 			c.JSON(http.StatusConflict, H{"error": "an account already exists for this email — sign in with your existing method first, then link " + provider})
 			return
@@ -231,7 +239,7 @@ func (a *Authenticator) SocialCallback(c *reqCtx) {
 		return
 	}
 	a.creds.RecordAudit(au.ID, au.Email, c.ClientIP(), provider, "login", true, "")
-	tfr, err := a.completeLogin(c, Identity{Subject: au.Sub, Email: au.Email, Name: au.Name, EmailVerified: true}, false, nil)
+	tfr, err := a.completeLogin(c, Identity{Subject: au.Sub, Email: au.Email, Name: au.Name, EmailVerified: true, Local: true}, false, nil)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, H{"error": "sign-in failed"})
 		return
@@ -247,6 +255,21 @@ func (a *Authenticator) SocialCallback(c *reqCtx) {
 // subject); else link to an existing VERIFIED-email user (safe — the provider proved the email);
 // else create a new user. An unverified, non-bootstrap email squatter is refused (no takeover).
 func (a *Authenticator) resolveSocialUser(provider, subject, email, name string) (*AuthUser, error) {
+	return a.resolveSocialUserFor(provider, subject, email, name, "")
+}
+
+// errProviderDisconnected refuses linking a provider the account's user disconnected.
+var errProviderDisconnected = errors.New("authx: this sign-in was disconnected from the account")
+
+// unlinkMark keys the "disconnected" record of a user's provider in the token store.
+func unlinkMark(userID, provider string) []byte {
+	return hashToken("unlinked|" + userID + "|" + provider)
+}
+
+// resolveSocialUserFor is resolveSocialUser for a request that may already be signed in as
+// signedInSub: disconnecting a provider stops it linking back by email (a compromised provider
+// account would otherwise walk back in), unless the account's user reconnects it while signed in.
+func (a *Authenticator) resolveSocialUserFor(provider, subject, email, name, signedInSub string) (*AuthUser, error) {
 	if u, err := a.creds.UserByOAuth(provider, subject); err == nil {
 		return u, nil
 	} else if !errors.Is(err, ErrNoUser) {
@@ -254,6 +277,12 @@ func (a *Authenticator) resolveSocialUser(provider, subject, email, name string)
 	}
 	if u, err := a.creds.UserByEmail(email); err == nil {
 		if u.EmailVerified {
+			if _, perr := a.creds.PeekToken(purposeUnlinkedOAuth, unlinkMark(u.ID, provider)); perr == nil {
+				if signedInSub != u.Sub {
+					return nil, errProviderDisconnected
+				}
+				_, _ = a.creds.ConsumeToken(purposeUnlinkedOAuth, unlinkMark(u.ID, provider)) // reconnected
+			}
 			if err := a.creds.LinkOAuth(u.ID, provider, subject, email); err != nil {
 				return nil, err
 			}

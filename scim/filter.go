@@ -216,6 +216,10 @@ func tokenize(s string) ([]token, error) {
 // overflow the stack (DoS). Every nested group re-enters parseOr, which enforces this.
 const maxFilterDepth = 40
 
+// maxFilterLen bounds a filter's length: every term is evaluated against every resource, so its size
+// multiplies the work of one request. Real IdP filters are a few terms long.
+const maxFilterLen = 4096
+
 type parser struct {
 	toks  []token
 	pos   int
@@ -230,6 +234,9 @@ func isKw(t token, kw string) bool { return t.kind == tkWord && strings.EqualFol
 // compileFilter parses a SCIM filter expression into a predicate, or returns an error on malformed
 // input (the caller maps that to a 400 with scimType "invalidFilter").
 func compileFilter(s string) (pred, error) {
+	if len(s) > maxFilterLen {
+		return nil, fmt.Errorf("filter longer than %d bytes", maxFilterLen)
+	}
 	toks, err := tokenize(s)
 	if err != nil {
 		return nil, err

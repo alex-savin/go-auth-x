@@ -30,6 +30,21 @@ func withMFAMarker(next string) string {
 	return u.String()
 }
 
+// allow2FAAttempt spends one guess at a second-factor code from this address and this account.
+func (a *Authenticator) allow2FAAttempt(c *reqCtx, sub string) bool {
+	if a.ipLimiter != nil && !a.ipLimiter.Allow("2fa:"+c.rateIP()) {
+		return false
+	}
+	return a.acctLimiter == nil || a.acctLimiter.Allow("2fa:"+sub)
+}
+
+// factorChangeAllowed reports whether the signed-in user may add a sign-in factor (TOTP, a passkey, a
+// first password): with a fresh step-up when they already have a factor /auth/reauth can verify, so a
+// stolen session can't give itself one to step up with. A user with none has only the session.
+func (a *Authenticator) factorChangeAllowed(c *reqCtx, au *AuthUser) bool {
+	return !a.hasReauthFactor(au.ID) || a.StepUpFresh(c.Request, accountStepUpMaxAge)
+}
+
 // TOTPBegin (POST /auth/2fa/totp/begin, session-gated) starts enrollment: generate a fresh secret
 // (pending, not yet enabled) and return the otpauth:// URI + base32 secret. The consumer renders the
 // QR; enrollment completes at /confirm with a valid code.
@@ -41,6 +56,12 @@ func (a *Authenticator) TOTPBegin(c *reqCtx) {
 	}
 	if info, _ := a.twoFactor.TOTP(au.ID); info != nil && info.Enabled {
 		c.JSON(http.StatusConflict, H{"error": "two-factor auth is already enabled"})
+		return
+	}
+	// A new factor is one a stolen session could then step up with: adding one takes a fresh step-up
+	// with the factor the user already has.
+	if !a.factorChangeAllowed(c, au) {
+		c.JSON(http.StatusForbidden, H{"error": "reauth_required"})
 		return
 	}
 	secret, serr := newTOTPSecret()
@@ -59,6 +80,11 @@ func (a *Authenticator) TOTPConfirm(c *reqCtx) {
 		c.JSON(http.StatusUnauthorized, H{"error": "unauthenticated"})
 		return
 	}
+	// Throttle: confirming checks the same brute-forceable 6-digit code space as /2fa/verify.
+	if !a.allow2FAAttempt(c, au.Sub) {
+		c.tooMany("too many attempts — wait and try again")
+		return
+	}
 	var body struct{ Code string }
 	if c.ShouldBindJSON(&body) != nil {
 		c.JSON(http.StatusBadRequest, H{"error": "invalid request"})
@@ -69,8 +95,18 @@ func (a *Authenticator) TOTPConfirm(c *reqCtx) {
 		c.JSON(http.StatusBadRequest, H{"error": "start enrollment first"})
 		return
 	}
+	// Confirming finishes an enrollment; on an enabled TOTP it would be a code oracle that also mints
+	// a fresh set of recovery codes.
+	if info.Enabled {
+		c.JSON(http.StatusConflict, H{"error": "two-factor auth is already enabled"})
+		return
+	}
 	step, ok := totpValidate(info.Secret, body.Code, time.Now())
 	if !ok {
+		c.JSON(http.StatusBadRequest, H{"error": "that code is not valid"})
+		return
+	}
+	if claimed, cerr := a.twoFactor.ClaimTOTPStep(au.ID, step); cerr != nil || !claimed {
 		c.JSON(http.StatusBadRequest, H{"error": "that code is not valid"})
 		return
 	}
@@ -79,7 +115,6 @@ func (a *Authenticator) TOTPConfirm(c *reqCtx) {
 		c.JSON(http.StatusInternalServerError, H{"error": "could not enable 2fa"})
 		return
 	}
-	_ = a.twoFactor.SetTOTPLastStep(au.ID, step)
 	a.creds.RecordAudit(au.ID, au.Email, c.ClientIP(), "2fa", "totp_enabled", true, "")
 	c.JSON(http.StatusOK, H{"ok": true, "recoveryCodes": codes})
 }
@@ -92,8 +127,9 @@ func (a *Authenticator) TOTPDisable(c *reqCtx) {
 		c.JSON(http.StatusUnauthorized, H{"error": "unauthenticated"})
 		return
 	}
-	// Throttle: disabling verifies the same brute-forceable 6-digit code space as /2fa/verify.
-	if a.ipLimiter != nil && !a.ipLimiter.Allow("2fa:"+c.rateIP()) {
+	// Throttle: disabling verifies the same brute-forceable 6-digit code space as /2fa/verify — per
+	// address and per account, so rotating addresses doesn't buy more guesses.
+	if !a.allow2FAAttempt(c, au.Sub) {
 		c.tooMany("too many attempts — wait and try again")
 		return
 	}

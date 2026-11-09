@@ -30,6 +30,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/rs/cors"
 	"github.com/zitadel/oidc/v3/pkg/oidc"
 	"github.com/zitadel/oidc/v3/pkg/op"
 
@@ -221,6 +222,7 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 		op.WithCustomIntrospectionEndpoint(ep("/introspect")),
 		op.WithLogger(cfg.Logger),
 		op.WithCrypto(subjectCrypto{op.NewCompositeCrypto(gcm, []op.Decrypter{gcm, op.NewAESDecrypter(key)})}),
+		op.WithCORSOptions(corsOptions()),
 	}
 	if cfg.Insecure {
 		opts = append(opts, op.WithAllowInsecure())
@@ -244,6 +246,20 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 
 	go p.gc()
 	return p, nil
+}
+
+// corsOptions replaces zitadel's default policy, which echoes any Origin back with credentials
+// allowed. Browser-based clients may call from any origin, but never with the user's cookies: the
+// endpoints that take credentials take a bearer token or client credentials, and the two that read
+// the session (authorize, end_session) are navigations, not fetches. A fresh copy per provider:
+// zitadel hands the pointer out (Provider.CORSOptions).
+func corsOptions() *cors.Options {
+	return &cors.Options{
+		AllowedOrigins: []string{"*"},
+		AllowedMethods: []string{http.MethodGet, http.MethodHead, http.MethodPost},
+		AllowedHeaders: []string{"Origin", "Accept", "Accept-Language", "Authorization", "Content-Type", "X-Requested-With"},
+		ExposedHeaders: []string{"Location", "Content-Length"},
+	}
 }
 
 // Handler serves the provider: the endpoints under Prefix and the discovery documents.

@@ -94,6 +94,12 @@ func (a *Authenticator) EmailOTPVerify(c *reqCtx) {
 		c.JSON(http.StatusBadRequest, H{"error": "enter the code we emailed you"})
 		return
 	}
+	// A code allows a few guesses, but a new code resets them: the address's own budget bounds the
+	// guesses across codes (and across the addresses an attacker rotates through).
+	if a.acctLimiter != nil && !a.acctLimiter.Allow("emailotp-verify:"+email) {
+		c.tooMany("too many attempts — wait and try again")
+		return
+	}
 	claim, err := a.creds.VerifyEmailOTP(purposeEmailOTP, email, otpHash(email, body.Code))
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, H{"error": "that code is invalid or has expired"})
@@ -108,9 +114,12 @@ func (a *Authenticator) EmailOTPVerify(c *reqCtx) {
 		c.JSON(http.StatusForbidden, H{"error": msg})
 		return
 	}
-	_ = a.creds.SetEmailVerified(u.ID, true) // redeeming an emailed code proves email control
+	if err := a.claimMailbox(c, u, false); err != nil { // redeeming an emailed code proves email control
+		c.JSON(http.StatusInternalServerError, H{"error": "sign-in failed"})
+		return
+	}
 	a.creds.RecordAudit(u.ID, u.Email, c.ClientIP(), "email_otp", "login", true, "")
-	tfr, err := a.completeLogin(c, Identity{Subject: u.Sub, Email: u.Email, Name: u.Name, EmailVerified: true}, body.Remember, nil)
+	tfr, err := a.completeLogin(c, Identity{Subject: u.Sub, Email: u.Email, Name: u.Name, EmailVerified: true, Local: true}, body.Remember, nil)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, H{"error": "sign-in failed"})
 		return

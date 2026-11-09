@@ -61,7 +61,7 @@ func globalGroups(gs []Group) []Group {
 //
 //	scim.NewServer(view, func(t string) bool { return authn.ValidateOrgAPIKeyScope(t, "scim", org.ID) })
 func (a *Authenticator) ValidateOrgAPIKeyScope(raw, scope, orgID string) bool {
-	info, ok := a.ValidateAPIKey(raw)
+	info, ok := a.lookupAPIKey(raw)
 	if !ok || !KeyHasScope(info, scope) {
 		return false
 	}
@@ -252,7 +252,7 @@ func (v *orgScopedDir) UserByEmail(email string) (*AuthUser, error) {
 //     which proves mailbox control.
 //
 // Both refusals surface as ErrEmailConflict (SCIM 409).
-func (v *orgScopedDir) UpsertExternalUser(sub, email, name string, emailVerified bool) (*AuthUser, error) {
+func (v *orgScopedDir) UpsertExternalUser(sub, email, name string, _ bool) (*AuthUser, error) {
 	ns := v.nsSub(sub)
 	if !strings.HasPrefix(ns, v.orgSubPrefix()) {
 		return nil, ErrEmailConflict // not an account this org's IdP owns — never rebind its identity
@@ -262,7 +262,20 @@ func (v *orgScopedDir) UpsertExternalUser(sub, email, name string, emailVerified
 	} else if err != nil && !errors.Is(err, ErrNoUser) {
 		return nil, err
 	}
-	u, err := v.dir.UpsertExternalUser(ns, email, name, emailVerified)
+	// Once its user has proven a mailbox (signed in by a link, code or reset), an account is theirs,
+	// not the IdP's: its email can't be re-pointed — passkeys, sessions and a password would follow
+	// the address to whoever controls it — and it can't be pulled back into the org it left.
+	if cur := v.bySub(ns); cur != nil && cur.EmailVerified {
+		if normEmail(email) != normEmail(cur.Email) {
+			return nil, ErrEmailConflict
+		}
+		if !v.isMember(cur.ID) {
+			return nil, ErrEmailConflict
+		}
+	}
+	// A customer's IdP asserts addresses it hasn't proven: the account stays unverified until its user
+	// proves the mailbox (and the store un-verifies an address the IdP changes).
+	u, err := v.dir.UpsertExternalUser(ns, email, name, false)
 	if err != nil {
 		return nil, err
 	}
@@ -270,6 +283,22 @@ func (v *orgScopedDir) UpsertExternalUser(sub, email, name string, emailVerified
 		return nil, err
 	}
 	return u, nil
+}
+
+// bySub finds the account with this subject when the store can look one up (both reference stores
+// can; it's CredentialStore.UserBySub), else nil.
+func (v *orgScopedDir) bySub(sub string) *AuthUser {
+	bs, ok := v.dir.(interface {
+		UserBySub(sub string) (*AuthUser, error)
+	})
+	if !ok {
+		return nil
+	}
+	u, err := bs.UserBySub(sub)
+	if err != nil {
+		return nil
+	}
+	return u
 }
 
 // SetUserDisabled carries the org-scoped deprovision semantics: disabling means "remove from this

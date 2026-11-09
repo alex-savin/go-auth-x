@@ -22,6 +22,7 @@ const (
 	audWebauthn = "authx:webauthn-flow"
 	audPending  = "authx:2fa-pending"
 	audStepUp   = "authx:stepup"
+	audSignup   = "authx:signup"
 )
 
 // SessionClaims is the signed session-cookie payload — the authenticated identity.
@@ -51,6 +52,9 @@ type SessionClaims struct {
 	// this sign-in" — e.g. the oidcprovider's prompt=login / max_age. Absent on cookies minted before
 	// the claim existed.
 	AuthTime *jwt.NumericDate `json:"auth_time,omitempty"`
+	// DirGroups marks Groups as read from the DirectoryStore at sign-in (rather than asserted by the
+	// IdP): RequireGroupsHTTP re-reads them live, so removing a member takes effect at once.
+	DirGroups bool `json:"dg,omitempty"`
 	jwt.RegisteredClaims
 }
 

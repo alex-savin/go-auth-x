@@ -92,7 +92,7 @@ func (a *Authenticator) ReAuth(c *reqCtx) {
 
 	ok := false
 	if body.Password != "" {
-		if hash, _, perr := a.creds.PasswordHash(au.ID); perr == nil {
+		if hash, _, perr := a.passwordHash(au.ID); perr == nil {
 			ok = bcrypt.CompareHashAndPassword([]byte(hash), []byte(body.Password)) == nil
 		}
 	}
