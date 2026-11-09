@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-11-09
+
 A security release. An audit (seven independent reviews, every finding proven with a test) found
 account-takeover and privilege-escalation paths in v0.12.1 and earlier; all are fixed here, each with a
 regression test. **Upgrade promptly.** Several fixes change behavior callers can notice — see
@@ -740,7 +742,8 @@ First tagged release. A self-contained, embeddable authentication library for Go
 - **Trusted-proxy client-IP** — `X-Forwarded-For` honored only when the direct peer is a
   trusted proxy (`TRUSTED_PROXIES`, or private-range default), so the client IP can't be spoofed.
 
-[Unreleased]: https://github.com/alex-savin/go-auth-x/compare/v0.12.1...HEAD
+[Unreleased]: https://github.com/alex-savin/go-auth-x/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/alex-savin/go-auth-x/releases/tag/v0.13.0
 [0.12.1]: https://github.com/alex-savin/go-auth-x/releases/tag/v0.12.1
 [0.12.0]: https://github.com/alex-savin/go-auth-x/releases/tag/v0.12.0
 [0.11.0]: https://github.com/alex-savin/go-auth-x/releases/tag/v0.11.0

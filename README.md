@@ -747,7 +747,12 @@ go-auth-x/
 
 See **[ROADMAP.md](./ROADMAP.md)** for the full list and **[CHANGELOG.md](./CHANGELOG.md)** for details.
 
-- **v0.12.1** (latest): **demo + security scanning** — `go run ./examples/demo` serves every surface
+- **v0.13.0** (latest): **security release** — fixes from a security audit: account takeover through
+  signup squatting, SCIM email re-pointing, the OIDC callback and the 2FA endpoints; sessions that
+  outlived password resets and deprovisioning; SCIM `/Bulk` memory exhaustion; credentialed CORS on
+  the OAuth endpoints; and lower-severity races and throttles. **Upgrade promptly**; several fixes
+  change behavior (see the [CHANGELOG](./CHANGELOG.md)).
+- **v0.12.1**: **demo + security scanning** — `go run ./examples/demo` serves every surface
   against the in-memory store; CI runs govulncheck and an OWASP ZAP scan of the demo on every change
   (a full active scan weekly). No library code changed.
 - **v0.12.0**: **fresh sign-ins + OAuth lifecycle** — the `oidcprovider` honors
