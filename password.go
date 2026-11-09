@@ -9,7 +9,9 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-const bcryptCost = 12
+// bcryptCost is the work factor for new password hashes. A variable only so the package's tests can
+// lower it (bcrypt_internal_test.go); nothing else changes it.
+var bcryptCost = 12
 
 // dummyHash burns ~the same time as a real compare when the account/credential is absent,
 // so response timing doesn't leak whether an email is registered.
