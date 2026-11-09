@@ -5,6 +5,15 @@ Direction and planned work for the library. Authoritative usage/feature docs liv
 
 ## Shipped
 
+### v0.13.0 — security release · behavior changes (see CHANGELOG)
+
+- **Account takeover closed** — signup squatting, SCIM (per-org and global) asserting identities, the
+  OIDC callback bypassing the login funnel, OIDC email/subject trust, the 2FA endpoints from a stolen
+  session.
+- **Sessions end with the account change** — resets, deprovisioning, group removal, rebinding.
+- **Hardening** — SCIM `/Bulk` nesting, LDAP adoption, `X-Forwarded-For`, CIMD redirects, org-role
+  races, CSRF with a junk Bearer, gate path cleaning, per-address throttles, no credentialed CORS.
+
 ### v0.12.1 — demo + security scanning · no library changes
 
 - **`examples/demo`** — a runnable server wiring every surface against the in-memory store; also the

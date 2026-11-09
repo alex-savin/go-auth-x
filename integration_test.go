@@ -101,7 +101,7 @@ func seedUser(t *testing.T, s *memory.Store, email, pw string, verified bool) *a
 		t.Fatal(err)
 	}
 	if pw != "" {
-		h, _ := bcrypt.GenerateFromPassword([]byte(pw), bcrypt.DefaultCost)
+		h, _ := bcrypt.GenerateFromPassword([]byte(pw), bcrypt.MinCost)
 		_ = s.SetPasswordHash(u.ID, string(h), "bcrypt")
 	}
 	if verified {
