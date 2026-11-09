@@ -733,7 +733,10 @@ go-auth-x/
 
 See **[ROADMAP.md](./ROADMAP.md)** for the full list and **[CHANGELOG.md](./CHANGELOG.md)** for details.
 
-- **v0.12.0** (latest): **fresh sign-ins + OAuth lifecycle** — the `oidcprovider` honors
+- **v0.12.1** (latest): **demo + security scanning** — `go run ./examples/demo` serves every surface
+  against the in-memory store; CI runs govulncheck and an OWASP ZAP scan of the demo on every change
+  (a full active scan weekly). No library code changed.
+- **v0.12.0**: **fresh sign-ins + OAuth lifecycle** — the `oidcprovider` honors
   `prompt=login` and `max_age` (re-auth via `ReauthURL`; ID tokens carry the real sign-in time),
   deleting an account removes the user's OAuth records, grants left without tokens are cleaned up,
   auth-email logs are masked, dependencies are updated, and CI checks every pull request.
