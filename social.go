@@ -210,7 +210,7 @@ func (a *Authenticator) SocialCallback(c *reqCtx) {
 			c.JSON(http.StatusNotFound, H{"error": "provider not enabled"})
 			return
 		}
-		subject, email, name, err = oidcSocialIdentity(ctx, p.verifier, p.clientID, tok, fc.Nonce, p.assumeVerified)
+		subject, email, name, err = oidcSocialIdentity(ctx, p.verifier, p.clientID, tok, fc.Nonce, p.assumeVerified, p.upnEmail)
 		if err != nil {
 			c.JSON(http.StatusForbidden, H{"error": err.Error()}) // 403, matching the other providers' identity failures
 			return

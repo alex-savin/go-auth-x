@@ -164,3 +164,19 @@ func TestOIDCEmailTrust(t *testing.T) {
 		t.Fatalf("email-less identities must get separate, unverified accounts: %+v %+v %v %v", alice, bob, err1, err2)
 	}
 }
+
+// An IdP subject in one of the library's own namespaces is refused (it would name, say, the
+// SCIM-provisioned account "scim:alice").
+func TestOIDCReservedSubjectRefused(t *testing.T) {
+	idp := newFakeIdP(t)
+	a, s := newOIDCTestAuth(t, idp, false)
+	alice, _ := s.UpsertExternalUser("scim:alice", "alice@corp.com", "Alice", true)
+	for _, sub := range []string{"scim:alice", "LDAP:bob", "local:x", "bootstrap:o@x.com", "social:google:1"} {
+		if w := idp.oidcSignIn(t, newClient(t, a), jwt.MapClaims{"sub": sub, "email": "evil@x.com", "email_verified": true}); w.Code != http.StatusUnauthorized {
+			t.Fatalf("subject %q = %d, want 401", sub, w.Code)
+		}
+	}
+	if u, _ := s.UserByID(alice.ID); u.Email != "alice@corp.com" {
+		t.Fatalf("the provisioned account was changed: %q", u.Email)
+	}
+}

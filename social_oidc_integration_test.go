@@ -100,7 +100,7 @@ func TestOIDCSocialIdentityIntegration(t *testing.T) {
 		"aud": "client-1", "sub": "user-1", "nonce": nonce,
 		"email": "a@x.com", "email_verified": true, "name": "Alice",
 	})
-	sub, email, name, err := oidcSocialIdentity(ctx, ver, "client-1", tokenWithID(raw), nonce, false)
+	sub, email, name, err := oidcSocialIdentity(ctx, ver, "client-1", tokenWithID(raw), nonce, false, false)
 	if err != nil {
 		t.Fatalf("verified path: %v", err)
 	}
@@ -110,40 +110,44 @@ func TestOIDCSocialIdentityIntegration(t *testing.T) {
 
 	// Unverified email, strict (assumeVerified=false) → refused.
 	raw = idp.idToken(t, jwt.MapClaims{"aud": "client-1", "sub": "u2", "nonce": nonce, "email": "b@x.com", "email_verified": false})
-	if _, _, _, err := oidcSocialIdentity(ctx, ver, "client-1", tokenWithID(raw), nonce, false); err == nil {
+	if _, _, _, err := oidcSocialIdentity(ctx, ver, "client-1", tokenWithID(raw), nonce, false, false); err == nil {
 		t.Fatal("unverified+strict: want error, got nil")
 	}
 
 	// email_verified absent + assumeVerified → the token email is trusted.
 	raw = idp.idToken(t, jwt.MapClaims{"aud": "client-1", "sub": "u3", "nonce": nonce, "email": "c@x.com"})
-	sub, email, _, err = oidcSocialIdentity(ctx, ver, "client-1", tokenWithID(raw), nonce, true)
+	sub, email, _, err = oidcSocialIdentity(ctx, ver, "client-1", tokenWithID(raw), nonce, true, false)
 	if err != nil || sub != "u3" || email != "c@x.com" {
 		t.Fatalf("assumeVerified path: err=%v sub=%q email=%q", err, sub, email)
 	}
 
-	// Entra-style: no email claim, an email-shaped preferred_username, assumeVerified → UPN used.
+	// Entra-style: no email claim, an email-shaped preferred_username, assumeVerified → UPN used —
+	// for the Entra preset only; any other provider's preferred_username is not an address it proved.
 	raw = idp.idToken(t, jwt.MapClaims{"aud": "client-1", "sub": "u4", "nonce": nonce, "preferred_username": "d@corp.com"})
-	_, email, name, err = oidcSocialIdentity(ctx, ver, "client-1", tokenWithID(raw), nonce, true)
+	_, email, name, err = oidcSocialIdentity(ctx, ver, "client-1", tokenWithID(raw), nonce, true, true)
 	if err != nil || email != "d@corp.com" || name != "d@corp.com" {
 		t.Fatalf("entra upn path: err=%v email=%q name=%q", err, email, name)
+	}
+	if _, _, _, err := oidcSocialIdentity(ctx, ver, "client-1", tokenWithID(raw), nonce, true, false); err == nil {
+		t.Fatal("a generic provider's preferred_username must not stand in for a verified email")
 	}
 
 	// Nonce mismatch → refused (replay of a token minted for a different login attempt).
 	raw = idp.idToken(t, jwt.MapClaims{"aud": "client-1", "sub": "u5", "nonce": "wrong", "email": "e@x.com", "email_verified": true})
-	if _, _, _, err := oidcSocialIdentity(ctx, ver, "client-1", tokenWithID(raw), nonce, false); err == nil {
+	if _, _, _, err := oidcSocialIdentity(ctx, ver, "client-1", tokenWithID(raw), nonce, false, false); err == nil {
 		t.Fatal("nonce mismatch: want error, got nil")
 	}
 
 	// azp names a different client → refused (token not authorized for us).
 	raw = idp.idToken(t, jwt.MapClaims{"aud": "client-1", "azp": "attacker", "sub": "u6", "nonce": nonce, "email": "f@x.com", "email_verified": true})
-	if _, _, _, err := oidcSocialIdentity(ctx, ver, "client-1", tokenWithID(raw), nonce, false); err == nil {
+	if _, _, _, err := oidcSocialIdentity(ctx, ver, "client-1", tokenWithID(raw), nonce, false, false); err == nil {
 		t.Fatal("azp mismatch: want error, got nil")
 	}
 
 	// A token signed by a DIFFERENT issuer key → signature verification fails.
 	other := newMockIDP(t)
 	raw = other.idToken(t, jwt.MapClaims{"aud": "client-1", "sub": "u7", "nonce": nonce, "email": "g@x.com", "email_verified": true})
-	if _, _, _, err := oidcSocialIdentity(ctx, ver, "client-1", tokenWithID(raw), nonce, false); err == nil {
+	if _, _, _, err := oidcSocialIdentity(ctx, ver, "client-1", tokenWithID(raw), nonce, false, false); err == nil {
 		t.Fatal("foreign signature: want error, got nil")
 	}
 }

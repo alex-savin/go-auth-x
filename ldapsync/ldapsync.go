@@ -39,6 +39,13 @@ type Config struct {
 	// DeprovisionMissing disables (does not delete) any previously-synced "ldap:" user that was
 	// NOT seen in this run — i.e. they vanished from LDAP. Off by default (additive sync).
 	DeprovisionMissing bool
+
+	// AdoptExisting lets an LDAP entry take over an existing account with the same email — a local
+	// password account, an OIDC or social sign-in — rebinding it to the LDAP subject (an unverified one
+	// is replaced). Off by default: such an entry is skipped and reported, because whoever can set an
+	// entry's mail attribute would otherwise take the account (and the owner's). Turn it on only for a
+	// directory you trust as much as your own sign-in.
+	AdoptExisting bool
 }
 
 func (c *Config) withDefaults() {
@@ -167,6 +174,12 @@ func (s *Syncer) Sync() (*Result, error) {
 		// (disabled) as "missing from LDAP". Deprovision must key on absence from the LDAP search, not on
 		// whether the write succeeded this run.
 		seen["ldap:"+uid] = true
+		if !s.cfg.AdoptExisting {
+			if existing, xerr := s.dir.UserByEmail(email); xerr == nil && existing.Sub != "ldap:"+uid {
+				res.Errors = append(res.Errors, fmt.Sprintf("user %s: %s belongs to an account not synced from this entry; skipped (see Config.AdoptExisting)", uid, email))
+				continue
+			}
+		}
 		au, uerr := s.dir.UpsertExternalUser("ldap:"+uid, email, e.GetAttributeValue(s.cfg.AttrName), true)
 		if uerr != nil {
 			res.Errors = append(res.Errors, fmt.Sprintf("user %s: %v", uid, uerr))

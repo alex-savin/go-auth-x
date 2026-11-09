@@ -192,6 +192,13 @@ func (a *Authenticator) Callback(c *reqCtx) {
 		return
 	}
 
+	// The IdP's subject keys the account directly, so it must not name one of the library's own
+	// subject namespaces ("scim:alice" would be the SCIM-provisioned Alice).
+	if reservedSubject(idToken.Subject) {
+		c.JSON(http.StatusUnauthorized, H{"error": "this identity can't sign in here"})
+		return
+	}
+
 	if !a.groupAllowed(claims.Groups) {
 		c.JSON(http.StatusForbidden, H{"error": "your account is not in an allowed group"})
 		return
@@ -224,6 +231,17 @@ func (a *Authenticator) Callback(c *reqCtx) {
 		return
 	}
 	c.Redirect(http.StatusFound, fc.Next)
+}
+
+// reservedSubject reports whether an IdP subject falls in a namespace the library mints subjects in
+// (local accounts, bootstrap placeholders, SCIM and LDAP provisioning, social identities).
+func reservedSubject(sub string) bool {
+	for _, p := range []string{"local:", "bootstrap:", "scim:", "ldap:", "social:"} {
+		if strings.HasPrefix(strings.ToLower(sub), p) {
+			return true
+		}
+	}
+	return false
 }
 
 // Logout clears the session and, if the IdP advertises one, redirects to its

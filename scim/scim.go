@@ -11,6 +11,7 @@ package scim
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -820,7 +821,16 @@ func (s *Server) deleteGroup(w http.ResponseWriter, r *http.Request) {
 // (the /Bulk entry is already authenticated, so sub-requests skip auth). Operations apply in order;
 // a failing op records its status and the batch continues (failOnErrors is not honored — a v0
 // simplification). bulkId cross-references in payloads are not resolved.
+// bulkOpKey marks a request dispatched by /Bulk, which may not itself be a /Bulk: however its path is
+// spelled ("/Bulk?", "/%42ulk", an absolute URL), a nested Bulk would multiply the operation cap and
+// recurse with the whole body held at each level.
+type bulkOpKey struct{}
+
 func (s *Server) bulk(w http.ResponseWriter, r *http.Request) {
+	if r.Context().Value(bulkOpKey{}) != nil {
+		scimError(w, http.StatusBadRequest, "a bulk operation can't be a bulk request")
+		return
+	}
 	var req struct {
 		Operations []struct {
 			Method string          `json:"method"`
@@ -845,9 +855,17 @@ func (s *Server) bulk(w http.ResponseWriter, r *http.Request) {
 				"response": json.RawMessage(`{"detail":"unsupported bulk operation"}`)})
 			continue
 		}
-		rec := httptest.NewRecorder()
-		sub := httptest.NewRequest(strings.ToUpper(op.Method), op.Path, bytes.NewReader(op.Data))
+		// A path relative to the SCIM root, nothing else; a malformed path or method is this operation's
+		// 400, not a panic. The sub-request runs in the client's context: it stops if they go away.
+		sub, serr := http.NewRequestWithContext(context.WithValue(r.Context(), bulkOpKey{}, true),
+			strings.ToUpper(op.Method), op.Path, bytes.NewReader(op.Data))
+		if serr != nil || !strings.HasPrefix(op.Path, "/") || sub.URL.IsAbs() || sub.URL.Host != "" {
+			results = append(results, map[string]any{"method": op.Method, "status": "400",
+				"response": json.RawMessage(`{"detail":"invalid bulk operation"}`)})
+			continue
+		}
 		sub.Header.Set("Content-Type", "application/scim+json")
+		rec := httptest.NewRecorder()
 		s.mux.ServeHTTP(rec, sub)
 
 		res := map[string]any{"method": strings.ToUpper(op.Method), "status": strconv.Itoa(rec.Code)}
