@@ -201,5 +201,8 @@ func (a *Authenticator) OAuthUnlink(c *reqCtx) {
 		return
 	}
 	a.creds.RecordAudit(au.ID, au.Email, c.ClientIP(), "oauth", "unlinked", true, provider)
+	// Unlinked is disconnected: the provider no longer signs in to this account by email until the user
+	// reconnects it while signed in (see resolveSocialUserFor). A mark already there is fine.
+	_ = a.creds.CreateToken(purposeUnlinkedOAuth, au.ID, au.Email, unlinkMark(au.ID, provider), time.Now().AddDate(100, 0, 0))
 	c.JSON(http.StatusOK, H{"ok": true})
 }

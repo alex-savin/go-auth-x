@@ -12,7 +12,10 @@ const (
 	purposePasswordReset = "password_reset"
 	purposeInvite        = "invite"
 	purposeChangeEmail   = "change_email" // verify a NEW address before rebinding it
-	purposeEmailOTP      = "email_otp"    // short numeric sign-in code (see emailotp.go)
+	// purposeUnlinkedOAuth marks a provider the user disconnected (see unlinkMark): it stops linking to
+	// their account by email until they reconnect it from a signed-in session.
+	purposeUnlinkedOAuth = "oauth_unlinked"
+	purposeEmailOTP      = "email_otp" // short numeric sign-in code (see emailotp.go)
 )
 
 // Token TTLs by purpose (used by the Phase 1+ email flows).

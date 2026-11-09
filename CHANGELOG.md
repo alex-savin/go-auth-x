@@ -7,6 +7,90 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+A security release. An audit (seven independent reviews, every finding proven with a test) found
+account-takeover and privilege-escalation paths in v0.12.1 and earlier; all are fixed here, each with a
+regression test. **Upgrade promptly.** Several fixes change behavior callers can notice — see
+"Behavior changes" below.
+
+### Security
+
+- **Signup squatting** — a password set by an unproven signup survived the real owner's sign-in by
+  magic link, email code or verify link, letting whoever signed up first log in (as the instance owner,
+  for `OWNER_EMAIL`). A mailbox proof now drops a password nobody proved; the verify link keeps it only
+  in the browser that signed up with it. Signup never touches a bootstrap placeholder.
+- **Provisioning sources asserting identities** — a customer's per-org SCIM could mark any address
+  verified and re-point accounts' emails (cross-tenant takeover, global admin); a `scim`-scoped key on
+  the global mount could re-point the owner's email and take it over through password reset. The org
+  view never verifies an address and can't re-point a mailbox-proven account; the global mount only
+  re-points emails of accounts SCIM provisioned; a changed email is no longer "verified"; reset links
+  die when the account leaves the address; `ValidateAPIKey` refuses org-bound keys (the README's global
+  SCIM wiring now uses `ValidateAPIKeyScope(t, "scim")`).
+- **Owner check** — the owner is the live, verified account with `OWNER_EMAIL`, compared exactly (a
+  Unicode case-fold alias like `opſ@` passed before), not the email a cookie was minted with.
+- **OIDC callback** — it bypassed the login funnel: banned/disabled users signed in, TOTP was never
+  asked. It now goes through `completeLogin` (which itself refuses blocked users).
+- **OIDC email trust** — `OIDC_ASSUME_VERIFIED` overrode an explicit `email_verified: false`, and logins
+  without an email seized each other's accounts. The flag now fills only an absent claim; an empty
+  email is never verified or used to link; IdP subjects in the library's namespaces (`scim:`, `ldap:`,
+  `local:`, …) are refused; a generic provider's `preferred_username` never stands in for an email.
+- **2FA from a stolen session** — `/auth/2fa/totp/confirm` on an enabled TOTP was an unthrottled code
+  oracle that minted new recovery codes; enrolling TOTP or a passkey, or setting a first password,
+  needed only a session. Confirm refuses an enabled TOTP and is throttled; adding a factor takes a
+  fresh step-up when the user has one.
+- **Sessions outliving account changes** — a password reset or change, SCIM/LDAP deprovisioning,
+  removal from a group, and an account rebound to a new subject all left sessions live. Resets revoke
+  all sessions, changes all but the current one; disabling/banning revokes inside the reference stores;
+  `RequireGroupsHTTP` re-reads directory groups live; rebinding moves sessions and OAuth records.
+- **LDAP sync** took over verified local accounts (and deleted unverified ones) by email — now skipped
+  and reported unless `Config.AdoptExisting`.
+- **SCIM `/Bulk`** could nest itself (any path spelling) — one sub-1 MiB request pinned gigabytes of
+  heap; malformed operations panicked. Nesting is refused, malformed operations are per-op 400s, group
+  filters load members once, filters are capped at 4 KiB.
+- **Client IP** — only the first `X-Forwarded-For` line was read and `ip:port` entries became their own
+  rate-limit keys; every line is walked now, ports stripped.
+- **Lower severity** — logins no longer write back stale user rows (a concurrent ban or deletion
+  survived as undone); CIMD fetches follow no redirect; a junk `Authorization` header no longer skips
+  CSRF; the gate decides on the cleaned path; email-code checks, signup mail, password-change checks
+  and 2FA disable are throttled per account/address; org ids are canonical (no `01` alias past the
+  last-owner guard), the acting member's role is re-read under the lock, and invites die with their
+  inviter's privilege; changing to a taken email no longer reveals it; a disconnected social provider
+  doesn't re-link by email until reconnected while signed in; RP-initiated logout revokes no grants;
+  impersonation sessions can't approve OAuth grants; cookies are `Secure` when `APP_URL` is https.
+
+### Behavior changes
+
+- Verify links opened in another browser drop the signup's password (the user sets one after).
+- Adding TOTP, a passkey or a first password needs a fresh step-up when the user already has a
+  password or TOTP (`403 reauth_required`).
+- A password change signs the user's other sessions out; a reset signs out all of them.
+- Per-org SCIM accounts stay unverified until their user proves the mailbox; a verified account's email
+  can't be changed through the org view, and it can't be re-added after leaving (use an invite).
+- The global SCIM mount refuses (`400 mutability`) email changes of accounts it didn't provision; a
+  deprovisioning PUT only deprovisions.
+- `ValidateAPIKey` refuses org-bound keys.
+- OIDC: an explicit `email_verified: false` is refused even with `OIDC_ASSUME_VERIFIED`; subjects
+  starting `local:`, `bootstrap:`, `scim:`, `ldap:` or `social:` are refused; TOTP users get the
+  second-factor step.
+- `oidcprovider`: `Approve` grants `offline_access` only when `Decision.Scopes` includes it (or is nil).
+- Changing to a taken email answers 200 (the address's owner is emailed instead of the caller told).
+- ldapsync needs `AdoptExisting: true` to take over accounts it didn't create.
+- Cookies are `Secure` whenever `APP_URL` is https.
+
+### Added
+
+- `Identity.Local` (a login read from the store; Authorizers shouldn't write its email back),
+  `ldapsync.Config.AdoptExisting`, `SessionClaims.AuthTime`/`DirGroups` are populated as described above.
+- Store contracts: `SetPasswordHash` with an empty hash removes the password; a store that implements
+  `SessionStore` should revoke a user's sessions when `SetUserDisabled(true)`/`SetUserBan(true)`, and
+  move them when it rebinds a subject (both reference stores do). gormstore's unique email index becomes
+  partial (`email <> ''`), migrated automatically.
+
+### Known limitations
+
+- A customer's per-org SCIM learns whether an address has an account anywhere from the 409 a duplicate
+  gets (provisioning can't create a second account for an address); rate-limit or monitor org keys.
+- Token introspection answers any authenticated client about a token it holds.
+
 ## [0.12.1] — 2026-11-09
 
 A runnable demo, and security scanning in CI: govulncheck and OWASP ZAP. No library code changed.

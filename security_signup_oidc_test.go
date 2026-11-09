@@ -4,13 +4,17 @@ package authx_test
 // callback skipping the login funnel (C4), and OIDC email trust (C5).
 
 import (
+	"context"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
 	"github.com/golang-jwt/jwt/v5"
 
 	authx "github.com/alex-savin/go-auth-x"
+	"github.com/alex-savin/go-auth-x/store/memory"
 )
 
 const squatterPW = "squatter-chosen-pw-77"
@@ -178,5 +182,62 @@ func TestOIDCReservedSubjectRefused(t *testing.T) {
 	}
 	if u, _ := s.UserByID(alice.ID); u.Email != "alice@corp.com" {
 		t.Fatalf("the provisioned account was changed: %q", u.Email)
+	}
+}
+
+// socialSignIn runs /auth/social/<name>/login → callback with an id_token carrying claims.
+func (p *fakeIdP) socialSignIn(t *testing.T, c *client, name string, claims jwt.MapClaims) *httptest.ResponseRecorder {
+	t.Helper()
+	w := c.do("GET", "/auth/social/"+name+"/login", nil)
+	loc, err := url.Parse(w.Header().Get("Location"))
+	if err != nil || w.Code != http.StatusFound {
+		t.Fatalf("social login = %d %q", w.Code, w.Header().Get("Location"))
+	}
+	q := loc.Query()
+	p.mu.Lock()
+	p.next = jwt.MapClaims{"nonce": q.Get("nonce")}
+	for k, v := range claims {
+		p.next[k] = v
+	}
+	p.mu.Unlock()
+	return c.do("GET", "/auth/social/"+name+"/callback?code=c&state="+url.QueryEscape(q.Get("state")), nil)
+}
+
+// A provider the user disconnected doesn't sign back in to their account by email (a compromised
+// provider account would walk straight back in); the user reconnects it while signed in.
+func TestUnlinkedProviderStaysDisconnected(t *testing.T) {
+	idp := newFakeIdP(t)
+	store := memory.New()
+	a, err := authx.New(context.Background(), authx.Config{
+		SessionSecret: []byte(testSecret), AppURL: "https://app.example.com",
+		SocialOIDC: []authx.SocialOIDCProvider{{Name: "gitlab", Issuer: idp.srv.URL, ClientID: "app-client", ClientSecret: "s"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = a.Close() })
+	a.SetCredentialStore(store)
+	a.SetSessionStore(store)
+	a.SetLocalEnabled(true)
+	seedUser(t, store, "u@x.com", "user-password-12", true)
+	gl := jwt.MapClaims{"sub": "gl-1", "email": "u@x.com", "email_verified": true}
+
+	c := newClient(t, a)
+	if w := idp.socialSignIn(t, c, "gitlab", gl); w.Code != http.StatusFound {
+		t.Fatalf("first gitlab sign-in = %d %s", w.Code, w.Body.String())
+	}
+	c.reauth("user-password-12")
+	if w := c.do("DELETE", "/auth/api/identities/gitlab", nil); w.Code != http.StatusOK {
+		t.Fatalf("unlink = %d %s", w.Code, w.Body.String())
+	}
+	if w := idp.socialSignIn(t, newClient(t, a), "gitlab", gl); w.Code != http.StatusConflict {
+		t.Fatalf("the disconnected provider signing in = %d, want 409", w.Code)
+	}
+	// Reconnecting from a signed-in session works, and then it signs in again.
+	if w := idp.socialSignIn(t, c, "gitlab", gl); w.Code != http.StatusFound {
+		t.Fatalf("reconnecting while signed in = %d %s", w.Code, w.Body.String())
+	}
+	if w := idp.socialSignIn(t, newClient(t, a), "gitlab", gl); w.Code != http.StatusFound {
+		t.Fatalf("after reconnecting, gitlab sign-in = %d", w.Code)
 	}
 }

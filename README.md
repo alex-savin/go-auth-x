@@ -272,7 +272,7 @@ provider activates when its client id + secret are present.
 | `HIBP_BREACH_CHECK` | `BreachCheckHIBP` | `true` wires the default HIBP k-anonymity password-breach checker (fail-open). Or call `SetBreachChecker`. |
 | `OWNER_EMAIL` | `OwnerEmail` | Exempt from hard lockout; gates the admin API via session. |
 | `BRAND_NAME` | `BrandName` | Product name shown in auth emails and the default WebAuthn RP display name (default `go-auth-x`). |
-| `COOKIE_SECURE` | `CookieSecure` | Force the `Secure` flag (also auto-on under TLS / `X-Forwarded-Proto: https`). |
+| `COOKIE_SECURE` | `CookieSecure` | Force the `Secure` flag (also auto-on when `APP_URL` is `https`, under TLS, or with `X-Forwarded-Proto: https`). |
 | `OIDC_ISSUER` | `Issuer` | Enables the OIDC client (with `OIDC_CLIENT_ID`). |
 | `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | `ClientID` / `ClientSecret` | Confidential OIDC client. |
 | `OIDC_REDIRECT_URL` | `RedirectURL` | e.g. `https://app.example.com/auth/callback`. |
@@ -298,7 +298,11 @@ Boot **fails closed** if auth is active and `SESSION_SECRET` is shorter than 32 
 ## Authentication methods
 
 ### Passwords
-`POST /auth/password/signup` → creates an unverified user and emails a verification link.
+`POST /auth/password/signup` → creates an unverified user and emails a verification link. Anyone can
+sign up with any address, so the password is unproven until the mailbox is: the verify link keeps it
+only when opened **in the browser that signed up** (a signed `sweep_signup` cookie binds the two);
+opened elsewhere — or replaced by a magic link / email code — it signs the mailbox owner in and drops
+the unproven password (they set their own). A signup never touches a verified account.
 `POST /auth/password/login` → verifies bcrypt, requires a verified email, mints the session. NIST-style
 policy (length + breach/email-localpart checks), constant-cost dummy-hash on unknown users to defeat
 enumeration, and a transparent rehash-on-login path that upgrades stored hashes when the bcrypt cost
@@ -340,7 +344,9 @@ cfg.SocialOIDC = []authx.SocialOIDCProvider{{
 
 This covers GitLab, Okta, Auth0, Keycloak, and the like with the same PKCE + nonce + `azp` +
 `email_verified` path as Google. Set `AssumeVerified` per provider to control whether a token that omits
-`email_verified` is trusted (only for a single, trusted issuer that owns its addresses). `GET /auth/config`
+`email_verified` is trusted (only for a single, trusted issuer that owns its addresses); an explicit
+`email_verified: false` is always refused, and a missing `email` is never filled from
+`preferred_username` (only the pinned-tenant Microsoft preset does that). `GET /auth/config`
 lists every enabled provider in `socialProviders` so the SPA can render the right buttons.
 
 > **Microsoft / Entra — pin your tenant.** The multi-tenant endpoints (`common`, `organizations`,
@@ -361,7 +367,9 @@ Wire the optional `TwoFactorStore` with `SetTwoFactorStore(store)` (reference im
 `memory`). TOTP is implemented with the **standard library only — no dependency** (RFC 4226/6238,
 HMAC-SHA1 / 6 digits / 30s, ±1-step skew), verified against the published RFC vectors.
 
-- **Enroll** — `POST /auth/2fa/totp/begin` (session-gated) returns the `otpauth://` URI + base32 secret
+- **Enroll** — `POST /auth/2fa/totp/begin` (session-gated; a user who already has a password or TOTP
+  must step up first — `403 reauth_required` — so a stolen session can't add a factor of its own;
+  passkey registration and a first password follow the same rule) returns the `otpauth://` URI + base32 secret
   (**you render the QR** — the library ships no image dependency); `POST /auth/2fa/totp/confirm`
   validates a code, enables it, and returns single-use **recovery codes** once.
 - **Enforce** — when a user has TOTP enabled, a first-factor login no longer mints the session: it sets
@@ -477,6 +485,10 @@ syncer := ldapsync.New(ldapsync.Config{
 result, err := syncer.Sync() // run on a schedule
 ```
 
+An entry whose `mail` already belongs to an account the sync didn't create (a local or social sign-in,
+the owner) is skipped and reported in `result.Errors` — set `AdoptExisting: true` only for a directory
+you trust as much as your own sign-in. Deprovisioning (`DeprovisionMissing`) ends the user's sessions.
+
 ### SCIM 2.0
 A mountable provisioning server so an upstream IdP (Okta, Entra/Azure AD, JumpCloud) can push and
 deprovision Users + Groups. Supports create / read / list / **PATCH deprovision (`active=false`)** /
@@ -575,7 +587,7 @@ for _, pat := range p.Patterns() { mux.Handle(pat, p.Handler()) }
 
 // The app's consent screen:
 req, _ := p.Pending(ctx, id, session.Subject)   // client, scopes, resources
-next, _ := p.Approve(ctx, id, session.Subject, oidcprovider.Decision{Scopes: chosen, Ref: myRecordID})
+next, _ := p.Approve(ctx, id, session.Subject, oidcprovider.Decision{Scopes: chosen, Ref: myRecordID}) // refresh tokens only if chosen includes offline_access
 // …then send the browser to next.
 
 // The resource server:
