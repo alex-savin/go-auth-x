@@ -22,6 +22,7 @@ const (
 	audWebauthn = "authx:webauthn-flow"
 	audPending  = "authx:2fa-pending"
 	audStepUp   = "authx:stepup"
+	audSignup   = "authx:signup"
 )
 
 // SessionClaims is the signed session-cookie payload — the authenticated identity.

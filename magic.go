@@ -1,9 +1,14 @@
 package authx
 
 import (
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"net/http"
 	"net/url"
 	"time"
+
+	"github.com/golang-jwt/jwt/v5"
 )
 
 // AuthConfig (GET /auth/config) is public and tells the SPA which sign-in methods are
@@ -42,6 +47,60 @@ func (a *Authenticator) sendVerifyEmail(userID, email string) {
 	_ = a.sendAuthEmail(email, "Confirm your email", "Confirm your email",
 		"Welcome! Confirm your email to activate your account and sign in.",
 		"Confirm email", link, "This link is valid for 24 hours. If you didn't sign up, ignore this email.")
+}
+
+// Signup binding: the password a signup sets is chosen by whoever submitted the form, which needn't be
+// the mailbox's owner. A short-lived signed cookie in the signing-up browser names the user and the
+// password hash it set; the verify link keeps that password only when the browser presents a binding
+// that still matches the stored hash.
+
+const signupCookie = "sweep_signup"
+
+type signupClaims struct {
+	PasswordHash string `json:"ph"` // sha256 of the stored hash the signup set
+	jwt.RegisteredClaims
+}
+
+func signupHashID(hash string) string {
+	h := sha256.Sum256([]byte(hash))
+	return hex.EncodeToString(h[:])
+}
+
+func (a *Authenticator) setSignupBinding(c *reqCtx, userID, hash string) {
+	now := time.Now()
+	tok, err := signJWT(a.cfg.SessionSecret, signupClaims{PasswordHash: signupHashID(hash), RegisteredClaims: jwt.RegisteredClaims{
+		Subject: userID, Audience: jwt.ClaimStrings{audSignup},
+		IssuedAt: jwt.NewNumericDate(now), ExpiresAt: jwt.NewNumericDate(now.Add(ttlVerifyEmail)),
+	}})
+	if err == nil {
+		a.setCookie(c, signupCookie, tok, int(ttlVerifyEmail/time.Second))
+	}
+}
+
+// signupBound reports whether this browser signed up for userID with the password hash it holds now.
+func (a *Authenticator) signupBound(c *reqCtx, userID, hash string) bool {
+	var claims signupClaims
+	if parseJWTMulti(a.verifySecrets(), cookieValue(c.Request, signupCookie), &claims, audSignup) != nil {
+		return false
+	}
+	return claims.Subject == userID && subtle.ConstantTimeCompare([]byte(claims.PasswordHash), []byte(signupHashID(hash))) == 1
+}
+
+// claimMailbox records a mailbox proof for u (a redeemed link or code). When it is what verifies the
+// address, a password already on the account was set by someone who hadn't proven the mailbox — a
+// signup by anyone — so it is dropped, unless keepBoundPassword and this very browser set it
+// (signupBound). The person who proved the mailbox is signed in and can set a password of their own.
+func (a *Authenticator) claimMailbox(c *reqCtx, u *AuthUser, keepBoundPassword bool) error {
+	defer a.clearCookie(c, signupCookie)
+	if u.EmailVerified {
+		return nil
+	}
+	if hash, _, err := a.passwordHash(u.ID); err == nil && !(keepBoundPassword && a.signupBound(c, u.ID, hash)) {
+		if err := a.creds.SetPasswordHash(u.ID, "", ""); err != nil {
+			return err
+		}
+	}
+	return a.creds.SetEmailVerified(u.ID, true)
 }
 
 // EmailRequest (POST /auth/email/request) emails a one-time sign-in (magic) link. Always 200
@@ -113,13 +172,16 @@ func (a *Authenticator) redeemAndLogin(c *reqCtx, purpose string, markVerified b
 		fail("this link is invalid or has expired")
 		return
 	}
-	if markVerified {
-		_ = a.creds.SetEmailVerified(claim.UserID, true)
-	}
 	u, err := a.creds.UserByEmail(claim.Email)
 	if err != nil {
 		fail("account not found")
 		return
+	}
+	if markVerified {
+		if err := a.claimMailbox(c, u, purpose == purposeVerifyEmail); err != nil {
+			fail("sign-in failed")
+			return
+		}
 	}
 	if blocked, msg := u.loginBlocked(); blocked {
 		fail(msg)

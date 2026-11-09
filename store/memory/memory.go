@@ -366,6 +366,10 @@ func (s *Store) SetPasswordHash(userID, hash, algo string) error {
 	if !ok {
 		return nil
 	}
+	if hash == "" { // removes the password (see authx.CredentialStore.SetPasswordHash)
+		delete(s.passwords, n)
+		return nil
+	}
 	s.passwords[n] = struct{ hash, algo string }{hash, algo}
 	return nil
 }
@@ -616,20 +620,25 @@ func (s *Store) UpsertUserOnLogin(sub, email, name string, emailVerified bool) (
 	defer s.mu.Unlock()
 	email = norm(email)
 	if u := s.findBySub(sub); u != nil {
-		// Uphold the one-user-per-email invariant gormstore enforces with a unique index: refuse to
-		// move this row onto an email another row already owns.
-		if email != u.email {
+		switch {
+		case email == "": // an identity that asserts no address leaves the stored one alone
+		case email != u.email:
+			// Uphold the one-user-per-email invariant gormstore enforces with a unique index: refuse
+			// to move this row onto an email another row already owns.
 			if other := s.findByEmail(email); other != nil && other.id != u.id {
 				return nil, authx.ErrEmailConflict
 			}
-		}
-		u.email, u.name = email, name
-		if emailVerified {
+			// A new address is exactly as verified as this assertion proves — verification of the
+			// old one doesn't carry over.
+			u.email, u.emailVerified = email, emailVerified
+		case emailVerified:
 			u.emailVerified = true
 		}
+		u.name = name
 		return view(u), nil
 	}
-	if existing := s.findByEmail(email); existing != nil {
+	// No address, no account to link: an empty email never matches another row.
+	if existing := s.findByEmail(email); email != "" && existing != nil {
 		bootstrap := strings.HasPrefix(existing.sub, "bootstrap:")
 		if bootstrap || existing.emailVerified {
 			// Rebind a verified row to a new subject only when THIS login proved the email; an
@@ -641,6 +650,9 @@ func (s *Store) UpsertUserOnLogin(sub, email, name string, emailVerified bool) (
 			existing.sub, existing.name = sub, name
 			if emailVerified {
 				existing.emailVerified = true
+			}
+			if bootstrap { // a placeholder's claimant gets no credential someone else put on it
+				delete(s.passwords, existing.id)
 			}
 			return view(existing), nil
 		}

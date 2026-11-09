@@ -142,7 +142,12 @@ func New(db *gorm.DB) (*Store, error) {
 	); err != nil {
 		return nil, err
 	}
-	if err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uniq_authx_users_email ON authx_users (email)`).Error; err != nil {
+	// One account per address — but any number without one (an identity that asserts no email), so
+	// the index is partial. It replaces the earlier full index of the same purpose.
+	if err := db.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS uniq_authx_users_email_set ON authx_users (email) WHERE email <> ''`).Error; err != nil {
+		return nil, err
+	}
+	if err := db.Exec(`DROP INDEX IF EXISTS uniq_authx_users_email`).Error; err != nil {
 		return nil, err
 	}
 	s := &Store{db}
@@ -380,6 +385,9 @@ func (s *Store) SetPasswordHash(userID, hash, algo string) error {
 	n, ok := parseID(userID)
 	if !ok {
 		return authx.ErrNoUser
+	}
+	if hash == "" { // removes the password (see authx.CredentialStore.SetPasswordHash)
+		return s.db.Where("user_id = ?", n).Delete(&PasswordCredential{}).Error
 	}
 	now := time.Now()
 	return s.db.Clauses(clause.OnConflict{
@@ -676,7 +684,8 @@ func (s *Store) UpsertUserOnLogin(sub, email, name string, emailVerified bool) (
 	err := s.db.Where("sub = ?", sub).First(&u).Error
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		var existing User
-		if e2 := s.db.Where("email = ?", email).First(&existing).Error; e2 == nil {
+		// No address, no account to link: an empty email never matches another row.
+		if e2 := s.db.Where("email = ? AND email <> ''", email).First(&existing).Error; e2 == nil {
 			bootstrap := strings.HasPrefix(existing.Sub, "bootstrap:")
 			if bootstrap || existing.EmailVerified {
 				// Rebinding an existing (verified) row to a NEW subject is safe only when THIS login
@@ -690,7 +699,14 @@ func (s *Store) UpsertUserOnLogin(sub, email, name string, emailVerified bool) (
 				if emailVerified {
 					existing.EmailVerified = true
 				}
-				if err := s.db.Save(&existing).Error; err != nil {
+				if err := s.db.Transaction(func(tx *gorm.DB) error {
+					if bootstrap { // a placeholder's claimant gets no credential someone else put on it
+						if err := tx.Where("user_id = ?", existing.ID).Delete(&PasswordCredential{}).Error; err != nil {
+							return err
+						}
+					}
+					return tx.Save(&existing).Error
+				}); err != nil {
 					return nil, err
 				}
 				return toAuthUser(&existing), nil
@@ -727,18 +743,22 @@ func (s *Store) UpsertUserOnLogin(sub, email, name string, emailVerified bool) (
 	// Moving this row onto an email another row already owns must return the typed ErrEmailConflict
 	// (parity with the in-memory store), not a raw driver unique-constraint error — the unique index is
 	// only the fail-closed backstop.
-	if email != normalizeEmail(u.Email) {
+	switch {
+	case email == "": // an identity that asserts no address leaves the stored one alone
+	case email != normalizeEmail(u.Email):
 		var other User
 		if e2 := s.db.Where("email = ? AND id <> ?", email, u.ID).First(&other).Error; e2 == nil {
 			return nil, authx.ErrEmailConflict
 		} else if !errors.Is(e2, gorm.ErrRecordNotFound) {
 			return nil, e2
 		}
-	}
-	u.Email, u.Name, u.LastLoginAt = email, name, time.Now()
-	if emailVerified {
+		// A new address is exactly as verified as this assertion proves — verification of the old
+		// one doesn't carry over.
+		u.Email, u.EmailVerified = email, emailVerified
+	case emailVerified:
 		u.EmailVerified = true
 	}
+	u.Name, u.LastLoginAt = name, time.Now()
 	if err := s.db.Save(&u).Error; err != nil {
 		return nil, err
 	}

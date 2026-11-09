@@ -16,7 +16,7 @@ const accountStepUpMaxAge = 10 * time.Minute
 // step-up gate would lock them out permanently; it is not a net protection loss for them, since their
 // session already permits setting a password (i.e. self-service takeover) without a prior factor.
 func (a *Authenticator) hasReauthFactor(userID string) bool {
-	if _, _, err := a.creds.PasswordHash(userID); err == nil {
+	if _, _, err := a.passwordHash(userID); err == nil {
 		return true
 	}
 	if a.twoFactor != nil {

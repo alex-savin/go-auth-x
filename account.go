@@ -28,7 +28,7 @@ func (a *Authenticator) AccountInfo(c *reqCtx) {
 	for _, p := range pks {
 		views = append(views, passkeyView{ID: p.ID, Name: p.Name, CreatedAt: p.CreatedAt, LastUsedAt: p.LastUsedAt})
 	}
-	_, _, perr := a.creds.PasswordHash(au.ID)
+	_, _, perr := a.passwordHash(au.ID)
 	oauthIDs, _ := a.creds.OAuthIdentities(au.ID)
 	c.JSON(http.StatusOK, H{
 		"email":           au.Email,
@@ -45,7 +45,7 @@ func (a *Authenticator) AccountInfo(c *reqCtx) {
 // signInMethods counts a user's independent sign-in methods: a password, each passkey, and each linked
 // OAuth provider. Used to refuse removing the LAST one (which would lock the user out).
 func (a *Authenticator) signInMethods(userID string) (total int) {
-	if _, _, perr := a.creds.PasswordHash(userID); perr == nil {
+	if _, _, perr := a.passwordHash(userID); perr == nil {
 		total++
 	}
 	pks, _ := a.creds.Passkeys(userID)
@@ -68,7 +68,7 @@ func (a *Authenticator) AccountSetPassword(c *reqCtx) {
 		c.JSON(http.StatusBadRequest, H{"error": "invalid request"})
 		return
 	}
-	if hash, _, perr := a.creds.PasswordHash(au.ID); perr == nil {
+	if hash, _, perr := a.passwordHash(au.ID); perr == nil {
 		if bcrypt.CompareHashAndPassword([]byte(hash), []byte(body.Current)) != nil {
 			c.JSON(http.StatusForbidden, H{"error": "current password is incorrect"})
 			return

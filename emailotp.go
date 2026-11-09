@@ -108,7 +108,10 @@ func (a *Authenticator) EmailOTPVerify(c *reqCtx) {
 		c.JSON(http.StatusForbidden, H{"error": msg})
 		return
 	}
-	_ = a.creds.SetEmailVerified(u.ID, true) // redeeming an emailed code proves email control
+	if err := a.claimMailbox(c, u, false); err != nil { // redeeming an emailed code proves email control
+		c.JSON(http.StatusInternalServerError, H{"error": "sign-in failed"})
+		return
+	}
 	a.creds.RecordAudit(u.ID, u.Email, c.ClientIP(), "email_otp", "login", true, "")
 	tfr, err := a.completeLogin(c, Identity{Subject: u.Sub, Email: u.Email, Name: u.Name, EmailVerified: true}, body.Remember, nil)
 	if err != nil {

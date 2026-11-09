@@ -115,6 +115,9 @@ type CredentialStore interface {
 
 	// Password
 	PasswordHash(userID string) (hash, algo string, err error) // ErrNoCredential if unset
+	// SetPasswordHash sets the user's password; an empty hash removes it (a mailbox proof drops a
+	// password nobody proved — see claimMailbox). A store that keeps the empty hash still works: the
+	// auth package treats an empty hash as no password.
 	SetPasswordHash(userID, hash, algo string) error
 
 	// Social (OAuth) identities — natural key (provider, subject), NOT email, so an upstream
@@ -178,6 +181,15 @@ func (a *Authenticator) SetLocalEnabled(on bool) {
 
 // LocalEnabled reports whether in-app auth methods are active (flag on + a credential store).
 func (a *Authenticator) LocalEnabled() bool { return a != nil && a.localEnabled && a.creds != nil }
+
+// passwordHash is CredentialStore.PasswordHash with an empty hash read as "no password".
+func (a *Authenticator) passwordHash(userID string) (hash, algo string, err error) {
+	hash, algo, err = a.creds.PasswordHash(userID)
+	if err == nil && hash == "" {
+		return "", "", ErrNoCredential
+	}
+	return hash, algo, err
+}
 
 // UserBySub returns the stored user with this subject, or ErrNoUser when there is none (or no
 // CredentialStore is wired). A user who may not sign in (disabled, banned) comes back with

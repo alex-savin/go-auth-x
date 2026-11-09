@@ -99,8 +99,9 @@ func (a *Authenticator) PasswordSignup(c *reqCtx) {
 	case err != nil:
 		c.JSON(http.StatusInternalServerError, H{"error": "could not create account"})
 		return
-	case u.EmailVerified:
-		// Account already exists and is verified: do NOT touch its password. Nudge them to
+	case u.EmailVerified || strings.HasPrefix(u.Sub, "bootstrap:"):
+		// Account already exists and is verified (or is an operator-seeded placeholder its owner
+		// claims by signing in): do NOT touch its password. Nudge them to
 		// sign in / reset instead, and still answer generically. Burn a bcrypt hash first so this
 		// branch costs ~the same as the new-account path below — otherwise the response time would
 		// reveal that the address is already registered.
@@ -116,7 +117,10 @@ func (a *Authenticator) PasswordSignup(c *reqCtx) {
 		return
 	}
 
-	// New or still-unverified account: (re)set the password and send a fresh verify link.
+	// New or still-unverified account: (re)set the password and send a fresh verify link. The
+	// password is unproven until the address is: anyone may sign up with any address, so the verify
+	// link keeps it only when opened in THIS browser with THIS password (setSignupBinding); any other
+	// mailbox proof drops it (claimMailbox).
 	hash, herr := hashPassword(body.Password)
 	if herr != nil {
 		c.JSON(http.StatusInternalServerError, H{"error": "could not create account"})
@@ -126,6 +130,7 @@ func (a *Authenticator) PasswordSignup(c *reqCtx) {
 		c.JSON(http.StatusInternalServerError, H{"error": "could not create account"})
 		return
 	}
+	a.setSignupBinding(c, u.ID, hash)
 	a.sendVerifyEmail(u.ID, email)
 	a.creds.RecordAudit(u.ID, email, c.ClientIP(), "password", "signup", true, "")
 	c.JSON(http.StatusOK, H{"ok": true, "message": generic})
@@ -170,7 +175,7 @@ func (a *Authenticator) PasswordLogin(c *reqCtx) {
 		c.JSON(http.StatusInternalServerError, H{"error": "login failed"})
 		return
 	}
-	hash, _, perr := a.creds.PasswordHash(u.ID)
+	hash, _, perr := a.passwordHash(u.ID)
 	if errors.Is(perr, ErrNoCredential) {
 		_ = bcrypt.CompareHashAndPassword(dummyHash, []byte(body.Password))
 		a.creds.RecordAudit(u.ID, email, ip, "password", "login", false, "no_password")
