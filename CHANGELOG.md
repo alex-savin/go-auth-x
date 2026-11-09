@@ -46,6 +46,10 @@ regression test. **Upgrade promptly.** Several fixes change behavior callers can
 - **SCIM `/Bulk`** could nest itself (any path spelling) — one sub-1 MiB request pinned gigabytes of
   heap; malformed operations panicked. Nesting is refused, malformed operations are per-op 400s, group
   filters load members once, filters are capped at 4 KiB.
+- **OAuth endpoints' CORS** — `oidcprovider` kept zitadel's default policy, which echoes any `Origin`
+  back with `Access-Control-Allow-Credentials: true` on every endpoint under the prefix. Any origin may
+  still call them (`*`), never with the user's cookies. (Found by the new ZAP scan; `SameSite=Lax`
+  session cookies limited it to same-site origins.)
 - **Client IP** — only the first `X-Forwarded-For` line was read and `ip:port` entries became their own
   rate-limit keys; every line is walked now, ports stripped.
 - **Lower severity** — logins no longer write back stale user rows (a concurrent ban or deletion
