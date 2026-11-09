@@ -1,0 +1,76 @@
+# Security checks.
+#   govulncheck — known vulnerabilities in code the module reaches: on every change, and weekly (new
+#     advisories are published against code that hasn't changed).
+#   ZAP — OWASP ZAP against the demo server (examples/demo), which wires every surface of the library:
+#     a passive baseline scan on every change, a full active scan weekly and on demand. Rules are in
+#     .zap/rules.tsv (FAIL for weak cookies, missing protective headers, injection, XSS). Reports are
+#     uploaded as workflow artifacts instead of opened as issues. (Artifacts of a public repository are
+#     readable by any signed-in GitHub user — but anyone can run the same scan against the demo.)
+name: security
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "17 6 * * 1" # Mondays, 06:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: true
+
+jobs:
+  govulncheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
+  zap:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: stable
+      - name: Start the demo server
+        run: |
+          go build -o "$RUNNER_TEMP/demo" ./examples/demo
+          DEMO_ADDR=127.0.0.1:8080 APP_URL=http://127.0.0.1:8080 "$RUNNER_TEMP/demo" > "$RUNNER_TEMP/demo.log" 2>&1 &
+          for i in $(seq 1 30); do
+            curl -sf -o /dev/null http://127.0.0.1:8080/ && exit 0
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/demo.log"
+          exit 1
+      - name: ZAP baseline scan (passive)
+        if: github.event_name == 'push' || github.event_name == 'pull_request'
+        uses: zaproxy/action-baseline@v0.15.0
+        with:
+          target: http://127.0.0.1:8080
+          rules_file_name: .zap/rules.tsv
+          cmd_options: -I
+          fail_action: true
+          allow_issue_writing: false
+          artifact_name: zap-baseline
+      - name: ZAP full scan (active)
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        uses: zaproxy/action-full-scan@v0.13.0
+        with:
+          target: http://127.0.0.1:8080
+          rules_file_name: .zap/rules.tsv
+          cmd_options: -I
+          fail_action: true
+          allow_issue_writing: false
+          artifact_name: zap-full-scan
+      - name: Demo server log
+        if: always()
+        run: cat "$RUNNER_TEMP/demo.log"

@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `examples/demo`: a runnable server wiring every surface against the in-memory store.
+- CI: a `security` workflow — govulncheck (moved from the lint job) and an OWASP ZAP scan of the
+  demo: a passive baseline on every change, a full active scan weekly and on demand. Rules in
+  `.zap/rules.tsv`; reports are uploaded as workflow artifacts, not opened as issues.
+
 ## [0.12.0] — 2026-11-07
 
 `prompt=login` / `max_age` in the `oidcprovider`, OAuth records that go with the user, private email

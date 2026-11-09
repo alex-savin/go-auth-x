@@ -1,6 +1,6 @@
 # Checks every pull request and every push to main: formatting, a tidy go.mod, vet, the tests under
-# the race detector (on the oldest Go go.mod allows and on the current release), staticcheck, and
-# govulncheck — which fails only on a vulnerability the code actually reaches.
+# the race detector (on the oldest Go go.mod allows and on the current release), and staticcheck.
+# govulncheck and the ZAP scan live in security.yml (they also run on a schedule).
 name: ci
 
 on:
@@ -52,5 +52,3 @@ jobs:
         run: go mod tidy -diff
       - name: staticcheck
         run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
-      - name: govulncheck
-        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...

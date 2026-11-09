@@ -184,6 +184,10 @@ func main() {
 > **You provide the login UI.** The library serves JSON + the WebAuthn/OIDC ceremony endpoints under
 > `/auth/*`; your app renders the login/register pages and calls them (see [HTTP endpoints](#http-endpoints)).
 
+To see every surface wired together — passwords, passkeys, email links and codes, 2FA, organizations,
+the admin API, SCIM and the OAuth/OIDC provider, against the in-memory store — run the demo:
+`go run ./examples/demo` (http://127.0.0.1:8080; emails are printed to the log).
+
 ---
 
 ## Architecture
@@ -698,6 +702,11 @@ verified-linked), OAuth-identity round-trip, the net/http adapter, the directory
 scopes + `RequireGroupsHTTP` allow/deny, and the **SCIM user lifecycle** (provision → filter → PUT →
 deprovision). The reference stores carry compile-time interface assertions.
 
+CI runs the tests under the race detector, `go vet`, staticcheck and gofmt on every change.
+The `security` workflow runs [govulncheck](https://go.dev/doc/security/vuln/) and an
+[OWASP ZAP](https://www.zaproxy.org/) scan of `examples/demo` — a passive baseline on every change, a
+full active scan weekly — with the rules in [`.zap/rules.tsv`](.zap/rules.tsv).
+
 ---
 
 ## Project layout
@@ -712,6 +721,8 @@ go-auth-x/
 ├── mailer/               SMTP (STARTTLS) Mailer
 ├── ldapsync/             LDAP/AD → directory sync
 ├── scim/                 SCIM 2.0 provisioning server
+├── oidcprovider/         OAuth 2.1 / OIDC provider
+├── examples/demo/        runnable demo (also the ZAP scan target)
 ├── LICENSE               MIT
 └── README.md
 ```
