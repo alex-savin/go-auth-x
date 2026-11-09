@@ -270,6 +270,12 @@ func (a *Authenticator) PasswordResetConfirm(c *reqCtx) {
 		c.JSON(http.StatusBadRequest, H{"error": "this reset link is invalid or has expired"})
 		return
 	}
+	// The link was mailed to an address; if the account has moved to another address since, the old
+	// mailbox no longer speaks for it.
+	if u, uerr := a.creds.UserByEmail(claim.Email); uerr != nil || u.ID != claim.UserID {
+		c.JSON(http.StatusBadRequest, H{"error": "this reset link is invalid or has expired"})
+		return
+	}
 	if msg := a.passwordPolicyError(c.Request.Context(), body.Password, claim.Email); msg != "" {
 		c.JSON(http.StatusBadRequest, H{"error": msg})
 		return

@@ -71,8 +71,8 @@ func newFakeIdP(t *testing.T) *fakeIdP {
 	return p
 }
 
-// newOIDCAuth is newTestAuth with the primary OIDC client pointed at idp.
-func newOIDCAuth(t *testing.T, idp *fakeIdP, assumeVerified bool) (*authx.Authenticator, *memory.Store) {
+// newOIDCTestAuth is newTestAuth with the primary OIDC client pointed at idp.
+func newOIDCTestAuth(t *testing.T, idp *fakeIdP, assumeVerified bool) (*authx.Authenticator, *memory.Store) {
 	t.Helper()
 	store := memory.New()
 	a, err := authx.New(context.Background(), authx.Config{

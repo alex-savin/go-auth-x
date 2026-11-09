@@ -489,6 +489,31 @@ func (s *Server) putUser(w http.ResponseWriter, r *http.Request) {
 	if in.Name != nil && in.Name.Formatted != "" {
 		name = in.Name.Formatted
 	}
+	active := activeWithDefault(raw)
+	// Only an account SCIM provisioned has an address SCIM may re-point. Another one — a local
+	// password account, an OIDC or social sign-in, the owner — keeps its email: moving it would hand
+	// that account's password reset and magic links to whoever the new address belongs to.
+	if normEmail(email) != normEmail(cur.Email) && !strings.HasPrefix(cur.Sub, "scim:") {
+		scimErrorType(w, http.StatusBadRequest, "mutability", "the email of an account not provisioned by SCIM can't be changed here")
+		return
+	}
+	// A deprovisioning PUT only deprovisions: refused (an org owner), it must not have changed anything.
+	if !active {
+		if derr := s.dir.SetUserDisabled(cur.ID, true); errors.Is(derr, authx.ErrOrgOwnerDeprovision) {
+			scimError(w, http.StatusForbidden, derr.Error())
+			return
+		} else if derr != nil {
+			s.scimInternal(w, "putUser", derr)
+			return
+		}
+		u, uerr := s.dir.UserByID(cur.ID)
+		if uerr != nil { // an org-scoped directory removes a deprovisioned user from view (see patchUser)
+			u = cur
+			u.Disabled = true
+		}
+		writeResource(w, http.StatusOK, s.toSCIMUser(u), userVersion(u))
+		return
+	}
 	if _, uerr := s.dir.UpsertExternalUser(cur.Sub, email, name, true); uerr != nil { // preserve Sub
 		if errors.Is(uerr, authx.ErrEmailConflict) { // PUT would move this user onto another's email
 			scimErrorType(w, http.StatusConflict, "uniqueness", "a user with this email already exists")
@@ -497,19 +522,20 @@ func (s *Server) putUser(w http.ResponseWriter, r *http.Request) {
 		s.scimInternal(w, "putUser", uerr)
 		return
 	}
-	if derr := s.dir.SetUserDisabled(cur.ID, !activeWithDefault(raw)); errors.Is(derr, authx.ErrOrgOwnerDeprovision) {
-		scimError(w, http.StatusForbidden, derr.Error())
+	if derr := s.dir.SetUserDisabled(cur.ID, false); derr != nil {
+		s.scimInternal(w, "putUser", derr)
 		return
 	}
 	u, uerr := s.dir.UserByID(cur.ID)
 	if uerr != nil {
-		// See patchUser: an org-scoped directory removes a deprovisioned user from view — render
-		// the pre-PUT resource with the applied state instead of dereferencing a miss.
-		u = cur
-		u.Disabled = !activeWithDefault(raw)
+		s.scimInternal(w, "putUser", uerr)
+		return
 	}
 	writeResource(w, http.StatusOK, s.toSCIMUser(u), userVersion(u))
 }
+
+// normEmail compares addresses as the stores key them: trimmed, lower-cased.
+func normEmail(e string) string { return strings.ToLower(strings.TrimSpace(e)) }
 
 func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
 	id := pathID(r)

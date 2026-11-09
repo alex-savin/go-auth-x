@@ -82,9 +82,20 @@ func generateAPIKey() (raw, prefix string, hash []byte) {
 	return raw, prefix, hashToken(raw)
 }
 
-// ValidateAPIKey resolves a raw API key to its info if it exists and is not expired (and stamps
-// last-used). Useful for wiring API-key auth into other surfaces (e.g. the SCIM server).
+// ValidateAPIKey resolves a raw GLOBAL API key to its info if it exists and is not expired (and
+// stamps last-used). An org-bound key is refused, as by every global surface. It does NOT check
+// scopes — a key granted nothing passes — so gate a surface with ValidateAPIKeyScope (global
+// surfaces, e.g. the global SCIM server) or ValidateOrgAPIKeyScope (an org's surfaces), not with it.
 func (a *Authenticator) ValidateAPIKey(raw string) (*APIKeyInfo, bool) {
+	info, ok := a.lookupAPIKey(raw)
+	if !ok || info.OrgID != "" {
+		return nil, false
+	}
+	return info, true
+}
+
+// lookupAPIKey resolves any live key, global or org-bound (stamping last-used).
+func (a *Authenticator) lookupAPIKey(raw string) (*APIKeyInfo, bool) {
 	if a.dir == nil || raw == "" {
 		return nil, false
 	}
@@ -126,7 +137,7 @@ func (a *Authenticator) adminGuard(c *reqCtx) bool {
 	keyPresent, keyValidNoScope := false, false
 	if key := bearerToken(c.GetHeader("Authorization")); key != "" {
 		keyPresent = true
-		if info, ok := a.ValidateAPIKey(key); ok {
+		if info, ok := a.lookupAPIKey(key); ok { // org-bound too: a real key without global admin is a 403
 			// An ORG-BOUND key never grants GLOBAL admin, whatever scopes it carries — its blast
 			// radius is its org (ValidateOrgAPIKeyScope). Only a global key passes here.
 			if KeyHasScope(info, "admin") && info.OrgID == "" {
@@ -137,8 +148,7 @@ func (a *Authenticator) adminGuard(c *reqCtx) bool {
 	}
 	// An impersonation session must NOT be able to act as admin (it carries ImpersonatedBy), even if
 	// the impersonated user happens to be the owner.
-	if sc := a.sessionOf(c); sc != nil && sc.ImpersonatedBy == "" && a.cfg.OwnerEmail != "" &&
-		strings.EqualFold(strings.TrimSpace(sc.Email), a.cfg.OwnerEmail) {
+	if sc := a.sessionOf(c); sc != nil && sc.ImpersonatedBy == "" && a.isOwnerSession(sc) {
 		return true
 	}
 	switch {
@@ -155,6 +165,29 @@ func (a *Authenticator) adminGuard(c *reqCtx) bool {
 		c.JSON(http.StatusUnauthorized, H{"error": "owner session or API key with 'admin' scope required"})
 	}
 	return false
+}
+
+// isOwnerSession reports whether a session is the instance owner's. With a CredentialStore the owner
+// is the LIVE account behind the session — its stored, verified address equal to OWNER_EMAIL, and
+// allowed to sign in — not whatever email the cookie was minted with (an address can be re-pointed or
+// asserted by a provisioning source, and a cookie outlives a change). Without one (a stateless OIDC
+// deployment) the cookie's email, from the IdP's verified login, is all there is. Both compare
+// exactly after normalization: Unicode case-folding would let a distinct address ("ſ" for "s") pass.
+func (a *Authenticator) isOwnerSession(sc *SessionClaims) bool {
+	if a.cfg.OwnerEmail == "" {
+		return false
+	}
+	if a.creds == nil {
+		return a.isOwnerEmail(sc.Email)
+	}
+	u, err := a.creds.UserBySub(sc.Subject)
+	if err != nil || !u.EmailVerified {
+		return false
+	}
+	if blocked, _ := u.loginBlocked(); blocked {
+		return false
+	}
+	return a.isOwnerEmail(u.Email)
 }
 
 // adminRoutes mounts the admin REST API under /auth/admin (called by routes() when a directory

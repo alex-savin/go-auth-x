@@ -118,7 +118,7 @@ func TestSignupLeavesBootstrapRowAlone(t *testing.T) {
 // with TOTP gets the second-factor step, not a session.
 func TestOIDCCallbackEnforcesBlocksAndSecondFactor(t *testing.T) {
 	idp := newFakeIdP(t)
-	a, s := newOIDCAuth(t, idp, false)
+	a, s := newOIDCTestAuth(t, idp, false)
 	u := seedUser(t, s, "user@x.com", "", true)
 	claims := jwt.MapClaims{"sub": "idp|user", "email": "user@x.com", "email_verified": true}
 
@@ -143,7 +143,7 @@ func TestOIDCCallbackEnforcesBlocksAndSecondFactor(t *testing.T) {
 // an absent claim), and identities without an email never share an account.
 func TestOIDCEmailTrust(t *testing.T) {
 	idp := newFakeIdP(t)
-	a, s := newOIDCAuth(t, idp, true)
+	a, s := newOIDCTestAuth(t, idp, true)
 	victim := seedUser(t, s, "victim@x.com", "victim-password-1", true)
 
 	if w := idp.oidcSignIn(t, newClient(t, a), jwt.MapClaims{"sub": "idp|mallory", "email": "victim@x.com", "email_verified": false}); w.Code != http.StatusUnauthorized {

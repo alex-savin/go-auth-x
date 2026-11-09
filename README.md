@@ -484,13 +484,15 @@ deprovision Users + Groups. Supports create / read / list / **PATCH deprovision 
 with **`and`/`or`/`not`** + parens + **valuePath** `emails[type eq "work"]`), **sorting**
 (`sortBy`/`sortOrder`), **pagination** (`startIndex`/`count`), and **ETags** (`If-Match` / `If-None-Match`).
 Resources carry `meta.created`/`meta.lastModified`, and discovery is complete: `ServiceProviderConfig` /
-`ResourceTypes` / full **`/Schemas`** documents (+ `/Schemas/{id}`). Bearer-auth via `ValidateAPIKey`.
+`ResourceTypes` / full **`/Schemas`** documents (+ `/Schemas/{id}`). Bearer-auth with
+`ValidateAPIKeyScope(t, "scim")` — never the bare `ValidateAPIKey`, which checks neither scope nor org
+binding. SCIM may re-point the email only of accounts it provisioned; other accounts keep theirs.
 Group membership changes are written in **one batch** when the store implements `BatchGroupStore`
 (both reference stores do), and `srv.SetLogger(l)` routes internal errors to your `*slog.Logger`.
 
 ```go
 mux.Handle("/scim/v2/", http.StripPrefix("/scim/v2",
-	scim.NewServer(store, func(t string) bool { _, ok := authn.ValidateAPIKey(t); return ok }).Handler()))
+	scim.NewServer(store, func(t string) bool { return authn.ValidateAPIKeyScope(t, "scim") }).Handler()))
 ```
 
 ### Organizations (multi-tenant orgs)
