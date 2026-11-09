@@ -3,6 +3,7 @@ package authx
 import (
 	"net/http"
 	"os"
+	"path"
 	"strings"
 )
 
@@ -35,6 +36,9 @@ func TrustedProxies() []string {
 // container healthcheck — plus the consuming app's login pages, via Config.PublicPath (or the
 // built-in reference defaults when that's nil).
 func (a *Authenticator) publicPath(p string) bool {
+	// Decide on the path the handler will serve: "/auth/../secret" is not under /auth/ (a handler
+	// that cleans paths itself, like http.FileServer, serves /secret).
+	p = path.Clean("/" + p)
 	// The library's own surface is ALWAYS public, regardless of Config.PublicPath.
 	if strings.HasPrefix(p, "/_next/") || strings.HasPrefix(p, "/auth/") || p == "/api/health" || p == "/favicon.ico" {
 		return true

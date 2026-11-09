@@ -107,11 +107,13 @@ func (a *Authenticator) PasswordSignup(c *reqCtx) {
 		// reveal that the address is already registered.
 		_, _ = bcrypt.GenerateFromPassword([]byte(body.Password), bcryptCost)
 		base := a.baseURL()
-		_ = a.sendAuthEmail(email, "You already have an account",
-			"You already have an account",
-			"Someone tried to sign up with this email. If it was you, just sign in — or reset your password if you've forgotten it.",
-			"Sign in", base+"/login",
-			"If you didn't try to sign up, you can ignore this email.")
+		if a.acctLimiter == nil || a.acctLimiter.Allow("signup-mail:"+email) { // no mail flood to one address
+			_ = a.sendAuthEmail(email, "You already have an account",
+				"You already have an account",
+				"Someone tried to sign up with this email. If it was you, just sign in — or reset your password if you've forgotten it.",
+				"Sign in", base+"/login",
+				"If you didn't try to sign up, you can ignore this email.")
+		}
 		a.creds.RecordAudit(u.ID, email, c.ClientIP(), "password", "signup_existing", false, "")
 		c.JSON(http.StatusOK, H{"ok": true, "message": generic})
 		return
@@ -131,7 +133,9 @@ func (a *Authenticator) PasswordSignup(c *reqCtx) {
 		return
 	}
 	a.setSignupBinding(c, u.ID, hash)
-	a.sendVerifyEmail(u.ID, email)
+	if a.acctLimiter == nil || a.acctLimiter.Allow("signup-mail:"+email) { // no mail flood to one address
+		a.sendVerifyEmail(u.ID, email)
+	}
 	a.creds.RecordAudit(u.ID, email, c.ClientIP(), "password", "signup", true, "")
 	c.JSON(http.StatusOK, H{"ok": true, "message": generic})
 }

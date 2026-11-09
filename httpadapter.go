@@ -96,10 +96,13 @@ func (a *Authenticator) CSRFHTTP(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		// Bearer (API key) auth isn't cookie-based → not CSRF-able; skip.
-		if bearerToken(r.Header.Get("Authorization")) != "" {
-			next.ServeHTTP(w, r)
-			return
+		// Bearer (API key) auth isn't cookie-based → not CSRF-able; skip — for a key that validates. Any
+		// other Authorization header proves nothing, and the handler would fall back to the cookie.
+		if key := bearerToken(r.Header.Get("Authorization")); key != "" {
+			if _, ok := a.lookupAPIKey(key); ok {
+				next.ServeHTTP(w, r)
+				return
+			}
 		}
 		// The unauthenticated entry points (login/reset/OTP-verify/…) can't carry a double-submit token,
 		// but the trusted-origins check still applies as defense-in-depth against a cross-site login-CSRF
@@ -145,7 +148,8 @@ func writeJSON(w http.ResponseWriter, code int, obj any) {
 }
 
 func (a *Authenticator) cookieSecureHTTP(r *http.Request) bool {
-	return a.cfg.CookieSecure || r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+	return a.cfg.CookieSecure || strings.HasPrefix(strings.ToLower(a.cfg.AppURL), "https://") ||
+		r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }
 
 func (a *Authenticator) ensureCSRFHTTP(w http.ResponseWriter, r *http.Request) {

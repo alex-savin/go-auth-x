@@ -70,6 +70,12 @@ func (p *Provider) login(w http.ResponseWriter, r *http.Request) {
 		p.redirectError(w, r, req, "access_denied", "this account may not sign in")
 		return
 	}
+	// An admin impersonating a user acts in the app as them for a short, marked session; they don't
+	// hand out tokens in the user's name that outlive it, unmarked.
+	if sc.ImpersonatedBy != "" {
+		p.redirectError(w, r, req, "access_denied", "not while impersonating a user")
+		return
+	}
 	authAt := sessionAuthTime(sc)
 	if !freshEnough(req, authAt, time.Now()) {
 		// The client wants a fresher sign-in (prompt=login or max_age). Coming back still stale
@@ -209,7 +215,9 @@ func (p *Provider) Approve(_ context.Context, id, subject string, d Decision) (s
 	if d.Scopes != nil {
 		var granted []string
 		for _, s := range req.Scopes {
-			if slices.Contains(d.Scopes, s) || s == oidc.ScopeOfflineAccess || s == oidc.ScopeOpenID {
+			// openid is protocol, not a permission; offline_access (refresh tokens) is the user's to
+			// grant like any scope.
+			if slices.Contains(d.Scopes, s) || s == oidc.ScopeOpenID {
 				granted = append(granted, s)
 			}
 		}

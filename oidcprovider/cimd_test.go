@@ -109,7 +109,7 @@ func TestClientMetadataDocument(t *testing.T) {
 		c.LogoURI != "https://client.example/logo.png" || !c.Dynamic || c.RedirectHost != "127.0.0.1:9999" {
 		t.Fatalf("pending client = %+v", c)
 	}
-	next, err := h.p.Approve(ctx, id, h.user.Sub, oidcprovider.Decision{Scopes: []string{"tree:read"}})
+	next, err := h.p.Approve(ctx, id, h.user.Sub, oidcprovider.Decision{Scopes: []string{"tree:read", "offline_access"}})
 	if err != nil {
 		t.Fatal(err)
 	}

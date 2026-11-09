@@ -158,7 +158,9 @@ func idStr(id uint) string { return strconv.FormatUint(uint64(id), 10) }
 // no-op for idempotent deletes — never index a map with a coerced 0.
 func parseID(s string) (uint, bool) {
 	n, err := strconv.ParseUint(s, 10, 64)
-	if err != nil || n == 0 {
+	// Canonical form only: "01" must not name the entity "1" (it would slip past a string
+	// comparison of ids, e.g. the last-owner guard), nor may a 64-bit id wrap a 32-bit uint.
+	if err != nil || n == 0 || strconv.FormatUint(n, 10) != s || uint64(uint(n)) != n {
 		return 0, false
 	}
 	return uint(n), true

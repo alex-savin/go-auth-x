@@ -162,3 +162,15 @@ func TestSessionsFollowTheAccount(t *testing.T) {
 		t.Fatal("a ban must end the user's sessions")
 	}
 }
+
+// A provider is listed once however many identities a user has with it: the last-sign-in-method guard
+// counts providers, and an unlink removes all of a provider's identities at once.
+func TestOAuthIdentitiesListsProvidersOnce(t *testing.T) {
+	s := newStore(t)
+	u, _ := s.CreateLocalUser("ms@x.com", "")
+	_ = s.LinkOAuth(u.ID, "microsoft", "personal", "ms@x.com")
+	_ = s.LinkOAuth(u.ID, "microsoft", "work", "ms@x.com")
+	if got, _ := s.OAuthIdentities(u.ID); len(got) != 1 || got[0] != "microsoft" {
+		t.Fatalf("OAuthIdentities = %v, want [microsoft]", got)
+	}
+}

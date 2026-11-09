@@ -234,7 +234,7 @@ func (a *Authenticator) soleOwner(orgID, userID string) (bool, error) {
 // role in the ACTIVE org. Owner/admin only; anything touching the owner role (granting it, or
 // changing an existing owner's role) requires an owner, and the last owner can't be demoted.
 func (a *Authenticator) OrgMemberSetRole(c *reqCtx) {
-	sc, _, actorRole, ok := a.activeOrgManager(c)
+	sc, actor, _, ok := a.activeOrgManager(c)
 	if !ok {
 		return
 	}
@@ -253,6 +253,12 @@ func (a *Authenticator) OrgMemberSetRole(c *reqCtx) {
 	// promote/demote — letting this request skip the sole-owner check it should have run (TOCTOU).
 	a.orgMu.Lock()
 	defer a.orgMu.Unlock()
+	// The actor's own role too: read before the lock, it may be stale (they were just demoted).
+	actorRole, err := a.orgs.OrgRole(sc.Org, actor.ID)
+	if err != nil || !orgRoleIsManager(actorRole) {
+		c.JSON(http.StatusForbidden, H{"error": "requires an organization owner or admin"})
+		return
+	}
 	targetRole, err := a.orgs.OrgRole(sc.Org, uid)
 	if errors.Is(err, ErrNotOrgMember) || errors.Is(err, ErrNoOrg) {
 		c.JSON(http.StatusNotFound, H{"error": "no such member"})
@@ -303,9 +309,17 @@ func (a *Authenticator) OrgMemberRemove(c *reqCtx) {
 		c.JSON(http.StatusForbidden, H{"error": "requires an organization owner or admin"})
 		return
 	}
-	// Target role read INSIDE orgMu — see OrgMemberSetRole for the TOCTOU this prevents.
+	// Target role read INSIDE orgMu — see OrgMemberSetRole for the TOCTOU this prevents — and the
+	// actor's again, for the same reason.
 	a.orgMu.Lock()
 	defer a.orgMu.Unlock()
+	if !leaving {
+		var aerr error
+		if actorRole, aerr = a.orgs.OrgRole(sc.Org, u.ID); aerr != nil || !orgRoleIsManager(actorRole) {
+			c.JSON(http.StatusForbidden, H{"error": "requires an organization owner or admin"})
+			return
+		}
+	}
 	targetRole, err := a.orgs.OrgRole(sc.Org, uid)
 	if errors.Is(err, ErrNotOrgMember) || errors.Is(err, ErrNoOrg) {
 		c.JSON(http.StatusNotFound, H{"error": "no such member"})
@@ -501,6 +515,12 @@ func (a *Authenticator) OrgInviteAccept(c *reqCtx) {
 		fail("this organization no longer exists")
 		return
 	}
+	// The role is the inviter's to grant now, not only when they invited: removed or demoted since,
+	// their pending invites grant nothing.
+	if !a.inviterCanGrant(org.ID, inv) {
+		fail("this invitation is no longer valid — ask for a new one")
+		return
+	}
 	if _, err := a.orgs.ConsumeOrgInvite(hashToken(token)); err != nil {
 		fail("this invitation is invalid or has expired") // lost a redeem race — already consumed
 		return
@@ -527,4 +547,22 @@ func (a *Authenticator) OrgInviteAccept(c *reqCtx) {
 	// Land the user IN the org they just joined.
 	_ = a.remintWithOrg(c, sc, org.ID, finalRole)
 	c.Redirect(http.StatusFound, sanitizeNext(c.Query("next")))
+}
+
+// inviterCanGrant reports whether whoever sent an invite may still grant its role in the org: a
+// manager, and an owner for the owner role. An invite without an inviter (none is created that way by
+// the library) is the operator's.
+func (a *Authenticator) inviterCanGrant(orgID string, inv *OrgInvite) bool {
+	if inv.InvitedBy == "" {
+		return true
+	}
+	inviter, err := a.creds.UserByEmail(inv.InvitedBy)
+	if err != nil {
+		return false
+	}
+	role, err := a.orgs.OrgRole(orgID, inviter.ID)
+	if err != nil || !orgRoleIsManager(role) {
+		return false
+	}
+	return inv.Role != OrgRoleOwner || role == OrgRoleOwner
 }

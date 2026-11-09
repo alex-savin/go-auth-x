@@ -94,6 +94,12 @@ func (a *Authenticator) EmailOTPVerify(c *reqCtx) {
 		c.JSON(http.StatusBadRequest, H{"error": "enter the code we emailed you"})
 		return
 	}
+	// A code allows a few guesses, but a new code resets them: the address's own budget bounds the
+	// guesses across codes (and across the addresses an attacker rotates through).
+	if a.acctLimiter != nil && !a.acctLimiter.Allow("emailotp-verify:"+email) {
+		c.tooMany("too many attempts — wait and try again")
+		return
+	}
 	claim, err := a.creds.VerifyEmailOTP(purposeEmailOTP, email, otpHash(email, body.Code))
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, H{"error": "that code is invalid or has expired"})

@@ -102,8 +102,15 @@ func (a *Authenticator) AccountChangeEmailRequest(c *reqCtx) {
 	}
 	// The caller is authenticated + stepped-up, so a clear conflict is acceptable (and better UX than
 	// silently emailing a stranger). Redemption re-checks via SetEmail's unique constraint anyway.
+	// Taken: the same answer as a free address (no account-existence oracle); the address's owner hears
+	// of it, and the confirm step re-checks uniqueness anyway.
 	if other, e := a.creds.UserByEmail(newEmail); e == nil && other != nil {
-		c.JSON(http.StatusConflict, H{"error": "that email is already in use"})
+		if a.acctLimiter == nil || a.acctLimiter.Allow("change-email-taken:"+newEmail) {
+			_ = a.sendAuthEmail(newEmail, "Someone tried to use this address", "This address already has an account",
+				"Someone signed in to another account tried to change its email to this address. It already belongs to an account, so nothing was changed.",
+				"Sign in", a.baseURL()+"/login", "If this was you, sign in to the account that uses this address.")
+		}
+		c.JSON(http.StatusOK, H{"ok": true, "message": "Check your new inbox to confirm the change."})
 		return
 	}
 	raw, hash := newToken()
