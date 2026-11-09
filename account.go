@@ -69,10 +69,21 @@ func (a *Authenticator) AccountSetPassword(c *reqCtx) {
 		return
 	}
 	if hash, _, perr := a.passwordHash(au.ID); perr == nil {
+		// Checking the current password is a password guess: throttled and audited like /auth/reauth.
+		if (a.ipLimiter != nil && !a.ipLimiter.Allow("reauth:"+c.rateIP())) ||
+			(a.acctLimiter != nil && !a.acctLimiter.Allow("reauth:"+au.Sub)) {
+			c.tooMany("too many attempts — wait and try again")
+			return
+		}
 		if bcrypt.CompareHashAndPassword([]byte(hash), []byte(body.Current)) != nil {
+			a.creds.RecordAudit(au.ID, au.Email, c.ClientIP(), "password", "password_change", false, "")
 			c.JSON(http.StatusForbidden, H{"error": "current password is incorrect"})
 			return
 		}
+	} else if !a.factorChangeAllowed(c, au) {
+		// A first password is a new factor (see factorChangeAllowed): a TOTP user steps up first.
+		c.JSON(http.StatusForbidden, H{"error": "reauth_required"})
+		return
 	}
 	if msg := a.passwordPolicyError(c.Request.Context(), body.New, au.Email); msg != "" {
 		c.JSON(http.StatusBadRequest, H{"error": msg})

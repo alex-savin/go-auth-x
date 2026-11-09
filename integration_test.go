@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -114,6 +115,7 @@ type client struct {
 	t       *testing.T
 	h       http.Handler
 	cookies map[string]string
+	remote  string // the request's remote IP, when set
 }
 
 func newClient(t *testing.T, a *authx.Authenticator) *client {
@@ -132,6 +134,9 @@ func (c *client) do(method, path string, body any) *httptest.ResponseRecorder {
 	}
 	for k, v := range c.cookies {
 		r.AddCookie(&http.Cookie{Name: k, Value: v})
+	}
+	if c.remote != "" {
+		r.RemoteAddr = net.JoinHostPort(c.remote, "4242")
 	}
 	if method != http.MethodGet {
 		if tok := c.cookies["sweep_csrf"]; tok != "" {

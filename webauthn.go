@@ -179,6 +179,11 @@ func (a *Authenticator) WebauthnRegisterBegin(c *reqCtx) {
 		c.JSON(http.StatusUnauthorized, H{"error": "sign in first"})
 		return
 	}
+	// A passkey signs in on its own: adding one takes a fresh step-up (see factorChangeAllowed).
+	if !a.factorChangeAllowed(c, au) {
+		c.JSON(http.StatusForbidden, H{"error": "reauth_required"})
+		return
+	}
 	wu, err := a.wauthnUserFor(au)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, H{"error": "could not start enrolment"})
