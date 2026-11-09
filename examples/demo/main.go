@@ -60,7 +60,7 @@ func main() {
 	store := memory.New()
 	authn, err := authx.New(ctx, authx.Config{
 		SessionSecret: secret, AppURL: appURL, OwnerEmail: "owner@example.com", BrandName: "go-auth-x demo",
-		PublicPath: func(p string) bool { return p == "/" || p == "/welcome" || p == "/consent" },
+		PublicPath: func(p string) bool { return p == "/" || p == "/login" || p == "/welcome" || p == "/consent" },
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -96,7 +96,8 @@ func main() {
 
 	app := http.NewServeMux()
 	app.HandleFunc("GET /{$}", page(indexHTML))
-	app.HandleFunc("GET /welcome", page(welcomeHTML))
+	app.HandleFunc("GET /login", page(loginHTML))   // where the library's emails send people
+	app.HandleFunc("GET /welcome", page(loginHTML)) // where the gate sends them
 	app.HandleFunc("GET /consent", page(consentHTML))
 	app.HandleFunc("GET /api/notes", func(w http.ResponseWriter, r *http.Request) {
 		sub, email, _ := authx.SessionFromRequest(r)
@@ -137,7 +138,7 @@ func page(body string) http.HandlerFunc {
 // The pages are plain links and forms, so a crawler (and a person) can reach every public endpoint.
 const indexHTML = `<h1>go-auth-x demo</h1>
 <ul>
-<li><a href="/welcome">Sign in / sign up</a></li>
+<li><a href="/login">Sign in / sign up</a></li>
 <li><a href="/auth/config">/auth/config</a> · <a href="/auth/me">/auth/me</a> · <a href="/auth/logout">/auth/logout</a></li>
 <li><a href="/api/notes">/api/notes</a> (signed-in only)</li>
 <li><a href="/.well-known/openid-configuration">OIDC discovery</a> · <a href="/.well-known/oauth-authorization-server">OAuth metadata</a> · <a href="/oauth/keys">JWKS</a></li>
@@ -146,7 +147,7 @@ const indexHTML = `<h1>go-auth-x demo</h1>
 <li><a href="/scim/v2/ServiceProviderConfig">SCIM</a> (Bearer key)</li>
 </ul>`
 
-const welcomeHTML = `<h1>Sign in</h1>
+const loginHTML = `<h1>Sign in</h1>
 <form method=post action="/auth/password/login"><input name=email type=email><input name=password type=password><button>Sign in</button></form>
 <h2>Sign up</h2>
 <form method=post action="/auth/password/signup"><input name=email type=email><input name=password type=password><button>Sign up</button></form>
