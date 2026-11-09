@@ -97,21 +97,22 @@ func recoveryHash(code string) []byte {
 // identity between the first factor and POST /auth/2fa/verify (so the second step needs no re-auth).
 
 type pendingClaims struct {
-	Email    string   `json:"email,omitempty"`
-	Name     string   `json:"name,omitempty"`
-	Groups   []string `json:"groups,omitempty"`
-	Role     string   `json:"role,omitempty"`
-	Remember bool     `json:"rm,omitempty"`
+	Email     string   `json:"email,omitempty"`
+	Name      string   `json:"name,omitempty"`
+	Groups    []string `json:"groups,omitempty"`
+	DirGroups bool     `json:"dg,omitempty"` // see SessionClaims.DirGroups
+	Role      string   `json:"role,omitempty"`
+	Remember  bool     `json:"rm,omitempty"`
 	// FirstFactorCred is the WebAuthn credential ID that proved the first factor (a primary passkey
 	// login), so passkey-as-2FA can reject the SAME credential as the second factor. Empty otherwise.
 	FirstFactorCred []byte `json:"ffc,omitempty"`
 	jwt.RegisteredClaims
 }
 
-func (a *Authenticator) mintPending(id Identity, role string, remember bool, firstFactorCred []byte) (string, error) {
+func (a *Authenticator) mintPending(id Identity, dirGroups bool, role string, remember bool, firstFactorCred []byte) (string, error) {
 	now := time.Now()
 	return signJWT(a.cfg.SessionSecret, pendingClaims{
-		Email: id.Email, Name: id.Name, Groups: id.Groups, Role: role, Remember: remember, FirstFactorCred: firstFactorCred,
+		Email: id.Email, Name: id.Name, Groups: id.Groups, DirGroups: dirGroups, Role: role, Remember: remember, FirstFactorCred: firstFactorCred,
 		RegisteredClaims: jwt.RegisteredClaims{
 			Subject:   id.Subject,
 			Audience:  jwt.ClaimStrings{audPending},
@@ -143,7 +144,7 @@ func (a *Authenticator) completePendingLogin(c *reqCtx, pc *pendingClaims) error
 	}
 	sid := a.newSessionID()
 	session, err := mintSessionWith(a.cfg.SessionSecret, SessionClaims{
-		Email: pc.Email, Name: pc.Name, Groups: pc.Groups, Role: pc.Role, SID: sid, Org: orgID, OrgRole: orgRole,
+		Email: pc.Email, Name: pc.Name, Groups: pc.Groups, DirGroups: pc.DirGroups, Role: pc.Role, SID: sid, Org: orgID, OrgRole: orgRole,
 	}, pc.Subject, time.Now(), ttl)
 	if err != nil {
 		return err

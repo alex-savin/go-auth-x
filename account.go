@@ -94,6 +94,10 @@ func (a *Authenticator) AccountSetPassword(c *reqCtx) {
 		c.JSON(http.StatusInternalServerError, H{"error": "could not update password"})
 		return
 	}
+	// The other sessions end (a changed password is often a response to a stolen one); this one stays.
+	if sc := a.sessionOf(c); sc != nil {
+		a.revokeOtherSessions(au.Sub, sc.SID)
+	}
 	a.creds.RecordAudit(au.ID, au.Email, c.ClientIP(), "password", "password_changed", true, "")
 	c.JSON(http.StatusOK, H{"ok": true})
 }

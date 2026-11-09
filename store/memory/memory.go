@@ -608,7 +608,11 @@ func (s *Store) Authorizer() authx.Authorizer { return &authorizer{s} }
 type authorizer struct{ s *Store }
 
 func (a *authorizer) Authorize(_ context.Context, id authx.Identity) (string, error) {
-	_, err := a.s.UpsertUserOnLogin(id.Subject, id.Email, id.Name, id.EmailVerified)
+	email := id.Email
+	if id.Local { // the stored address, read earlier: writing it back could undo an email change
+		email = ""
+	}
+	_, err := a.s.UpsertUserOnLogin(id.Subject, email, id.Name, id.EmailVerified)
 	return "", err
 }
 
@@ -647,6 +651,7 @@ func (s *Store) UpsertUserOnLogin(sub, email, name string, emailVerified bool) (
 			if !bootstrap && !emailVerified {
 				return nil, authx.ErrEmailConflict
 			}
+			s.moveSubjectLocked(existing.sub, sub)
 			existing.sub, existing.name = sub, name
 			if emailVerified {
 				existing.emailVerified = true
@@ -671,6 +676,7 @@ func (s *Store) UpsertUserOnLogin(sub, email, name string, emailVerified bool) (
 
 // deleteUserCascadeLocked removes a user + everything keyed to it. Caller holds s.mu.
 func (s *Store) deleteUserCascadeLocked(id uint) {
+	s.revokeUserSessionsLocked(id) // before the row goes: sessions are matched by its subject too
 	delete(s.users, id)
 	delete(s.passwords, id)
 	delete(s.memberships, id)
@@ -696,12 +702,53 @@ func (s *Store) deleteUserCascadeLocked(id uint) {
 		}
 	}
 	s.tokens = kept
-	// Tombstone (do not delete) the user's sessions so IsRevoked keeps denying them on other devices
-	// after a hard delete — deleting would make an absent SID read as "not revoked". (Reclaim targets
-	// have no sessions, so this is a no-op for the squatter-reclaim caller.)
+}
+
+// revokeUserSessionsLocked tombstones (never deletes: an absent SID reads as "not revoked") every
+// session of a user — recorded under their id, or under their subject (an OIDC session records no id).
+// Caller holds s.mu.
+func (s *Store) revokeUserSessionsLocked(id uint) {
+	sub := ""
+	if u := s.users[id]; u != nil {
+		sub = u.sub
+	}
 	for _, r := range s.sessions {
-		if r.rec.UserID == idStr(id) {
+		if r.rec.UserID == idStr(id) || (sub != "" && r.rec.Subject == sub) {
 			r.revoked = true
+		}
+	}
+}
+
+// moveSubjectLocked re-keys a user's sessions and OAuth provider records from an old subject to the
+// new one their account was rebound to, so revoking or listing by the account's subject still finds
+// them. Caller holds s.mu.
+func (s *Store) moveSubjectLocked(from, to string) {
+	if from == "" || from == to {
+		return
+	}
+	for _, r := range s.sessions {
+		if r.rec.Subject == from {
+			r.rec.Subject = to
+		}
+	}
+	for _, g := range s.oauthGrants {
+		if g.Subject == from {
+			g.Subject = to
+		}
+	}
+	for _, t := range s.oauthAccess {
+		if t.Subject == from {
+			t.Subject = to
+		}
+	}
+	for _, t := range s.oauthRefresh {
+		if t.Subject == from {
+			t.Subject = to
+		}
+	}
+	for _, r := range s.oauthRequests {
+		if r.Subject == from {
+			r.Subject = to
 		}
 	}
 }

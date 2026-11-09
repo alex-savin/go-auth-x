@@ -212,7 +212,7 @@ func (a *Authenticator) PasswordLogin(c *reqCtx) {
 		return
 	}
 	a.creds.RecordAudit(u.ID, email, ip, "password", "login", true, "")
-	tfr, err := a.completeLogin(c, Identity{Subject: u.Sub, Email: u.Email, Name: u.Name, EmailVerified: true}, body.Remember, nil)
+	tfr, err := a.completeLogin(c, Identity{Subject: u.Sub, Email: u.Email, Name: u.Name, EmailVerified: true, Local: true}, body.Remember, nil)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, H{"error": "login failed"})
 		return
@@ -272,7 +272,8 @@ func (a *Authenticator) PasswordResetConfirm(c *reqCtx) {
 	}
 	// The link was mailed to an address; if the account has moved to another address since, the old
 	// mailbox no longer speaks for it.
-	if u, uerr := a.creds.UserByEmail(claim.Email); uerr != nil || u.ID != claim.UserID {
+	u, uerr := a.creds.UserByEmail(claim.Email)
+	if uerr != nil || u.ID != claim.UserID {
 		c.JSON(http.StatusBadRequest, H{"error": "this reset link is invalid or has expired"})
 		return
 	}
@@ -291,6 +292,10 @@ func (a *Authenticator) PasswordResetConfirm(c *reqCtx) {
 		return
 	}
 	_ = a.creds.SetEmailVerified(claim.UserID, true)
+	// A reset is how someone takes their account back: every session it had ends, whoever holds it.
+	if a.sessions != nil {
+		_ = a.sessions.RevokeAllForUser(u.Sub)
+	}
 	a.creds.RecordAudit(claim.UserID, claim.Email, c.ClientIP(), "password", "reset", true, "")
 	c.JSON(http.StatusOK, H{"ok": true, "message": "Your password has been updated. You can now sign in."})
 }

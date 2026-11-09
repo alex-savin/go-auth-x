@@ -1,8 +1,10 @@
 package memory
 
 import (
+	"context"
 	"errors"
 	"testing"
+	"time"
 
 	authx "github.com/alex-savin/go-auth-x"
 )
@@ -58,4 +60,53 @@ func TestSecurityLinkingRules(t *testing.T) {
 			t.Fatal("a password on the placeholder must not pass to its claimant")
 		}
 	})
+}
+
+// A local login's identity carries the stored email as read; the Authorizer doesn't write it back, so
+// an email change made meanwhile stands.
+func TestLocalLoginDoesntRevertEmailChange(t *testing.T) {
+	s := New()
+	u, _ := s.CreateLocalUser("old@x.com", "U")
+	_ = s.SetEmailVerified(u.ID, true)
+	if err := s.SetEmail(u.ID, "new@x.com"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Authorizer().Authorize(context.Background(), authx.Identity{Subject: u.Sub, Email: "old@x.com", EmailVerified: true, Local: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.UserByID(u.ID); got.Email != "new@x.com" {
+		t.Fatalf("the email change was reverted to %q", got.Email)
+	}
+}
+
+// Disabling or banning a user ends their recorded sessions, and an account rebound to a new subject
+// takes its sessions along (so revoking by its subject still finds them).
+func TestSessionsFollowTheAccount(t *testing.T) {
+	s := New()
+	u, _ := s.UpsertExternalUser("ldap:bob", "bob@corp.com", "Bob", true)
+	rec := func(sid, sub string) {
+		_ = s.RecordSession(authx.SessionRecord{SID: sid, Subject: sub, CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)})
+	}
+	rec("s-ldap", "ldap:bob")
+	if _, err := s.Authorizer().Authorize(context.Background(), authx.Identity{Subject: "kc|bob", Email: "bob@corp.com", EmailVerified: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.ListSessionsForUser("kc|bob"); len(got) != 1 {
+		t.Fatalf("the rebound account's session must move to its new subject: %v", got)
+	}
+	rec("s-kc", "kc|bob")
+	if err := s.SetUserDisabled(u.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	for _, sid := range []string{"s-ldap", "s-kc"} {
+		if revoked, _ := s.IsRevoked(sid); !revoked {
+			t.Fatalf("session %s must end when the user is disabled", sid)
+		}
+	}
+	_ = s.SetUserDisabled(u.ID, false)
+	rec("s-later", "kc|bob")
+	_ = s.SetUserBan(u.ID, true, nil, "abuse")
+	if revoked, _ := s.IsRevoked("s-later"); !revoked {
+		t.Fatal("a ban must end the user's sessions")
+	}
 }

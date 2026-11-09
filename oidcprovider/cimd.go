@@ -34,7 +34,7 @@ import (
 // resolves the host itself, refuses any address that is not public (private, loopback,
 // link-local, CGNAT, multicast and the like, IPv4 and IPv6), dials only the address it checked
 // (so DNS rebinding can't swap in another between the check and the connection), checks the
-// connected address again, ignores proxy settings, and limits time, size and redirects. And since
+// connected address again, ignores proxy settings, follows no redirect, and limits time and size. And since
 // anyone can name a fresh URL with every request, fetches the cache can't answer are limited per
 // address, and concurrent requests for one URL share a single fetch.
 
@@ -130,12 +130,9 @@ func newMetadataFetcher(p *Provider, roots *x509.CertPool, loopback bool) *metad
 	f.http = &http.Client{
 		Transport: tr,
 		Timeout:   metadataTimeout,
-		CheckRedirect: func(r *http.Request, via []*http.Request) error {
-			if len(via) >= 3 || r.URL.Scheme != "https" {
-				return fmt.Errorf("%w: redirect to %s", errMetadata, r.URL.Redacted())
-			}
-			return nil
-		},
+		// The document must come from its own URL (the draft: "MUST NOT automatically follow
+		// redirects"); a redirect is answered as the 3xx it is, which fetch refuses.
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
 	return f
 }

@@ -517,7 +517,8 @@ func (s *Store) DeleteUser(userID string) error {
 		}
 		// Tombstone (not delete) live sessions so IsRevoked keeps denying the deleted user on other
 		// devices until the cookie expires; null the PII for GDPR erasure but retain the revoked marker.
-		if err := tx.Model(&Session{}).Where("user_id = ? AND revoked_at IS NULL", n).
+		// Matched by id and by subject: an OIDC session records no user id.
+		if err := tx.Model(&Session{}).Where("(user_id = ? OR sub = ?) AND revoked_at IS NULL", n, u.Sub).
 			Updates(map[string]any{"revoked_at": time.Now(), "user_agent": "", "ip": ""}).Error; err != nil {
 			return err
 		}
@@ -668,7 +669,11 @@ func (s *Store) Authorizer() authx.Authorizer { return &authorizer{s} }
 type authorizer struct{ s *Store }
 
 func (a *authorizer) Authorize(_ context.Context, id authx.Identity) (string, error) {
-	_, err := a.s.UpsertUserOnLogin(id.Subject, id.Email, id.Name, id.EmailVerified)
+	email := id.Email
+	if id.Local { // the stored address, read earlier: writing it back could undo an email change
+		email = ""
+	}
+	_, err := a.s.UpsertUserOnLogin(id.Subject, email, id.Name, id.EmailVerified)
 	return "", err
 }
 
@@ -695,9 +700,9 @@ func (s *Store) UpsertUserOnLogin(sub, email, name string, emailVerified bool) (
 				if !bootstrap && !emailVerified {
 					return nil, authx.ErrEmailConflict
 				}
-				existing.Sub, existing.Name, existing.LastLoginAt = sub, name, time.Now()
+				upd := map[string]any{"sub": sub, "name": name, "last_login_at": time.Now()}
 				if emailVerified {
-					existing.EmailVerified = true
+					upd["email_verified"] = true
 				}
 				if err := s.db.Transaction(func(tx *gorm.DB) error {
 					if bootstrap { // a placeholder's claimant gets no credential someone else put on it
@@ -705,11 +710,21 @@ func (s *Store) UpsertUserOnLogin(sub, email, name string, emailVerified bool) (
 							return err
 						}
 					}
-					return tx.Save(&existing).Error
+					if err := moveSubject(tx, existing.Sub, sub); err != nil {
+						return err
+					}
+					// Only the columns this login sets, and only if the row is still the one read:
+					// writing the whole stale row back could undo a concurrent ban, deletion or
+					// rebind (and Save would re-insert a deleted row).
+					res := tx.Model(&User{}).Where("id = ? AND sub = ?", existing.ID, existing.Sub).Updates(upd)
+					if res.Error == nil && res.RowsAffected == 0 {
+						return authx.ErrEmailConflict
+					}
+					return res.Error
 				}); err != nil {
 					return nil, err
 				}
-				return toAuthUser(&existing), nil
+				return s.userRow(existing.ID)
 			}
 			// The existing row is an unverified, non-bootstrap squatter. If the INCOMING login
 			// proved the email (OIDC/social/redeemed), reclaim the address: the squatter never
@@ -743,6 +758,7 @@ func (s *Store) UpsertUserOnLogin(sub, email, name string, emailVerified bool) (
 	// Moving this row onto an email another row already owns must return the typed ErrEmailConflict
 	// (parity with the in-memory store), not a raw driver unique-constraint error — the unique index is
 	// only the fail-closed backstop.
+	upd := map[string]any{"name": name, "last_login_at": time.Now()}
 	switch {
 	case email == "": // an identity that asserts no address leaves the stored one alone
 	case email != normalizeEmail(u.Email):
@@ -754,12 +770,60 @@ func (s *Store) UpsertUserOnLogin(sub, email, name string, emailVerified bool) (
 		}
 		// A new address is exactly as verified as this assertion proves — verification of the old
 		// one doesn't carry over.
-		u.Email, u.EmailVerified = email, emailVerified
+		upd["email"], upd["email_verified"] = email, emailVerified
 	case emailVerified:
-		u.EmailVerified = true
+		upd["email_verified"] = true
 	}
-	u.Name, u.LastLoginAt = name, time.Now()
-	if err := s.db.Save(&u).Error; err != nil {
+	// Only the columns this login sets (see the rebind above): no stale write-back, no re-insert.
+	res := s.db.Model(&User{}).Where("id = ? AND sub = ?", u.ID, sub).Updates(upd)
+	if res.Error != nil {
+		return nil, res.Error
+	}
+	if res.RowsAffected == 0 {
+		return nil, authx.ErrNoUser
+	}
+	return s.userRow(u.ID)
+}
+
+// moveSubject re-keys a user's sessions and OAuth provider records from an old subject to the new
+// one their account was rebound to, so revoking or listing by the account's subject still finds them.
+func moveSubject(tx *gorm.DB, from, to string) error {
+	if from == "" || from == to {
+		return nil
+	}
+	for _, m := range []any{&Session{}, &OAuthGrant{}, &OAuthAccessToken{}, &OAuthRefreshToken{}, &OAuthAuthRequest{}} {
+		col := "subject"
+		if _, ok := m.(*Session); ok {
+			col = "sub"
+		}
+		if err := tx.Model(m).Where(col+" = ?", from).Update(col, to).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// revokeUserSessions tombstones every session of user n — recorded under their id, or under their
+// subject (an OIDC session records no id).
+func revokeUserSessions(tx *gorm.DB, n uint) error {
+	var u User
+	if err := tx.Select("sub").First(&u, n).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil
+		}
+		return err
+	}
+	return tx.Model(&Session{}).Where("(user_id = ? OR sub = ?) AND revoked_at IS NULL", n, u.Sub).
+		Update("revoked_at", time.Now()).Error
+}
+
+// userRow re-reads a user after an update.
+func (s *Store) userRow(id uint) (*authx.AuthUser, error) {
+	var u User
+	if err := s.db.First(&u, id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, authx.ErrNoUser
+		}
 		return nil, err
 	}
 	return toAuthUser(&u), nil

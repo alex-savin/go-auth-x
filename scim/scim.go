@@ -576,7 +576,17 @@ func (s *Server) listGroups(w http.ResponseWriter, r *http.Request) {
 		filtered := gs[:0]
 		for i := range gs {
 			g := gs[i]
-			if p(groupResource(&g, func() []authx.AuthUser { m, _ := s.dir.GroupMembers(g.ID); return m })) {
+			// Members load once per group, however many members[...] terms the filter has.
+			var members []authx.AuthUser
+			loaded := false
+			load := func() []authx.AuthUser {
+				if !loaded {
+					members, _ = s.dir.GroupMembers(g.ID)
+					loaded = true
+				}
+				return members
+			}
+			if p(groupResource(&g, load)) {
 				filtered = append(filtered, gs[i])
 			}
 		}

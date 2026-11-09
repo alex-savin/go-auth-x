@@ -113,7 +113,7 @@ func (a *Authenticator) EmailOTPVerify(c *reqCtx) {
 		return
 	}
 	a.creds.RecordAudit(u.ID, u.Email, c.ClientIP(), "email_otp", "login", true, "")
-	tfr, err := a.completeLogin(c, Identity{Subject: u.Sub, Email: u.Email, Name: u.Name, EmailVerified: true}, body.Remember, nil)
+	tfr, err := a.completeLogin(c, Identity{Subject: u.Sub, Email: u.Email, Name: u.Name, EmailVerified: true, Local: true}, body.Remember, nil)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, H{"error": "sign-in failed"})
 		return

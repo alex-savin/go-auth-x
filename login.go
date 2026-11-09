@@ -55,15 +55,16 @@ func (a *Authenticator) completeLoginWith(c *reqCtx, id Identity, remember bool,
 	// logins; OIDC logins keep the IdP-asserted groups). Org-scoped groups are filtered out —
 	// their names collide across orgs, so they are checked live (RequireOrgGroupsHTTP), never
 	// baked into the cookie.
+	dirGroups := false
 	if a.dir != nil && u != nil && len(id.Groups) == 0 {
 		if gs, gerr := a.dir.UserGroups(u.ID); gerr == nil {
-			id.Groups = groupNames(globalGroups(gs))
+			id.Groups, dirGroups = groupNames(globalGroups(gs)), true
 		}
 	}
 	// Second-factor gate: if the user has confirmed TOTP, don't mint the session yet — stash the
 	// half-authenticated identity in a signed, short-lived pending cookie and require a code.
 	if u != nil && a.userHasTOTP(u.ID) {
-		pending, perr := a.mintPending(Identity{Subject: id.Subject, Email: id.Email, Name: id.Name, Groups: id.Groups}, role, remember, firstFactorCred)
+		pending, perr := a.mintPending(Identity{Subject: id.Subject, Email: id.Email, Name: id.Name, Groups: id.Groups}, dirGroups, role, remember, firstFactorCred)
 		if perr != nil {
 			return false, perr
 		}
@@ -83,7 +84,7 @@ func (a *Authenticator) completeLoginWith(c *reqCtx, id Identity, remember bool,
 	}
 	sid := a.newSessionID()
 	session, serr := mintSessionWith(a.cfg.SessionSecret, SessionClaims{
-		Email: id.Email, Name: id.Name, Groups: id.Groups, Role: role, IDToken: idToken, SID: sid, Org: orgID, OrgRole: orgRole,
+		Email: id.Email, Name: id.Name, Groups: id.Groups, DirGroups: dirGroups, Role: role, IDToken: idToken, SID: sid, Org: orgID, OrgRole: orgRole,
 	}, id.Subject, time.Now(), ttl)
 	if serr != nil {
 		return false, serr

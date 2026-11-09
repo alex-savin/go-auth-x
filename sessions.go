@@ -167,19 +167,32 @@ func (a *Authenticator) SessionRevokeOthers(c *reqCtx) {
 		c.JSON(http.StatusNotImplemented, H{"error": "session management not available"})
 		return
 	}
-	recs, err := a.sessions.ListSessionsForUser(sc.Subject)
+	revoked, err := a.revokeOtherSessions(sc.Subject, sc.SID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, H{"error": "could not revoke sessions"})
 		return
 	}
+	c.JSON(http.StatusOK, H{"ok": true, "revoked": revoked})
+}
+
+// revokeOtherSessions revokes every recorded session of sub except keepSID (none without a
+// SessionStore), returning how many it revoked.
+func (a *Authenticator) revokeOtherSessions(sub, keepSID string) (int, error) {
+	if a.sessions == nil {
+		return 0, nil
+	}
+	recs, err := a.sessions.ListSessionsForUser(sub)
+	if err != nil {
+		return 0, err
+	}
 	revoked := 0
 	for _, r := range recs {
-		if r.SID == sc.SID {
+		if r.SID == keepSID {
 			continue
 		}
 		if a.sessions.RevokeSession(r.SID) == nil {
 			revoked++
 		}
 	}
-	c.JSON(http.StatusOK, H{"ok": true, "revoked": revoked})
+	return revoked, nil
 }

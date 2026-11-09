@@ -25,6 +25,11 @@ type Identity struct {
 	// a provider-verified social email, or a redeemed in-app token. The reference Authorizer feeds
 	// it to the safe account-linking rule (only a proven email may reclaim/adopt another row).
 	EmailVerified bool
+	// Local marks an identity read back from the CredentialStore — a password, passkey, email link or
+	// code, or an already linked social account — rather than asserted by an IdP: its email is the
+	// stored one as of the start of the request, so an Authorizer must not write it back (that would
+	// undo an email change made meanwhile). The reference Authorizers don't.
+	Local bool
 }
 
 // Authorizer is an optional post-login hook (e.g. multi-tenant provisioning). It may

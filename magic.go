@@ -188,7 +188,7 @@ func (a *Authenticator) redeemAndLogin(c *reqCtx, purpose string, markVerified b
 		return
 	}
 	a.creds.RecordAudit(u.ID, u.Email, c.ClientIP(), "magic", "login", true, purpose)
-	tfr, err := a.completeLogin(c, Identity{Subject: u.Sub, Email: u.Email, Name: u.Name, EmailVerified: true}, c.Query("remember") == "true", nil)
+	tfr, err := a.completeLogin(c, Identity{Subject: u.Sub, Email: u.Email, Name: u.Name, EmailVerified: true, Local: true}, c.Query("remember") == "true", nil)
 	if err != nil {
 		fail("sign-in failed")
 		return

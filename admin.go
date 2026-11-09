@@ -47,7 +47,8 @@ func (a *Authenticator) authenticated(r *http.Request) bool {
 	return false
 }
 
-// GroupsFromRequest returns the groups of the session attached by GateHTTP.
+// GroupsFromRequest returns the groups of the session attached by GateHTTP, as of sign-in
+// (RequireGroupsHTTP re-checks directory groups live).
 func GroupsFromRequest(r *http.Request) []string {
 	if sc, ok := r.Context().Value(sessionCtxKey).(*SessionClaims); ok && sc != nil {
 		return sc.Groups
@@ -59,13 +60,35 @@ func GroupsFromRequest(r *http.Request) []string {
 // session user, plus a GLOBAL API key's groups if a valid Bearer key is present. An org-bound
 // key's groups never merge: group gates are global surfaces, outside an org key's blast radius.
 func (a *Authenticator) requestGroups(r *http.Request) []string {
-	have := GroupsFromRequest(r)
+	have := a.sessionGroups(r)
 	if key := bearerToken(r.Header.Get("Authorization")); key != "" {
 		if info, ok := a.ValidateAPIKey(key); ok && info.OrgID == "" {
 			have = append(have, info.Groups...)
 		}
 	}
 	return have
+}
+
+// sessionGroups is the gated session's global groups: re-read from the directory when that's where
+// they came from at sign-in (so a removal, or a deleted group, takes effect at once — a failed lookup
+// grants none), else the IdP-asserted ones the session carries.
+func (a *Authenticator) sessionGroups(r *http.Request) []string {
+	sc, ok := r.Context().Value(sessionCtxKey).(*SessionClaims)
+	if !ok || sc == nil {
+		return nil
+	}
+	if !sc.DirGroups || a.dir == nil || a.creds == nil {
+		return sc.Groups
+	}
+	u, err := a.creds.UserBySub(sc.Subject)
+	if err != nil {
+		return nil
+	}
+	gs, err := a.dir.UserGroups(u.ID)
+	if err != nil {
+		return nil
+	}
+	return groupNames(globalGroups(gs))
 }
 
 // --- API keys ---

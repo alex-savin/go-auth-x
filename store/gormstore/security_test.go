@@ -1,8 +1,12 @@
 package gormstore
 
 import (
+	"context"
 	"errors"
 	"testing"
+	"time"
+
+	"gorm.io/gorm"
 
 	authx "github.com/alex-savin/go-auth-x"
 )
@@ -58,4 +62,103 @@ func TestSecurityLinkingRules(t *testing.T) {
 			t.Fatal("a password on the placeholder must not pass to its claimant")
 		}
 	})
+}
+
+// A login writes only the columns it sets, and only to the row it read: a ban or a deletion that lands
+// between the login's read and its write survives it (the write used to put the whole stale row back,
+// re-inserting a deleted one).
+func TestLoginDoesntWriteBackStaleUser(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		concurrent func(s *Store, id string)
+		check      func(t *testing.T, s *Store, id string, loginErr error)
+	}{
+		{"ban", func(s *Store, id string) { _ = s.SetUserBan(id, true, nil, "fraud"); _ = s.SetUserDisabled(id, true) },
+			func(t *testing.T, s *Store, id string, _ error) {
+				if u, _ := s.UserByID(id); !u.Banned || !u.Disabled {
+					t.Fatalf("the concurrent ban was undone: %+v", u)
+				}
+			}},
+		{"delete", func(s *Store, id string) { _ = s.DeleteUser(id) },
+			func(t *testing.T, s *Store, id string, loginErr error) {
+				if _, err := s.UserByID(id); err == nil {
+					t.Fatal("the deleted user was re-inserted")
+				}
+				if loginErr == nil {
+					t.Fatal("the login on a deleted row must fail")
+				}
+			}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newStore(t)
+			u, err := s.UpsertUserOnLogin("idp|u", "u@x.com", "U", true)
+			if err != nil {
+				t.Fatal(err)
+			}
+			fired := false
+			if err := s.db.Callback().Update().Before("gorm:update").Register("test:concurrent", func(db *gorm.DB) {
+				if fired || db.Statement.Table != "authx_users" {
+					return
+				}
+				fired = true
+				tc.concurrent(s, u.ID)
+			}); err != nil {
+				t.Fatal(err)
+			}
+			_, loginErr := s.UpsertUserOnLogin("idp|u", "u@x.com", "U", true)
+			if !fired {
+				t.Fatal("the concurrent change never ran")
+			}
+			tc.check(t, s, u.ID, loginErr)
+		})
+	}
+}
+
+// A local login's identity carries the stored email as read; the Authorizer doesn't write it back, so
+// an email change made meanwhile stands.
+func TestLocalLoginDoesntRevertEmailChange(t *testing.T) {
+	s := newStore(t)
+	u, _ := s.CreateLocalUser("old@x.com", "U")
+	_ = s.SetEmailVerified(u.ID, true)
+	if err := s.SetEmail(u.ID, "new@x.com"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Authorizer().Authorize(context.Background(), authx.Identity{Subject: u.Sub, Email: "old@x.com", EmailVerified: true, Local: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.UserByID(u.ID); got.Email != "new@x.com" {
+		t.Fatalf("the email change was reverted to %q", got.Email)
+	}
+}
+
+// Disabling or banning a user ends their recorded sessions, and an account rebound to a new subject
+// takes its sessions along (so revoking by its subject still finds them).
+func TestSessionsFollowTheAccount(t *testing.T) {
+	s := newStore(t)
+	u, _ := s.UpsertExternalUser("ldap:bob", "bob@corp.com", "Bob", true)
+	rec := func(sid, sub string) {
+		_ = s.RecordSession(authx.SessionRecord{SID: sid, Subject: sub, CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)})
+	}
+	rec("s-ldap", "ldap:bob")
+	if _, err := s.Authorizer().Authorize(context.Background(), authx.Identity{Subject: "kc|bob", Email: "bob@corp.com", EmailVerified: true}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.ListSessionsForUser("kc|bob"); len(got) != 1 {
+		t.Fatalf("the rebound account's session must move to its new subject: %v", got)
+	}
+	rec("s-kc", "kc|bob")
+	if err := s.SetUserDisabled(u.ID, true); err != nil {
+		t.Fatal(err)
+	}
+	for _, sid := range []string{"s-ldap", "s-kc"} {
+		if revoked, _ := s.IsRevoked(sid); !revoked {
+			t.Fatalf("session %s must end when the user is disabled", sid)
+		}
+	}
+	_ = s.SetUserDisabled(u.ID, false)
+	rec("s-later", "kc|bob")
+	_ = s.SetUserBan(u.ID, true, nil, "abuse")
+	if revoked, _ := s.IsRevoked("s-later"); !revoked {
+		t.Fatal("a ban must end the user's sessions")
+	}
 }

@@ -231,7 +231,7 @@ func (a *Authenticator) SocialCallback(c *reqCtx) {
 		return
 	}
 	a.creds.RecordAudit(au.ID, au.Email, c.ClientIP(), provider, "login", true, "")
-	tfr, err := a.completeLogin(c, Identity{Subject: au.Sub, Email: au.Email, Name: au.Name, EmailVerified: true}, false, nil)
+	tfr, err := a.completeLogin(c, Identity{Subject: au.Sub, Email: au.Email, Name: au.Name, EmailVerified: true, Local: true}, false, nil)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, H{"error": "sign-in failed"})
 		return

@@ -91,15 +91,38 @@ func (a *Authenticator) clientIP(r *http.Request) string {
 	if !trustedProxy(host) {
 		return host
 	}
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		parts := strings.Split(xff, ",")
-		for i := len(parts) - 1; i >= 0; i-- {
-			if ip := strings.TrimSpace(parts[i]); ip != "" && !trustedProxy(ip) {
-				return ip
-			}
+	// Every X-Forwarded-For line, in order: a proxy that adds its own line (rather than appending to
+	// the client's) puts the client-written line first, so reading only the first trusts the client.
+	var parts []string
+	for _, v := range r.Header.Values("X-Forwarded-For") {
+		parts = append(parts, strings.Split(v, ",")...)
+	}
+	for i := len(parts) - 1; i >= 0; i-- {
+		ip, ok := forwardedIP(parts[i])
+		if !ok {
+			// Not an address (garbage, or a format we don't know): the hops beyond it can't be
+			// trusted, and a string the client chose must not become its rate-limit key.
+			return host
+		}
+		if !trustedProxy(ip) {
+			return ip
 		}
 	}
 	return host
+}
+
+// forwardedIP parses one X-Forwarded-For entry — "ip", "ip:port" or "[ipv6]:port" (some proxies add
+// the port) — into a canonical address.
+func forwardedIP(s string) (string, bool) {
+	s = strings.TrimSpace(s)
+	if h, _, err := net.SplitHostPort(s); err == nil {
+		s = h
+	}
+	ip := net.ParseIP(strings.Trim(s, "[]"))
+	if ip == nil {
+		return "", false
+	}
+	return ip.String(), true
 }
 
 // trustedProxyNets caches the parsed trusted-proxy ranges. TrustedProxies() reads the env and parses

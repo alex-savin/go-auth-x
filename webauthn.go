@@ -326,7 +326,7 @@ func (a *Authenticator) WebauthnLoginFinish(c *reqCtx) {
 	a.creds.RecordAudit(matched.ID, matched.Email, c.ClientIP(), "passkey", "login", true, "")
 	// Pass this passkey's credential ID as the first factor, so passkey-as-2FA can't be satisfied by the
 	// very same credential.
-	tfr, err := a.completeLogin(c, Identity{Subject: matched.Sub, Email: matched.Email, Name: matched.Name, EmailVerified: true}, c.Query("remember") == "true", cred.ID)
+	tfr, err := a.completeLogin(c, Identity{Subject: matched.Sub, Email: matched.Email, Name: matched.Name, EmailVerified: true, Local: true}, c.Query("remember") == "true", cred.ID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, H{"error": "sign-in failed"})
 		return
