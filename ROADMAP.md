@@ -5,6 +5,13 @@ Direction and planned work for the library. Authoritative usage/feature docs liv
 
 ## Shipped
 
+### v0.12.1 — demo + security scanning · no library changes
+
+- **`examples/demo`** — a runnable server wiring every surface against the in-memory store; also the
+  scan target.
+- **`security` workflow** — govulncheck on every change and weekly; OWASP ZAP against the demo: a
+  passive baseline on every change, a full active scan weekly and on demand (`.zap/rules.tsv`).
+
 ### v0.12.0 — fresh sign-ins, OAuth lifecycle, CI · additive (a `DeleteExpiredOAuth` contract addition)
 
 - **`prompt=login` / `max_age`** honored by the `oidcprovider`: a stale sign-in goes to
