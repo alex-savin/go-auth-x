@@ -488,6 +488,8 @@ result, err := syncer.Sync() // run on a schedule
 An entry whose `mail` already belongs to an account the sync didn't create (a local or social sign-in,
 the owner) is skipped and reported in `result.Errors` — set `AdoptExisting: true` only for a directory
 you trust as much as your own sign-in. Deprovisioning (`DeprovisionMissing`) ends the user's sessions.
+An entry whose `mail` changed moves its account to the new address signed out and without its sign-in
+methods (as SCIM does): the new mailbox's holder proves it, or signs in through the IdP.
 
 ### SCIM 2.0
 A mountable provisioning server so an upstream IdP (Okta, Entra/Azure AD, JumpCloud) can push and
@@ -498,7 +500,10 @@ with **`and`/`or`/`not`** + parens + **valuePath** `emails[type eq "work"]`), **
 Resources carry `meta.created`/`meta.lastModified`, and discovery is complete: `ServiceProviderConfig` /
 `ResourceTypes` / full **`/Schemas`** documents (+ `/Schemas/{id}`). Bearer-auth with
 `ValidateAPIKeyScope(t, "scim")` — never the bare `ValidateAPIKey`, which checks neither scope nor org
-binding. SCIM may re-point the email only of accounts it provisioned; other accounts keep theirs.
+binding. SCIM may re-point the email only of accounts it provisioned; other accounts keep theirs, and
+a replace never verifies an address. An account SCIM moves to another address is signed out and loses
+its sign-in methods (password, passkeys, linked providers, TOTP): it belongs to whoever holds the new
+mailbox, who signs in through the IdP or proves it by link, code or reset.
 Group membership changes are written in **one batch** when the store implements `BatchGroupStore`
 (both reference stores do), and `srv.SetLogger(l)` routes internal errors to your `*slog.Logger`.
 
@@ -604,6 +609,8 @@ g, err := p.VerifyFor(ctx, bearer, "https://app.example.com/mcp") // g.Subject, 
   `/introspect` alike.
 - **Codes** are single-use across replicas (a grant's ID is derived from its code, so the store
   refuses a second exchange); a code presented twice ends the grant it made (RFC 6749 §4.1.2).
+  A request yields one code, issued at `{Prefix}/authorize/callback` only in a session of the user
+  who signed in for it — knowing a request's id is not enough, so send the user's browser there.
 - **Refresh tokens** rotate and are single-use. Replaying one ends the whole grant. A refresh asking
   for fewer scopes narrows that access token only.
 - **Revoking:** `RevokeRef` ends every grant tied to the app's record, `RevokeUser` every grant of a
@@ -639,7 +646,7 @@ g, err := p.VerifyFor(ctx, bearer, "https://app.example.com/mcp") // g.Subject, 
 
 go-auth-x ships two reference stores; both implement `CredentialStore` **and** `DirectoryStore` (plus
 the optional `TwoFactorStore`, `SessionStore`, `OrgStore`, and the `OrgDirectoryStore` /
-`BatchGroupStore` upgrades):
+`BatchGroupStore` / `SignupStore` upgrades):
 
 - **`gormstore`** — Postgres/SQLite via GORM. `New(db)` migrates self-contained `authx_*` tables
   (so it won't collide with yours) and adds a unique-email index. Ships the **safe verified-email

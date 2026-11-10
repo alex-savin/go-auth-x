@@ -89,6 +89,22 @@ func (a *Authenticator) PasswordSignup(c *reqCtx) {
 	}
 	const generic = "Check your email to finish creating your account."
 
+	// existing answers a signup for an account that is verified (or an operator-seeded placeholder its
+	// owner claims by signing in): its password is NOT touched. Nudge them to sign in / reset instead,
+	// and still answer generically.
+	existing := func(u *AuthUser) {
+		base := a.baseURL()
+		if a.acctLimiter == nil || a.acctLimiter.Allow("signup-mail:"+email) { // no mail flood to one address
+			_ = a.sendAuthEmail(email, "You already have an account",
+				"You already have an account",
+				"Someone tried to sign up with this email. If it was you, just sign in — or reset your password if you've forgotten it.",
+				"Sign in", base+"/login",
+				"If you didn't try to sign up, you can ignore this email.")
+		}
+		a.creds.RecordAudit(u.ID, email, c.ClientIP(), "password", "signup_existing", false, "")
+		c.JSON(http.StatusOK, H{"ok": true, "message": generic})
+	}
+
 	u, err := a.creds.UserByEmail(email)
 	switch {
 	case errors.Is(err, ErrNoUser):
@@ -102,22 +118,10 @@ func (a *Authenticator) PasswordSignup(c *reqCtx) {
 		c.JSON(http.StatusInternalServerError, H{"error": "could not create account"})
 		return
 	case u.EmailVerified || strings.HasPrefix(u.Sub, "bootstrap:"):
-		// Account already exists and is verified (or is an operator-seeded placeholder its owner
-		// claims by signing in): do NOT touch its password. Nudge them to
-		// sign in / reset instead, and still answer generically. Burn a bcrypt hash first so this
-		// branch costs ~the same as the new-account path below — otherwise the response time would
-		// reveal that the address is already registered.
+		// Burn a bcrypt hash first so this branch costs ~the same as the new-account path below —
+		// otherwise the response time would reveal that the address is already registered.
 		_, _ = bcrypt.GenerateFromPassword([]byte(body.Password), bcryptCost)
-		base := a.baseURL()
-		if a.acctLimiter == nil || a.acctLimiter.Allow("signup-mail:"+email) { // no mail flood to one address
-			_ = a.sendAuthEmail(email, "You already have an account",
-				"You already have an account",
-				"Someone tried to sign up with this email. If it was you, just sign in — or reset your password if you've forgotten it.",
-				"Sign in", base+"/login",
-				"If you didn't try to sign up, you can ignore this email.")
-		}
-		a.creds.RecordAudit(u.ID, email, c.ClientIP(), "password", "signup_existing", false, "")
-		c.JSON(http.StatusOK, H{"ok": true, "message": generic})
+		existing(u)
 		return
 	}
 
@@ -130,8 +134,15 @@ func (a *Authenticator) PasswordSignup(c *reqCtx) {
 		c.JSON(http.StatusInternalServerError, H{"error": "could not create account"})
 		return
 	}
-	if err := a.creds.SetPasswordHash(u.ID, hash, "bcrypt"); err != nil {
+	// "Still unverified" was read before the hashing above, long enough ago for the address's owner
+	// to have proven the mailbox since: the write is conditional on it still being true.
+	set, err := a.setSignupPassword(u.ID, email, hash)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, H{"error": "could not create account"})
+		return
+	}
+	if !set {
+		existing(u)
 		return
 	}
 	a.setSignupBinding(c, u.ID, hash)

@@ -236,7 +236,9 @@ func (s *Store) UserGroups(userID string) ([]authx.Group, error) {
 		return []authx.Group{}, nil
 	}
 	var rows []Group
-	err := s.db.Table("authx_groups").
+	// Select the group's columns only: both tables have an id, and a bare SELECT * would scan the
+	// membership row's id into Group.ID.
+	err := s.db.Table("authx_groups").Select("authx_groups.*").
 		Joins("JOIN authx_group_members m ON m.group_id = authx_groups.id").
 		Where("m.user_id = ?", n).Order("authx_groups.name").Scan(&rows).Error
 	if err != nil {
@@ -255,7 +257,8 @@ func (s *Store) GroupMembers(groupID string) ([]authx.AuthUser, error) {
 		return []authx.AuthUser{}, nil
 	}
 	var rows []User
-	err := s.db.Table("authx_users").
+	// The user's columns only (see UserGroups): never the membership row's id as User.ID.
+	err := s.db.Table("authx_users").Select("authx_users.*").
 		Joins("JOIN authx_group_members m ON m.user_id = authx_users.id").
 		Where("m.group_id = ?", n).Order("authx_users.email").Scan(&rows).Error
 	if err != nil {
@@ -334,9 +337,11 @@ func (s *Store) SetUserBan(userID string, banned bool, until *time.Time, reason 
 	})
 }
 
-// UpsertExternalUser provisions a directory-sourced user (LDAP/SCIM) via the safe linking rule.
+// UpsertExternalUser provisions a directory-sourced user (LDAP/SCIM) via the safe linking rule. An
+// existing account the source moves to another address is signed out and loses its sign-in methods
+// (see upsertUser).
 func (s *Store) UpsertExternalUser(sub, email, name string, emailVerified bool) (*authx.AuthUser, error) {
-	return s.UpsertUserOnLogin(sub, email, name, emailVerified)
+	return s.upsertUser(sub, email, name, emailVerified, true)
 }
 
 // --- api keys ---

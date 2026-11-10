@@ -235,6 +235,7 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc(p.prefix+"/authorize", p.authorize)
 	mux.HandleFunc(p.prefix+"/login", p.login)
+	mux.HandleFunc(p.prefix+"/authorize/callback", p.callback)
 	mux.HandleFunc(p.prefix+"/consent", p.consentJSON)
 	if cfg.Registration {
 		mux.HandleFunc(p.prefix+"/register", p.register)

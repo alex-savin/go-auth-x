@@ -494,7 +494,8 @@ func (s *Server) putUser(w http.ResponseWriter, r *http.Request) {
 	// Only an account SCIM provisioned has an address SCIM may re-point. Another one — a local
 	// password account, an OIDC or social sign-in, the owner — keeps its email: moving it would hand
 	// that account's password reset and magic links to whoever the new address belongs to.
-	if normEmail(email) != normEmail(cur.Email) && !strings.HasPrefix(cur.Sub, "scim:") {
+	moved := normEmail(email) != normEmail(cur.Email)
+	if moved && !strings.HasPrefix(cur.Sub, "scim:") {
 		scimErrorType(w, http.StatusBadRequest, "mutability", "the email of an account not provisioned by SCIM can't be changed here")
 		return
 	}
@@ -515,7 +516,12 @@ func (s *Server) putUser(w http.ResponseWriter, r *http.Request) {
 		writeResource(w, http.StatusOK, s.toSCIMUser(u), userVersion(u))
 		return
 	}
-	if _, uerr := s.dir.UpsertExternalUser(cur.Sub, email, name, true); uerr != nil { // preserve Sub
+	// A replace never verifies an address: an unverified account — someone's signup the IdP matched by
+	// email, with that someone's password on it — stays unverified until its user proves the mailbox.
+	// Only the move of a verified account SCIM provisioned keeps the IdP's word for the new address,
+	// and the store then signs the account out and removes its sign-in methods: who held it before
+	// keeps no way in, and nothing of theirs is handed to the new address.
+	if _, uerr := s.dir.UpsertExternalUser(cur.Sub, email, name, moved && cur.EmailVerified); uerr != nil { // preserve Sub
 		if errors.Is(uerr, authx.ErrEmailConflict) { // PUT would move this user onto another's email
 			scimErrorType(w, http.StatusConflict, "uniqueness", "a user with this email already exists")
 			return

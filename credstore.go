@@ -149,6 +149,22 @@ type CredentialStore interface {
 	RecentFailures(email string, since time.Time) (int, error)
 }
 
+// SignupStore is an optional CredentialStore upgrade (both reference stores implement it) for the two
+// writes around an unverified account's password. Anyone may sign up with any address, so a signup's
+// password counts only while the account is unverified, and a mailbox proof drops it. Those are a
+// check and a write each; done separately, a signup that read "unverified" just before the address's
+// owner proved the mailbox writes its password just after — onto a verified account. A store with
+// these methods makes each one atomic, on every replica. Without them the Authenticator serializes
+// the two itself, which covers a single process only.
+type SignupStore interface {
+	// SetPasswordHashIfUnverified sets the password of an account whose email is not verified and
+	// reports true; for a verified (or missing) account it changes nothing and reports false.
+	SetPasswordHashIfUnverified(userID, hash, algo string) (set bool, err error)
+	// VerifyEmailKeepingPassword marks the account's email verified and, in the same write, removes
+	// its password unless the stored hash equals keepHash ("" keeps none).
+	VerifyEmailKeepingPassword(userID, keepHash string) error
+}
+
 // Mailer sends the in-app auth emails. Implemented by internal/email; the auth package
 // owns the message templates and calls Send. nil/!Configured() disables email methods.
 type Mailer interface {

@@ -139,6 +139,11 @@ func (s *storage) SaveAuthCode(_ context.Context, id, code string) error {
 	if err != nil {
 		return err
 	}
+	// One code per request (see Provider.callback): a second one would be a fresh, valid code for
+	// whoever asked again.
+	if r.CodeHash != "" {
+		return errors.New("oidcprovider: a code was already issued for this request")
+	}
 	r.CodeHash = hash(code)
 	r.CodeAt = time.Now().UTC()
 	return s.st().SaveOAuthAuthRequest(r)

@@ -521,7 +521,8 @@ func (s *Store) UserOrgGroups(orgID, userID string) ([]authx.Group, error) {
 		return []authx.Group{}, nil
 	}
 	var rows []Group
-	err := s.db.Table("authx_groups").
+	// The group's columns only (see UserGroups): never the membership row's id as Group.ID.
+	err := s.db.Table("authx_groups").Select("authx_groups.*").
 		Joins("JOIN authx_group_members m ON m.group_id = authx_groups.id").
 		Where("m.user_id = ? AND authx_groups.org_id = ?", uid, n).
 		Order("authx_groups.name").Scan(&rows).Error

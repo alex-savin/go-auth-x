@@ -84,6 +84,9 @@ type Authenticator struct {
 	// orgMu serializes the self-service last-owner checks (demote/remove) so two concurrent removals
 	// can't both pass the "don't strip the last owner" check — same process-local trade-off as credMu.
 	orgMu sync.Mutex
+	// signupMu serializes a signup's password write with a mailbox proof for a store that can't make
+	// them atomic itself (see SignupStore). Process-local, like orgMu.
+	signupMu sync.Mutex
 	// twoFactor backs optional TOTP 2FA + recovery codes (nil = 2FA off).
 	twoFactor TwoFactorStore
 	// breach optionally screens new passwords against a breach corpus (e.g. HIBP k-anonymity), in

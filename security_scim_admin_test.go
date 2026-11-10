@@ -170,3 +170,107 @@ func TestResetLinkRefusedAfterEmailChange(t *testing.T) {
 		t.Fatal("a reset link for the old address must be refused")
 	}
 }
+
+// globalSCIM mounts the global SCIM server behind a key that has only the scim scope.
+func globalSCIM(t *testing.T, a *authx.Authenticator, s *memory.Store) (http.Handler, string) {
+	t.Helper()
+	raw := "axk_scim_only"
+	h := sha256.Sum256([]byte(raw))
+	if _, err := s.CreateAPIKey("idp", nil, []string{"scim"}, raw[:8], h[:], nil); err != nil {
+		t.Fatal(err)
+	}
+	return scim.NewServer(s, func(tok string) bool { return a.ValidateAPIKeyScope(tok, "scim") }).Handler(), raw
+}
+
+// magicLinkSignIn signs a fresh browser in by the magic link mailed to email.
+func magicLinkSignIn(t *testing.T, a *authx.Authenticator, m *capMailer, email string) *client {
+	t.Helper()
+	c := newClient(t, a)
+	m.mu.Lock()
+	m.msgs = nil
+	m.mu.Unlock()
+	c.do("POST", "/auth/email/request", map[string]any{"email": email})
+	msg := m.waitFor(t, "/auth/email/login")
+	if w := c.do("GET", "/auth/email/login?token="+tokenRe.FindStringSubmatch(msg.text)[1], nil); w.Code != http.StatusFound {
+		t.Fatalf("magic link for %s = %d", email, w.Code)
+	}
+	return c
+}
+
+// The global SCIM mount doesn't verify an address it didn't provision. An IdP that finds someone's
+// unproven signup under a user's address (its create answers 409, so it matches by filter and
+// replaces — Okta's flow) leaves the row unverified: the signup's password still signs nobody in.
+func TestGlobalSCIMReplaceDoesNotVerifyASignup(t *testing.T) {
+	a, s, _ := newTestAuth(t)
+	srv, key := globalSCIM(t, a, s)
+	if w := newClient(t, a).do("POST", "/auth/password/signup", map[string]any{"email": "victim@corp.com", "password": squatterPW}); w.Code != http.StatusOK {
+		t.Fatalf("signup = %d", w.Code)
+	}
+	if w := scimDo(t, srv, key, "POST", "/Users", `{"userName":"victim@corp.com"}`); w.Code != http.StatusConflict {
+		t.Fatalf("create over a signup = %d, want 409", w.Code)
+	}
+	u, err := s.UserByEmail("victim@corp.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w := scimDo(t, srv, key, "PUT", "/Users/"+u.ID, `{"userName":"victim@corp.com","name":{"formatted":"Victim"},"active":true}`); w.Code != http.StatusOK {
+		t.Fatalf("replace = %d %s", w.Code, w.Body.String())
+	}
+	if u, _ := s.UserByID(u.ID); u.EmailVerified || u.Name != "Victim" {
+		t.Fatalf("a replace must update the profile and verify nothing: %+v", u)
+	}
+	if code := newClient(t, a).loginCode("victim@corp.com", squatterPW); code == http.StatusOK {
+		t.Fatal("the unproven signup's password signs in after the IdP's replace")
+	}
+}
+
+// Moving a SCIM account to another address hands it to whoever holds that mailbox, with nothing of
+// the previous holder's: not their session, not a passkey or password they put on it. Otherwise a
+// scim-scoped key makes an account of its own, signs in to it, and moves it onto OWNER_EMAIL.
+func TestGlobalSCIMEmailMoveCarriesNoSignInOver(t *testing.T) {
+	t.Run("an account moved onto the owner's address", func(t *testing.T) {
+		a, s, m := newTestAuth(t)
+		srv, key := globalSCIM(t, a, s)
+		w := scimDo(t, srv, key, "POST", "/Users", `{"userName":"mallory","emails":[{"value":"mallory@evil.test"}]}`)
+		id := decode(t, w)["id"].(string)
+		c := magicLinkSignIn(t, a, m, "mallory@evil.test")
+		if w := c.do("POST", "/auth/api/account/password", map[string]any{"new": "carried-over-pw-91"}); w.Code != http.StatusOK {
+			t.Fatalf("set a password = %d %s", w.Code, w.Body.String())
+		}
+		if w := scimDo(t, srv, key, "PUT", "/Users/"+id, `{"userName":"mallory","emails":[{"value":"owner@example.com"}]}`); w.Code != http.StatusOK {
+			t.Fatalf("move = %d %s", w.Code, w.Body.String())
+		}
+		if w := c.do("GET", "/auth/admin/users", nil); w.Code == http.StatusOK {
+			t.Fatal("the session from before the move is the owner's")
+		}
+		if w := c.do("GET", "/auth/api/account", nil); w.Code == http.StatusOK {
+			t.Fatal("the session from before the move still works")
+		}
+		if code := newClient(t, a).loginCode("owner@example.com", "carried-over-pw-91"); code == http.StatusOK {
+			t.Fatal("the password from before the move signs in to the owner's address")
+		}
+		// The address's holder gets the account, clean.
+		owner := magicLinkSignIn(t, a, m, "owner@example.com")
+		if w := owner.do("GET", "/auth/admin/users", nil); w.Code != http.StatusOK {
+			t.Fatalf("the owner's own sign-in = %d", w.Code)
+		}
+	})
+	t.Run("the owner's account moved away and back", func(t *testing.T) {
+		a, s, m := newTestAuth(t)
+		srv, key := globalSCIM(t, a, s)
+		w := scimDo(t, srv, key, "POST", "/Users", `{"userName":"owner@example.com"}`)
+		id := decode(t, w)["id"].(string)
+		owner := magicLinkSignIn(t, a, m, "owner@example.com")
+		if w := owner.do("GET", "/auth/admin/users", nil); w.Code != http.StatusOK {
+			t.Fatalf("precondition: the owner is the owner, got %d", w.Code)
+		}
+		scimDo(t, srv, key, "PUT", "/Users/"+id, `{"userName":"owner@example.com","emails":[{"value":"drop@evil.test"}]}`)
+		parked := magicLinkSignIn(t, a, m, "drop@evil.test")
+		if w := scimDo(t, srv, key, "PUT", "/Users/"+id, `{"userName":"owner@example.com"}`); w.Code != http.StatusOK {
+			t.Fatalf("move back = %d", w.Code)
+		}
+		if w := parked.do("GET", "/auth/admin/users", nil); w.Code == http.StatusOK {
+			t.Fatal("a session made while the account was parked elsewhere is the owner's")
+		}
+	})
+}

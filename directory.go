@@ -81,6 +81,13 @@ type DirectoryStore interface {
 
 	// UpsertExternalUser provisions/updates a user from an external directory (LDAP/SCIM) keyed by
 	// an external Sub (e.g. "ldap:<uid>" / "scim:<id>"). Applies the same safe email-linking rule.
+	//
+	// When it moves an EXISTING account (found by its Sub) to a different email, the account goes to
+	// whoever holds the new mailbox, so nothing that signs in may come along: the store removes the
+	// account's password, passkeys, linked identities, second factor and pending tokens, ends its
+	// sessions (when it tracks them) and drops its OAuth-provider grants, in the same write. Its id
+	// and memberships stay. Otherwise a session or passkey from before the move would sign in to an
+	// account that now carries someone else's — say the owner's — address. Both reference stores do.
 	UpsertExternalUser(sub, email, name string, emailVerified bool) (*AuthUser, error)
 
 	// API keys (sha256-at-rest). APIKeyByHash returns ErrNoCredential if absent and does NOT

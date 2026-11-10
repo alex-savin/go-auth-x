@@ -120,6 +120,34 @@ func (p *Provider) login(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, p.cfg.ConsentURL(id), http.StatusFound)
 }
 
+// callback is where an approved request's code is issued and the browser sent back to the client.
+// zitadel's handler answers anyone who knows the request's id — and whoever started the request
+// knows it. Someone could start one with their own PKCE verifier, have a signed-in user open its
+// link and approve what is a genuine client, then fetch the code here themselves, with no session at
+// all. So the code is issued only in the browser of the user who signed in for the request, and once.
+func (p *Provider) callback(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	req, err := p.store.request(r.URL.Query().Get("id"))
+	if err != nil || !req.Done || req.Subject == "" {
+		p.op.ServeHTTP(w, r) // unknown, expired or not approved: zitadel's answer, which issues nothing
+		return
+	}
+	sc := p.cfg.Auth.SessionOf(r)
+	if sc == nil || sc.Subject != req.Subject || sc.ImpersonatedBy != "" {
+		http.Error(w, "This sign-in request belongs to another session. Start again from the application.", http.StatusForbidden)
+		return
+	}
+	if req.CodeHash != "" {
+		http.Error(w, "This sign-in request was already completed. Start again from the application.", http.StatusBadRequest)
+		return
+	}
+	p.op.ServeHTTP(w, r)
+}
+
 // sessionAuthTime is when the session's user signed in, zero when the cookie predates the claim.
 func sessionAuthTime(sc *authx.SessionClaims) time.Time {
 	if sc.AuthTime == nil {

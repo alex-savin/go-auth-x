@@ -7,6 +7,57 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Fixes from a second review, of v0.13.0. Each has a regression test.
+
+### Security
+
+- **`oidcprovider` handed a request's code to anyone who knew its id** — `{Prefix}/authorize/callback`
+  checked only that the request was approved. Whoever starts a request knows its id: someone with no
+  session could start one with their own PKCE verifier, send a signed-in user its link, let them
+  approve what is a genuine client (or nothing at all, with no consent screen), then fetch the code
+  from the callback and redeem it — tokens for that user. The callback now issues the code only in a
+  session of the user who signed in for the request (never an impersonation session), and once per
+  request (asking again used to mint another valid code).
+- **gormstore returned membership-row ids as user and group ids** — `GroupMembers`, `UserGroups` and
+  `UserOrgGroups` joined without selecting columns, so the membership row's `id` was scanned into the
+  result. On gormstore, removing a member through SCIM (PUT, PATCH `remove`, PATCH `replace`) answered
+  200 and removed nobody, or someone else; SCIM and the admin API reported the wrong member ids.
+- **The global SCIM mount verified an unproven signup** — an IdP that found someone's signup under a
+  user's address (its create answers 409, so it matches by filter and replaces) marked the row
+  verified with the signup's password still on it, which then signed in — as the owner, for
+  `OWNER_EMAIL`. A replace no longer verifies anything.
+- **A `scim`-scoped key could still become the instance owner** — moving a SCIM account's email kept
+  its sessions and credentials and arrived verified: sign in to an account of your own, move it onto
+  an unregistered `OWNER_EMAIL`, and the session was the owner's. A provisioning source (SCIM, LDAP
+  sync) that moves an account to another address now hands over an account nothing signs in to: its
+  sessions end and its password, passkeys, linked providers, TOTP, pending links and OAuth grants are
+  removed, in the same write.
+- **A signup in flight could outlive the mailbox proof** — signup read "unverified", hashed the
+  password, and wrote it unconditionally; if the address's owner opened their verify link, magic link
+  or code in between, the signup's password landed on the verified account. The write is now
+  conditional on the account still being unverified, and a mailbox proof verifies and drops the
+  unproven password in one step.
+
+### Behavior changes
+
+- `oidcprovider`: `{Prefix}/authorize/callback` answers 403 without the session of the user who
+  signed in for the request, and 400 once the request's code was issued. Send the user's browser to
+  the URL `Approve` returns (as the README has it); a server-side fetch of it no longer works.
+- Global SCIM: `PUT /Users/{id}` never marks an account verified.
+- SCIM and LDAP sync: changing the email of an account they provisioned signs it out and removes its
+  sign-in methods (see above). Its user signs in through the IdP, or proves the new mailbox by link,
+  code or password reset. The account's id and its group and org memberships stay.
+- gormstore: `GroupMembers`, `UserGroups` and `UserOrgGroups` return the users' and groups' own ids.
+
+### Added
+
+- `SignupStore` — an optional `CredentialStore` upgrade (`SetPasswordHashIfUnverified`,
+  `VerifyEmailKeepingPassword`) that makes the signup write and the mailbox proof atomic on every
+  replica; both reference stores implement it. A store without it is covered within one process (the
+  `Authenticator` serializes the two).
+- Store contract: `UpsertExternalUser` moving an existing account to another email must remove what
+  signs in to it and end its sessions (documented on `DirectoryStore`; both reference stores do).
+
 ## [0.13.0] — 2026-11-09
 
 A security release. An audit (seven independent reviews, every finding proven with a test) found

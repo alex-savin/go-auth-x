@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"net/url"
 	"time"
@@ -90,17 +91,47 @@ func (a *Authenticator) signupBound(c *reqCtx, userID, hash string) bool {
 // address, a password already on the account was set by someone who hadn't proven the mailbox — a
 // signup by anyone — so it is dropped, unless keepBoundPassword and this very browser set it
 // (signupBound). The person who proved the mailbox is signed in and can set a password of their own.
+// The drop and the verification are one step against a signup still in flight (setSignupPassword):
+// its password lands before, and is dropped here, or not at all.
 func (a *Authenticator) claimMailbox(c *reqCtx, u *AuthUser, keepBoundPassword bool) error {
 	defer a.clearCookie(c, signupCookie)
 	if u.EmailVerified {
 		return nil
 	}
+	if ss, ok := a.creds.(SignupStore); ok {
+		keep := ""
+		if hash, _, err := a.passwordHash(u.ID); err == nil && keepBoundPassword && a.signupBound(c, u.ID, hash) {
+			keep = hash
+		}
+		return ss.VerifyEmailKeepingPassword(u.ID, keep)
+	}
+	a.signupMu.Lock()
+	defer a.signupMu.Unlock()
 	if hash, _, err := a.passwordHash(u.ID); err == nil && !(keepBoundPassword && a.signupBound(c, u.ID, hash)) {
 		if err := a.creds.SetPasswordHash(u.ID, "", ""); err != nil {
 			return err
 		}
 	}
 	return a.creds.SetEmailVerified(u.ID, true)
+}
+
+// setSignupPassword sets a signup's password on an account that is still unverified, and reports
+// false — writing nothing — when the account has been verified since the signup read it: hashing
+// takes long enough for the address's owner to prove the mailbox in between, and a password written
+// after that would be an unproven one on a verified account.
+func (a *Authenticator) setSignupPassword(userID, email, hash string) (bool, error) {
+	if ss, ok := a.creds.(SignupStore); ok {
+		return ss.SetPasswordHashIfUnverified(userID, hash, "bcrypt")
+	}
+	a.signupMu.Lock()
+	defer a.signupMu.Unlock()
+	if u, err := a.creds.UserByEmail(email); err != nil || u.ID != userID || u.EmailVerified {
+		if err != nil && !errors.Is(err, ErrNoUser) {
+			return false, err
+		}
+		return false, nil
+	}
+	return true, a.creds.SetPasswordHash(userID, hash, "bcrypt")
 }
 
 // EmailRequest (POST /auth/email/request) emails a one-time sign-in (magic) link. Always 200

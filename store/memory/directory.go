@@ -251,9 +251,11 @@ func (s *Store) SetUserBan(userID string, banned bool, until *time.Time, reason 
 	return nil
 }
 
-// UpsertExternalUser provisions a directory-sourced user (LDAP/SCIM) via the safe linking rule.
+// UpsertExternalUser provisions a directory-sourced user (LDAP/SCIM) via the safe linking rule. An
+// existing account the source moves to another address is signed out and loses its sign-in methods
+// (see upsertUser).
 func (s *Store) UpsertExternalUser(sub, email, name string, emailVerified bool) (*authx.AuthUser, error) {
-	return s.UpsertUserOnLogin(sub, email, name, emailVerified)
+	return s.upsertUser(sub, email, name, emailVerified, true)
 }
 
 // --- api keys ---
