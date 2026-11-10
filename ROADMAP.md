@@ -5,6 +5,20 @@ Direction and planned work for the library. Authoritative usage/feature docs liv
 
 ## Shipped
 
+### v0.14.0 — security release · behavior changes (see CHANGELOG)
+
+- **Token and account takeover closed** — the `oidcprovider` callback bound to the user's session; a
+  `scim` key or an unproven signup can no longer become a verified account (or the owner); a signup
+  in flight can't outlive the mailbox proof; sign-in fails closed on store errors.
+- **Authorization tightened** — API keys need the `app` scope at the app's gate, mint nothing wider
+  than themselves, and can't act on the owner; org admins grant only built-in roles; impersonation
+  sessions only look; a TOTP user adds factors only after a code step-up.
+- **Provisioning follows the source** — gormstore group joins return real ids; SCIM fails loudly and
+  stays on its own accounts; LDAP removes memberships it no longer lists.
+- **Hardening** — open redirect, pending email changes, provider error oracle and request bounds,
+  owner lockout threshold, `POST /auth/logout`, opt-in `__Host-` cookies, single-use WebAuthn
+  challenges; `SECURITY.md`, pinned CI actions, Dependabot.
+
 ### v0.13.0 — security release · behavior changes (see CHANGELOG)
 
 - **Account takeover closed** — signup squatting, SCIM (per-org and global) asserting identities, the

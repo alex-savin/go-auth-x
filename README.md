@@ -851,7 +851,13 @@ go-auth-x/
 
 See **[ROADMAP.md](./ROADMAP.md)** for the full list and **[CHANGELOG.md](./CHANGELOG.md)** for details.
 
-- **v0.13.0** (latest): **security release** — fixes from a security audit: account takeover through
+- **v0.14.0** (latest): **security release** — fixes from a second review: OAuth codes handed to
+  whoever knew a request's id; a `scim` key or an unproven signup becoming the owner; gormstore group
+  removals that removed nobody; sign-in failing open on store errors; impersonation, step-up and
+  API-key scope gaps; LDAP memberships that never ended. **Upgrade promptly**; several fixes change
+  behavior — notably, API keys need the `app` scope for your gated routes (see the
+  [CHANGELOG](./CHANGELOG.md)).
+- **v0.13.0**: **security release** — fixes from a security audit: account takeover through
   signup squatting, SCIM email re-pointing, the OIDC callback and the 2FA endpoints; sessions that
   outlived password resets and deprovisioning; SCIM `/Bulk` memory exhaustion; credentialed CORS on
   the OAuth endpoints; and lower-severity races and throttles. **Upgrade promptly**; several fixes
