@@ -12,7 +12,7 @@ require (
 	github.com/rs/cors v1.11.1
 	github.com/zitadel/oidc/v3 v3.51.17
 	golang.org/x/crypto v0.58.0
-	golang.org/x/oauth2 v0.37.0
+	golang.org/x/oauth2 v0.38.0
 	gorm.io/gorm v1.31.2
 )
 
