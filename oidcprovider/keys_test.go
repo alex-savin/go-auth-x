@@ -226,13 +226,11 @@ func TestKeyRotationReplicas(t *testing.T) {
 	// Both rotating at once: an extra key, but one signs, on both.
 	var wg sync.WaitGroup
 	for _, p := range []*oidcprovider.Provider{h.p, p2, h.p, p2} {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			if err := p.RotateKeys(context.Background()); err != nil {
 				t.Error(err)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	if err := oidcprovider.MaintainKeys(h.p); err != nil {
@@ -256,9 +254,7 @@ func TestKeyRotationConcurrent(t *testing.T) {
 	oidcprovider.SetClock(h.p, clk.Now)
 	var wg sync.WaitGroup
 	for i := range 8 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			for range 5 {
 				switch i % 4 {
 				case 0:
@@ -283,7 +279,7 @@ func TestKeyRotationConcurrent(t *testing.T) {
 					res.Body.Close()
 				}
 			}
-		}()
+		})
 	}
 	wg.Wait()
 	if err := oidcprovider.MaintainKeys(h.p); err != nil {

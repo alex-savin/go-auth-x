@@ -85,7 +85,7 @@ func (a *Authenticator) wauthnUserFor(au *AuthUser) (*wauthnUser, error) {
 
 func passkeyToCredential(p Passkey) webauthn.Credential {
 	var tr []protocol.AuthenticatorTransport
-	for _, t := range strings.Split(p.Transports, ",") {
+	for t := range strings.SplitSeq(p.Transports, ",") {
 		if t = strings.TrimSpace(t); t != "" {
 			tr = append(tr, protocol.AuthenticatorTransport(t))
 		}
@@ -131,8 +131,8 @@ func (a *Authenticator) setWauthnFlow(c *reqCtx, sd *webauthn.SessionData) error
 		return err
 	}
 	tok, err := signJWT(a.cfg.SessionSecret, webauthnFlowClaims{
-		Session:          raw,
-		RegisteredClaims: jwt.RegisteredClaims{Audience: jwt.ClaimStrings{audWebauthn}, ExpiresAt: jwt.NewNumericDate(time.Now().Add(wauthnFlowTTL))},
+		Session:  raw,
+		Audience: jwt.ClaimStrings{audWebauthn}, ExpiresAt: jwt.NewNumericDate(time.Now().Add(wauthnFlowTTL)),
 	})
 	if err != nil {
 		return err

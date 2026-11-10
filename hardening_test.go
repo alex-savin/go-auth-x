@@ -30,9 +30,8 @@ func TestSanitizeNext_ControlBytes(t *testing.T) {
 
 func TestVerifyRejectsUnderStrengthKeyCookie(t *testing.T) {
 	forge := func(key []byte) string {
-		tok := jwt.NewWithClaims(jwt.SigningMethodHS256, SessionClaims{RegisteredClaims: jwt.RegisteredClaims{
-			Subject: "owner@example.com", Audience: jwt.ClaimStrings{audSession}, ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour)),
-		}})
+		tok := jwt.NewWithClaims(jwt.SigningMethodHS256, SessionClaims{
+			Subject: "owner@example.com", Audience: jwt.ClaimStrings{audSession}, ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour))})
 		s, _ := tok.SignedString(key)
 		return s
 	}

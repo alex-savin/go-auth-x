@@ -32,12 +32,11 @@ type stepUpClaims struct {
 
 func (a *Authenticator) setStepUpCookie(c *reqCtx, sub, factor string) {
 	now := time.Now()
-	tok, err := signJWT(a.cfg.SessionSecret, stepUpClaims{Factor: factor, RegisteredClaims: jwt.RegisteredClaims{
+	tok, err := signJWT(a.cfg.SessionSecret, stepUpClaims{Factor: factor,
 		Subject:   sub,
 		Audience:  jwt.ClaimStrings{audStepUp},
 		IssuedAt:  jwt.NewNumericDate(now),
-		ExpiresAt: jwt.NewNumericDate(now.Add(stepUpCookieTTL)),
-	}})
+		ExpiresAt: jwt.NewNumericDate(now.Add(stepUpCookieTTL))})
 	if err != nil {
 		return
 	}

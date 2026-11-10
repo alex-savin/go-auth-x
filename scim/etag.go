@@ -61,7 +61,7 @@ func ifMatchFails(r *http.Request, version string) bool {
 // Used for If-None-Match (RFC 9110 §13.1.2 permits the weak comparator).
 func etagListHas(header, version string) bool {
 	want := etagCore(version)
-	for _, tag := range strings.Split(header, ",") {
+	for tag := range strings.SplitSeq(header, ",") {
 		if etagCore(strings.TrimSpace(tag)) == want {
 			return true
 		}
@@ -73,7 +73,7 @@ func etagListHas(header, version string) bool {
 // (W/…) in the header never matches. Our emitted tags are always strong.
 func etagListHasStrong(header, version string) bool {
 	want := etagCore(version)
-	for _, tag := range strings.Split(header, ",") {
+	for tag := range strings.SplitSeq(header, ",") {
 		tag = strings.TrimSpace(tag)
 		if strings.HasPrefix(tag, "W/") { // weak validator can't satisfy strong comparison
 			continue

@@ -34,7 +34,7 @@ type Org struct {
 	Slug      string    `json:"slug"`
 	Name      string    `json:"name"`
 	CreatedAt time.Time `json:"createdAt"`
-	UpdatedAt time.Time `json:"updatedAt,omitempty"` // zero if the store doesn't track it
+	UpdatedAt time.Time `json:"updatedAt"` // zero if the store doesn't track it
 }
 
 // UserOrg is one of a user's org memberships (org-joined, for the org picker).

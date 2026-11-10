@@ -190,7 +190,7 @@ func TestAdversarialSCIMFiltersBulk(t *testing.T) {
 	build := func(n int) string {
 		var b strings.Builder
 		b.WriteString(`{"Operations":[`)
-		for i := 0; i < n; i++ {
+		for i := range n {
 			if i > 0 {
 				b.WriteByte(',')
 			}

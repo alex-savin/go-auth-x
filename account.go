@@ -2,6 +2,7 @@ package authx
 
 import (
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 
@@ -175,13 +176,7 @@ func (a *Authenticator) OAuthUnlink(c *reqCtx) {
 	}
 	provider := c.Param("provider")
 	ids, _ := a.creds.OAuthIdentities(au.ID)
-	linked := false
-	for _, p := range ids {
-		if p == provider {
-			linked = true
-			break
-		}
-	}
+	linked := slices.Contains(ids, provider)
 	if !linked {
 		c.JSON(http.StatusNotFound, H{"error": "no such linked account"})
 		return

@@ -14,7 +14,7 @@ type Group struct {
 	Name        string    `json:"name"`
 	Description string    `json:"description"`
 	CreatedAt   time.Time `json:"createdAt"`
-	UpdatedAt   time.Time `json:"updatedAt,omitempty"` // for SCIM meta.lastModified; zero if the store doesn't track it
+	UpdatedAt   time.Time `json:"updatedAt"` // for SCIM meta.lastModified; zero if the store doesn't track it
 	// OrgID binds an org-scoped group to its organization ("" = a global group, the default).
 	// Names are unique per (org, name). Org-scoped groups are invisible to the global verbs
 	// (Groups / GroupByName) and never ride in the session cookie — they are managed through

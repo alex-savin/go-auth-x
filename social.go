@@ -297,10 +297,9 @@ func (a *Authenticator) OAuthConnect(c *reqCtx) {
 		return
 	}
 	now := time.Now()
-	tok, err := signJWT(a.cfg.SessionSecret, linkClaims{Provider: provider, RegisteredClaims: jwt.RegisteredClaims{
+	tok, err := signJWT(a.cfg.SessionSecret, linkClaims{Provider: provider,
 		Subject: au.Sub, Audience: jwt.ClaimStrings{audLink},
-		IssuedAt: jwt.NewNumericDate(now), ExpiresAt: jwt.NewNumericDate(now.Add(linkTTL)),
-	}})
+		IssuedAt: jwt.NewNumericDate(now), ExpiresAt: jwt.NewNumericDate(now.Add(linkTTL))})
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, H{"error": "could not start connecting"})
 		return

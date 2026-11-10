@@ -202,7 +202,7 @@ func TestEmailOTP(t *testing.T) {
 	}
 	// Attempt cap: 3 wrong guesses invalidate even the correct code.
 	_ = s.CreateEmailOTP("email_otp", "b@x.com", []byte("good"), time.Now().Add(time.Minute), 3)
-	for i := 0; i < 3; i++ {
+	for range 3 {
 		_, _ = s.VerifyEmailOTP("email_otp", "b@x.com", []byte("bad"))
 	}
 	if _, err := s.VerifyEmailOTP("email_otp", "b@x.com", []byte("good")); err != authx.ErrTokenInvalid {

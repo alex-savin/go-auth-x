@@ -86,7 +86,7 @@ func toGroup(g *Group) authx.Group {
 
 func csvSplit(s string) []string {
 	var out []string
-	for _, p := range strings.Split(s, ",") {
+	for p := range strings.SplitSeq(s, ",") {
 		if p = strings.TrimSpace(p); p != "" {
 			out = append(out, p)
 		}

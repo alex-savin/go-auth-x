@@ -6,6 +6,7 @@ package authx_test
 
 import (
 	"context"
+	"maps"
 	"net/http"
 	"net/url"
 	"strings"
@@ -152,9 +153,7 @@ func TestWebauthnChallengeIsSingleUse(t *testing.T) {
 		t.Fatalf("begin = %d", w.Code)
 	}
 	captured := map[string]string{}
-	for k, v := range c.cookies {
-		captured[k] = v
-	}
+	maps.Copy(captured, c.cookies)
 	first := c.do("POST", "/auth/webauthn/login/finish", map[string]any{"id": "AAAA"})
 	replay := &client{t: t, h: a.Handler(), cookies: captured}
 	second := replay.do("POST", "/auth/webauthn/login/finish", map[string]any{"id": "AAAA"})

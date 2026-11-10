@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"regexp"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -55,9 +56,9 @@ func (m *capMailer) waitFor(t *testing.T, needle string) capMsg {
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		m.mu.Lock()
-		for i := len(m.msgs) - 1; i >= 0; i-- {
-			if strings.Contains(m.msgs[i].text, needle) || strings.Contains(m.msgs[i].subject, needle) {
-				msg := m.msgs[i]
+		for _, msg := range slices.Backward(m.msgs) {
+			if strings.Contains(msg.text, needle) || strings.Contains(msg.subject, needle) {
+
 				m.mu.Unlock()
 				return msg
 			}
@@ -222,7 +223,7 @@ func TestEmailOTP_WrongCodeThenExhausted(t *testing.T) {
 	msg := mailer.waitFor(t, "sign-in code")
 	code := sixDigits.FindStringSubmatch(msg.text)[1]
 
-	for i := 0; i < 5; i++ { // maxOTPAttempts wrong guesses
+	for range 5 { // maxOTPAttempts wrong guesses
 		if w := c.do("POST", "/auth/email-otp/verify", map[string]any{"email": "u@x.com", "code": "000000x"}); w.Code == 200 {
 			t.Fatal("a wrong code must not verify")
 		}
@@ -432,7 +433,7 @@ func TestRateLimit429WithRetryAfter(t *testing.T) {
 	seedUser(t, s, "u@x.com", "correct-horse-9!", true)
 	c := newClient(t, a)
 	got429 := false
-	for i := 0; i < 40; i++ {
+	for range 40 {
 		w := c.do("POST", "/auth/password/login", map[string]any{"email": "nobody@x.com", "password": "wrong"})
 		if w.Code == http.StatusTooManyRequests {
 			if ra := w.Header().Get("Retry-After"); ra == "" {

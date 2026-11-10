@@ -100,7 +100,7 @@ func TestTOTPConfirmThrottled(t *testing.T) {
 	if w := c.do("POST", "/auth/2fa/totp/begin", nil); w.Code != http.StatusOK {
 		t.Fatalf("begin = %d", w.Code)
 	}
-	for i := 0; i < 30; i++ {
+	for i := range 30 {
 		w := c.doFromIP(fmt.Sprintf("203.0.113.%d", i), "POST", "/auth/2fa/totp/confirm", map[string]any{"code": "000000"})
 		if w.Code == http.StatusTooManyRequests {
 			return
@@ -117,7 +117,7 @@ func TestTOTPDisableThrottledPerAccount(t *testing.T) {
 	c.login("u@x.com", "user-password-12")
 	c.reauth("user-password-12")
 	enrollTOTP(t, c)
-	for i := 0; i < 30; i++ {
+	for i := range 30 {
 		if w := c.doFromIP(fmt.Sprintf("2001:db8:%x::1", i), "POST", "/auth/2fa/disable", map[string]any{"code": "000000"}); w.Code == http.StatusTooManyRequests {
 			return
 		}
@@ -153,7 +153,7 @@ func TestChangePasswordCurrentCheckThrottled(t *testing.T) {
 	seedUser(t, s, "u@x.com", "user-password-12", true)
 	c := newClient(t, a)
 	c.login("u@x.com", "user-password-12")
-	for i := 0; i < 30; i++ {
+	for i := range 30 {
 		w := c.do("POST", "/auth/api/account/password", map[string]any{"current": fmt.Sprintf("guess-%02d-xxxxx", i), "new": "new-password-12345"})
 		if w.Code == http.StatusTooManyRequests {
 			return

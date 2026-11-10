@@ -176,7 +176,7 @@ func TestEmailOTPVerifyBudgetPerAddress(t *testing.T) {
 	a, s, m := newTestAuth(t)
 	seedUser(t, s, "v@x.com", "", true)
 	c := newClient(t, a)
-	for i := 0; i < 30; i++ {
+	for i := range 30 {
 		if i%5 == 0 { // a fresh code every five guesses, as an attacker would
 			c.doFromIP(fmt.Sprintf("203.0.113.%d", i), "POST", "/auth/email-otp/send", map[string]any{"email": "v@x.com"})
 			m.waitFor(t, "sign-in code")
@@ -192,7 +192,7 @@ func TestEmailOTPVerifyBudgetPerAddress(t *testing.T) {
 func TestSignupMailLimitedPerAddress(t *testing.T) {
 	a, _, m := newTestAuth(t)
 	c := newClient(t, a)
-	for i := 0; i < 15; i++ {
+	for i := range 15 {
 		if w := c.doFromIP(fmt.Sprintf("203.0.113.%d", i), "POST", "/auth/password/signup", map[string]any{"email": "target@x.com", "password": fmt.Sprintf("bomb-password-%02d", i)}); w.Code != http.StatusOK {
 			t.Fatalf("signup %d = %d", i, w.Code)
 		}
