@@ -28,7 +28,12 @@ func ctEqual(a, b string) bool {
 func (a *Authenticator) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /auth/login", a.wrap(a.Login))       // OIDC: start Authorization Code + PKCE
 	mux.HandleFunc("GET /auth/callback", a.wrap(a.Callback)) // OIDC: redirect target
-	mux.HandleFunc("GET /auth/logout", a.wrap(a.Logout))
+	// POST (with the CSRF token) is the way to sign out. GET still works unless Config.DisableGetLogout:
+	// it lets any page the user visits sign them out.
+	mux.HandleFunc("POST /auth/logout", a.wrap(a.Logout))
+	if !a.cfg.DisableGetLogout {
+		mux.HandleFunc("GET /auth/logout", a.wrap(a.Logout))
+	}
 	mux.HandleFunc("GET /auth/me", a.wrap(a.Me))
 	mux.HandleFunc("GET /auth/config", a.wrap(a.AuthConfig)) // public: which methods are available
 	// Session management + impersonation-exit act on the session cookie regardless of which methods are
@@ -263,6 +268,7 @@ func (a *Authenticator) Logout(c *reqCtx) {
 	}
 	a.clearCookie(c, sessionCookie)
 	a.clearCookie(c, csrfCookie)
+	a.clearCookie(c, stepUpCookie) // a step-up doesn't outlive the session it was made in
 	// Only do RP-initiated (IdP) logout when THIS session actually came from OIDC — i.e. it
 	// carries an id_token. In-app sessions (password / passkey / email) must not bounce
 	// through the IdP; they just return to our own login.

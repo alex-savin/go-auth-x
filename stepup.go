@@ -53,12 +53,12 @@ func (a *Authenticator) StepUpFresh(r *http.Request, maxAge time.Duration) bool 
 
 // stepUpFresh is StepUpFresh, and with a factor, only for a step-up made with that factor.
 func (a *Authenticator) stepUpFresh(r *http.Request, maxAge time.Duration, factor string) bool {
-	sc, err := parseSessionMulti(a.verifySecrets(), cookieValue(r, sessionCookie))
+	sc, err := parseSessionMulti(a.verifySecrets(), a.cookieValue(r, sessionCookie))
 	if err != nil || a.sessionRevoked(sc) {
 		return false
 	}
 	var claims stepUpClaims
-	if parseJWTMulti(a.verifySecrets(), cookieValue(r, stepUpCookie), &claims, audStepUp) != nil {
+	if parseJWTMulti(a.verifySecrets(), a.cookieValue(r, stepUpCookie), &claims, audStepUp) != nil {
 		return false
 	}
 	if claims.Subject != sc.Subject || claims.IssuedAt == nil {

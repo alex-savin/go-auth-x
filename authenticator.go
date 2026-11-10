@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -131,6 +132,10 @@ func New(ctx context.Context, cfg Config) (*Authenticator, error) {
 		if len(cfg.SessionSecret) < 32 {
 			return nil, fmt.Errorf("authx: SESSION_SECRET must be at least 32 bytes (got %d)", len(cfg.SessionSecret))
 		}
+	}
+	// __Host- cookies exist only over https: without it every cookie would be refused by the browser.
+	if cfg.HostCookies && !strings.HasPrefix(strings.ToLower(cfg.AppURL), "https://") {
+		return nil, errors.New("authx: HostCookies (COOKIE_HOST_PREFIX) needs an https APP_URL")
 	}
 	// Retired verify-only keys must be just as strong as the primary — a short one would be a
 	// forgeable trusted signer. Fail closed rather than silently accepting a weak rollover key.

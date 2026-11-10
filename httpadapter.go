@@ -75,7 +75,7 @@ func (a *Authenticator) GateHTTP(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
-		sc, err := parseSessionMulti(a.verifySecrets(), cookieValue(r, sessionCookie))
+		sc, err := parseSessionMulti(a.verifySecrets(), a.cookieValue(r, sessionCookie))
 		if err == nil && a.sessionRevoked(sc) {
 			err = errRevokedSession // a revoked session is treated as no session
 		}
@@ -131,7 +131,7 @@ func (a *Authenticator) CSRFHTTP(next http.Handler) http.Handler {
 		// other Authorization header proves nothing, and the handler would fall back to the cookie.
 		// And only without a session cookie: with both, a handler that finds the key insufficient
 		// falls back to the cookie — which is then what authorizes the request, and needs the token.
-		if key := bearerToken(r.Header.Get("Authorization")); key != "" && cookieValue(r, sessionCookie) == "" {
+		if key := bearerToken(r.Header.Get("Authorization")); key != "" && a.cookieValue(r, sessionCookie) == "" {
 			if _, ok := a.lookupAPIKey(key); ok {
 				next.ServeHTTP(w, r)
 				return
@@ -167,12 +167,29 @@ func SessionFromRequest(r *http.Request) (sub, email string, ok bool) {
 
 // --- net/http cookie/JSON helpers ---
 
-func cookieValue(r *http.Request, name string) string {
-	if c, err := r.Cookie(name); err == nil {
+// cookieValue reads one of the library's cookies by its base name (see cookieName).
+func (a *Authenticator) cookieValue(r *http.Request, name string) string {
+	if c, err := r.Cookie(a.cookieName(name)); err == nil {
 		return c.Value
 	}
 	return ""
 }
+
+// cookieName is the name a library cookie is sent under: its base name, or with Config.HostCookies
+// that name behind the "__Host-" prefix. A browser accepts a __Host- cookie only from the host
+// itself, over https, for the whole site — so a sibling subdomain can't plant one (a session of its
+// own, a CSRF pair, a signup binding), which it can with a plain name.
+func (a *Authenticator) cookieName(base string) string {
+	if a != nil && a.cfg.HostCookies {
+		return "__Host-" + base
+	}
+	return base
+}
+
+// CSRFCookieName is the name of the double-submit CSRF cookie the SPA reads and echoes in the
+// X-CSRF-Token header: "sweep_csrf", or "__Host-sweep_csrf" with Config.HostCookies. GET /auth/config
+// reports it too (csrfCookie).
+func (a *Authenticator) CSRFCookieName() string { return a.cookieName(csrfCookie) }
 
 func writeJSON(w http.ResponseWriter, code int, obj any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
@@ -181,19 +198,19 @@ func writeJSON(w http.ResponseWriter, code int, obj any) {
 }
 
 func (a *Authenticator) cookieSecureHTTP(r *http.Request) bool {
-	return a.cfg.CookieSecure || strings.HasPrefix(strings.ToLower(a.cfg.AppURL), "https://") ||
+	return a.cfg.HostCookies || a.cfg.CookieSecure || strings.HasPrefix(strings.ToLower(a.cfg.AppURL), "https://") ||
 		r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 }
 
 func (a *Authenticator) ensureCSRFHTTP(w http.ResponseWriter, r *http.Request) {
-	if cookieValue(r, csrfCookie) != "" {
+	if a.cookieValue(r, csrfCookie) != "" {
 		return
 	}
 	a.writeCSRFCookie(w, r)
 }
 
 func (a *Authenticator) csrfValidHTTP(r *http.Request) bool {
-	cookie := cookieValue(r, csrfCookie)
+	cookie := a.cookieValue(r, csrfCookie)
 	header := r.Header.Get(csrfHeader)
 	if cookie == "" || header == "" {
 		return false
@@ -208,7 +225,7 @@ func (a *Authenticator) csrfValidHTTP(r *http.Request) bool {
 // SessionOf returns the signed-in, unrevoked session of a request straight from its cookie — for
 // handlers that are not behind GateHTTP (such as the oidcprovider's login step) — or nil.
 func (a *Authenticator) SessionOf(r *http.Request) *SessionClaims {
-	sc, err := parseSessionMulti(a.verifySecrets(), cookieValue(r, sessionCookie))
+	sc, err := parseSessionMulti(a.verifySecrets(), a.cookieValue(r, sessionCookie))
 	if err != nil || a.sessionRevoked(sc) {
 		return nil
 	}

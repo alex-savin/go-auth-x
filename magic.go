@@ -35,6 +35,8 @@ func (a *Authenticator) AuthConfig(c *reqCtx) {
 		},
 		// Every enabled social provider by slug (built-ins + generic OIDC), for rendering buttons.
 		"socialProviders": a.enabledSocialProviders(),
+		// The cookie whose value the SPA echoes in X-CSRF-Token (its name depends on Config.HostCookies).
+		"csrfCookie": a.CSRFCookieName(),
 	})
 }
 
@@ -81,7 +83,7 @@ func (a *Authenticator) setSignupBinding(c *reqCtx, userID, hash string) {
 // signupBound reports whether this browser signed up for userID with the password hash it holds now.
 func (a *Authenticator) signupBound(c *reqCtx, userID, hash string) bool {
 	var claims signupClaims
-	if parseJWTMulti(a.verifySecrets(), cookieValue(c.Request, signupCookie), &claims, audSignup) != nil {
+	if parseJWTMulti(a.verifySecrets(), a.cookieValue(c.Request, signupCookie), &claims, audSignup) != nil {
 		return false
 	}
 	return claims.Subject == userID && subtle.ConstantTimeCompare([]byte(claims.PasswordHash), []byte(signupHashID(hash))) == 1

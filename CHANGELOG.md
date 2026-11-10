@@ -129,6 +129,16 @@ Fixes from a second review, of v0.13.0. Each has a regression test.
   markup characters; the metadata no longer advertises RP-initiated logout or client assertions the
   provider doesn't do. Reference stores: reclaiming an unverified account ends its sessions
   (gormstore) and removes its OAuth records (both), as deleting it does.
+- **The owner's password had no failed-attempt threshold** — exempt from the lockout, it was
+  guessable at the per-IP rate from every address an attacker has (and from one, wherever a client
+  on a private network picks its own `X-Forwarded-For`). The owner's password login now pauses
+  after 30 failures in 15 minutes when a mailer is configured (the link and reset paths stay open);
+  without one the owner is still never locked out.
+- **Lower severity** — sign-out is available as `POST /auth/logout` with the CSRF token, and `GET`
+  can be turned off (any page could sign a user out); cookies can be sent under `__Host-` names
+  (opt-in), which a sibling subdomain can't plant; the change-of-address request mails off the
+  request path (its duration told a taken address from a free one); the SMTP sender has a deadline;
+  logout clears the step-up cookie; the default trusted proxies include the IPv6 private range.
 
 ### Behavior changes
 
@@ -182,6 +192,9 @@ Fixes from a second review, of v0.13.0. Each has a regression test.
   metadata.
 - `oidcprovider`: a signing key stored unsealed (a database last used before v0.11) is ignored and
   replaced unless `Config.AcceptPlaintextKeys` is set for the first start.
+- The owner's password login answers `429` after 30 failed attempts in 15 minutes when a mailer is
+  configured.
+- The default `TRUSTED_PROXIES` also trusts `fc00::/7`.
 
 ### Added
 
@@ -199,6 +212,9 @@ Fixes from a second review, of v0.13.0. Each has a regression test.
 - `ldapsync.Config`: `KeepStaleMemberships`, `OwnGroupsOnly` (leave same-named groups the sync
   didn't create alone) and `MaxDeprovision` (cap on users one run may disable).
 - `oidcprovider`: `Provider.ReplaceKeys`, `Config.AcceptPlaintextKeys`.
+- `POST /auth/logout`; `Config.DisableGetLogout` (`LOGOUT_POST_ONLY`).
+- `Config.HostCookies` (`COOKIE_HOST_PREFIX`): `__Host-` cookie names, needs an https `APP_URL`;
+  `Authenticator.CSRFCookieName()` and `csrfCookie` in `GET /auth/config`.
 
 ### Known limitations
 

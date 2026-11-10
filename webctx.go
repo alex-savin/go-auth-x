@@ -44,7 +44,7 @@ func (c *reqCtx) Query(k string) string     { return c.Request.URL.Query().Get(k
 func (c *reqCtx) Param(k string) string     { return c.Request.PathValue(k) }
 func (c *reqCtx) GetHeader(k string) string { return c.Request.Header.Get(k) }
 func (c *reqCtx) Cookie(name string) (string, error) {
-	ck, err := c.Request.Cookie(name)
+	ck, err := c.Request.Cookie(c.a.cookieName(name))
 	if err != nil {
 		return "", err
 	}

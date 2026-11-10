@@ -47,6 +47,10 @@ func (s *Sender) Configured() bool {
 	return s != nil && s.host != "" && s.user != "" && s.pass != "" && s.from != ""
 }
 
+// sendTimeout bounds one message: connecting, and then the whole SMTP exchange. (A variable for the
+// package's tests.)
+var sendTimeout = 30 * time.Second
+
 // Send delivers a multipart text+html message over STARTTLS. TLS is required.
 func (s *Sender) Send(to, subject, htmlBody, textBody string) error {
 	if !s.Configured() {
@@ -55,8 +59,16 @@ func (s *Sender) Send(to, subject, htmlBody, textBody string) error {
 	addr := net.JoinHostPort(s.host, s.port)
 	msg := buildMIME(s.from, to, subject, textBody, htmlBody)
 
-	c, err := smtp.Dial(addr)
+	// A deadline on the dial and on the whole exchange: a server that stops answering must not hold
+	// the caller (often a request's goroutine) forever.
+	conn, err := net.DialTimeout("tcp", addr, sendTimeout)
 	if err != nil {
+		return fmt.Errorf("email: dial %s: %w", addr, err)
+	}
+	_ = conn.SetDeadline(time.Now().Add(sendTimeout))
+	c, err := smtp.NewClient(conn, s.host)
+	if err != nil {
+		conn.Close()
 		return fmt.Errorf("email: dial %s: %w", addr, err)
 	}
 	defer c.Close()

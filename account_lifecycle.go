@@ -134,11 +134,15 @@ func (a *Authenticator) AccountChangeEmailRequest(c *reqCtx) {
 	// silently emailing a stranger). Redemption re-checks via SetEmail's unique constraint anyway.
 	// Taken: the same answer as a free address (no account-existence oracle); the address's owner hears
 	// of it, and the confirm step re-checks uniqueness anyway.
+	// The mail is sent off the request in both cases: sent in it, one SMTP exchange (taken) against two
+	// (free) would tell them apart by how long the answer takes.
 	if other, e := a.creds.UserByEmail(newEmail); e == nil && other != nil {
 		if a.acctLimiter == nil || a.acctLimiter.Allow("change-email-taken:"+newEmail) {
-			_ = a.sendAuthEmail(newEmail, "Someone tried to use this address", "This address already has an account",
-				"Someone signed in to another account tried to change its email to this address. It already belongs to an account, so nothing was changed.",
-				"Sign in", a.baseURL()+"/login", "If this was you, sign in to the account that uses this address.")
+			go func() {
+				_ = a.sendAuthEmail(newEmail, "Someone tried to use this address", "This address already has an account",
+					"Someone signed in to another account tried to change its email to this address. It already belongs to an account, so nothing was changed.",
+					"Sign in", a.baseURL()+"/login", "If this was you, sign in to the account that uses this address.")
+			}()
 		}
 		c.JSON(http.StatusOK, H{"ok": true, "message": "Check your new inbox to confirm the change."})
 		return
@@ -149,13 +153,16 @@ func (a *Authenticator) AccountChangeEmailRequest(c *reqCtx) {
 		return
 	}
 	link := a.baseURL() + "/auth/email/change?token=" + raw
-	_ = a.sendAuthEmail(newEmail, "Confirm your new email", "Confirm your new email",
-		"Confirm this address to make it your new sign-in email. This link is valid for 1 hour.",
-		"Confirm email", link, "If you didn't request this, you can ignore this email.")
-	// Security-awareness notice to the OLD address (do not block on it).
-	_ = a.sendAuthEmail(au.Email, "Email change requested", "Email change requested",
-		"A change of your account email to "+newEmail+" was requested. If this wasn't you, sign in and secure your account.",
-		"Review account", a.baseURL()+"/login", "")
+	oldEmail := au.Email
+	go func() {
+		_ = a.sendAuthEmail(newEmail, "Confirm your new email", "Confirm your new email",
+			"Confirm this address to make it your new sign-in email. Open the link in a browser where you are signed in. It is valid for 1 hour.",
+			"Confirm email", link, "If you didn't request this, you can ignore this email.")
+		// Security-awareness notice to the OLD address.
+		_ = a.sendAuthEmail(oldEmail, "Email change requested", "Email change requested",
+			"A change of your account email to "+newEmail+" was requested. If this wasn't you, reset your password: that also cancels the change.",
+			"Review account", a.baseURL()+"/login", "")
+	}()
 	a.creds.RecordAudit(au.ID, au.Email, c.ClientIP(), "account", "change_email_requested", true, newEmail)
 	c.JSON(http.StatusOK, H{"ok": true, "message": "Check your new inbox to confirm the change."})
 }

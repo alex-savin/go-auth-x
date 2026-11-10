@@ -160,7 +160,7 @@ func appleNameFromUser(userJSON string) string {
 // Apple's cross-site form_post callback. Secure is forced — Apple requires an HTTPS redirect.
 func (a *Authenticator) setFlowCookieCrossSite(c *reqCtx, value string) {
 	http.SetCookie(c.w, &http.Cookie{
-		Name: flowCookie, Value: value, MaxAge: int(flowTTL / time.Second), Path: "/",
+		Name: a.cookieName(flowCookie), Value: value, MaxAge: int(flowTTL / time.Second), Path: "/",
 		Secure: true, HttpOnly: true, SameSite: http.SameSiteNoneMode,
 	})
 }

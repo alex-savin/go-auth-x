@@ -156,6 +156,13 @@ func (a *Authenticator) PasswordSignup(c *reqCtx) {
 	c.JSON(http.StatusOK, H{"ok": true, "message": generic})
 }
 
+// Failed password sign-ins in 15 minutes before the account's password login pauses: for everyone, and
+// for the owner (see PasswordLogin).
+const (
+	lockoutFailures      = 5
+	ownerLockoutFailures = 30
+)
+
 // PasswordLogin (POST /auth/password/login) verifies email+password and starts a session.
 func (a *Authenticator) PasswordLogin(c *reqCtx) {
 	var body struct {
@@ -178,15 +185,25 @@ func (a *Authenticator) PasswordLogin(c *reqCtx) {
 		c.JSON(http.StatusUnauthorized, H{"error": "incorrect email or password"})
 		return
 	}
-	// Per-account soft lockout from durable failure history (owner exempt). Recovery via the
-	// email-link / reset paths stays open regardless.
-	if !a.isOwnerEmail(email) {
+	// Per-account soft lockout from durable failure history. Recovery via the email-link / reset paths
+	// stays open regardless. The owner gets a higher threshold, and only where that recovery exists (a
+	// mailer): locked out with no other way in, the instance would have no owner — but with no
+	// threshold at all, the per-IP limit was all that stood between the owner's password and anyone
+	// with enough addresses.
+	threshold := lockoutFailures
+	if a.isOwnerEmail(email) {
+		threshold = ownerLockoutFailures
+		if a.email == nil || !a.email.Configured() {
+			threshold = 0
+		}
+	}
+	if threshold > 0 {
 		fails, ferr := a.creds.RecentFailures(email, time.Now().Add(-15*time.Minute))
 		if ferr != nil { // a failed read is not "no failures": the lockout doesn't lapse with the store
 			c.JSON(http.StatusInternalServerError, H{"error": "could not sign in — try again shortly"})
 			return
 		}
-		if fails >= 5 {
+		if fails >= threshold {
 			c.tooMany("too many attempts — use “email me a sign-in link” instead")
 			return
 		}
