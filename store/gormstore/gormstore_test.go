@@ -333,9 +333,17 @@ func TestBatchGroupMembership(t *testing.T) {
 	}
 
 	// A sync larger than one statement chunk, re-applied: ON CONFLICT must hold in every chunk
-	// (ids 1 and 2 are already members from above). Membership rows carry no FK, so synthetic
-	// ids exercise the chunking without seeding 1200 users.
-	ids := make([]string, 1200)
+	// (ids 1 and 2 are already members from above). Only existing users get a membership, so the
+	// other 1198 are seeded, in bulk; ids beyond them are skipped.
+	seeded := make([]User, 1198)
+	for i := range seeded {
+		n := strconv.Itoa(i + 3)
+		seeded[i] = User{Sub: "bulk:" + n, Email: "bulk" + n + "@x.com", CreatedAt: time.Now()}
+	}
+	if err := s.db.CreateInBatches(seeded, 200).Error; err != nil {
+		t.Fatal(err)
+	}
+	ids := make([]string, 1300) // 1200 users, then 100 ids nobody has
 	for i := range ids {
 		ids[i] = strconv.Itoa(i + 1)
 	}

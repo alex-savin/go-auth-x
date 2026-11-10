@@ -11,20 +11,20 @@ import (
 // the ADMIN verbs skip the last-owner guard — the operator is the recovery path for an org that
 // self-service left unmanageable, so the API must be able to reach any state.
 func (a *Authenticator) adminOrgRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /auth/admin/orgs", a.wrap(a.adminListOrgs))
-	mux.HandleFunc("POST /auth/admin/orgs", a.wrap(a.adminCreateOrg))
-	mux.HandleFunc("POST /auth/admin/orgs/{id}", a.wrap(a.adminRenameOrg))
-	mux.HandleFunc("DELETE /auth/admin/orgs/{id}", a.wrap(a.adminDeleteOrg))
-	mux.HandleFunc("GET /auth/admin/orgs/{id}/members", a.wrap(a.adminOrgMembers))
-	mux.HandleFunc("POST /auth/admin/orgs/{id}/members/{userId}", a.wrap(a.adminSetOrgMember))
-	mux.HandleFunc("DELETE /auth/admin/orgs/{id}/members/{userId}", a.wrap(a.adminRemoveOrgMember))
+	mux.HandleFunc("GET /auth/admin/orgs", a.wrapAdmin(a.adminListOrgs))
+	mux.HandleFunc("POST /auth/admin/orgs", a.wrapAdmin(a.adminCreateOrg))
+	mux.HandleFunc("POST /auth/admin/orgs/{id}", a.wrapAdmin(a.adminRenameOrg))
+	mux.HandleFunc("DELETE /auth/admin/orgs/{id}", a.wrapAdmin(a.adminDeleteOrg))
+	mux.HandleFunc("GET /auth/admin/orgs/{id}/members", a.wrapAdmin(a.adminOrgMembers))
+	mux.HandleFunc("POST /auth/admin/orgs/{id}/members/{userId}", a.wrapAdmin(a.adminSetOrgMember))
+	mux.HandleFunc("DELETE /auth/admin/orgs/{id}/members/{userId}", a.wrapAdmin(a.adminRemoveOrgMember))
 	// Org-scoped groups (self-gate on the store implementing OrgDirectoryStore; 501 otherwise).
-	mux.HandleFunc("GET /auth/admin/orgs/{id}/groups", a.wrap(a.adminOrgGroups))
-	mux.HandleFunc("POST /auth/admin/orgs/{id}/groups", a.wrap(a.adminCreateOrgGroup))
-	mux.HandleFunc("DELETE /auth/admin/orgs/{id}/groups/{groupId}", a.wrap(a.adminDeleteOrgGroup))
-	mux.HandleFunc("GET /auth/admin/orgs/{id}/groups/{groupId}/members", a.wrap(a.adminOrgGroupMembers))
-	mux.HandleFunc("POST /auth/admin/orgs/{id}/groups/{groupId}/members/{userId}", a.wrap(a.adminAddOrgGroupMember))
-	mux.HandleFunc("DELETE /auth/admin/orgs/{id}/groups/{groupId}/members/{userId}", a.wrap(a.adminRemoveOrgGroupMember))
+	mux.HandleFunc("GET /auth/admin/orgs/{id}/groups", a.wrapAdmin(a.adminOrgGroups))
+	mux.HandleFunc("POST /auth/admin/orgs/{id}/groups", a.wrapAdmin(a.adminCreateOrgGroup))
+	mux.HandleFunc("DELETE /auth/admin/orgs/{id}/groups/{groupId}", a.wrapAdmin(a.adminDeleteOrgGroup))
+	mux.HandleFunc("GET /auth/admin/orgs/{id}/groups/{groupId}/members", a.wrapAdmin(a.adminOrgGroupMembers))
+	mux.HandleFunc("POST /auth/admin/orgs/{id}/groups/{groupId}/members/{userId}", a.wrapAdmin(a.adminAddOrgGroupMember))
+	mux.HandleFunc("DELETE /auth/admin/orgs/{id}/groups/{groupId}/members/{userId}", a.wrapAdmin(a.adminRemoveOrgGroupMember))
 }
 
 // adminOrgDir gates the org-group verbs on the directory supporting org-scoped resources.

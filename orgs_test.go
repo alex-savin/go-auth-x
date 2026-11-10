@@ -508,9 +508,13 @@ func TestOrgMembers_LastOwnerGuardAndLeave(t *testing.T) {
 	if w := mc.do("POST", uidPath(admin.ID), map[string]any{"role": "member"}); w.Code != http.StatusForbidden {
 		t.Fatalf("member setting roles = %d", w.Code)
 	}
-	// An admin manages non-owners but can't touch the owner role.
-	if w := ac.do("POST", uidPath(member.ID), map[string]any{"role": "billing"}); w.Code != 200 {
-		t.Fatalf("admin set custom role = %d: %s", w.Code, w.Body.String())
+	// An admin manages non-owners but can't touch the owner role, or hand out the app's own roles —
+	// those are an owner's to grant.
+	if w := ac.do("POST", uidPath(member.ID), map[string]any{"role": "billing"}); w.Code != http.StatusForbidden {
+		t.Fatalf("admin granting a custom role = %d, want 403: %s", w.Code, w.Body.String())
+	}
+	if w := oc.do("POST", uidPath(member.ID), map[string]any{"role": "billing"}); w.Code != 200 {
+		t.Fatalf("owner set custom role = %d: %s", w.Code, w.Body.String())
 	}
 	if w := ac.do("POST", uidPath(owner.ID), map[string]any{"role": "member"}); w.Code != http.StatusForbidden {
 		t.Fatalf("admin demoting an owner = %d, want 403", w.Code)

@@ -39,15 +39,15 @@ func impersonate(t *testing.T, a *authx.Authenticator, key, userID string) *clie
 
 // An impersonation session looks at the account; it doesn't change it. With the step-up waived for a
 // user who has no password or TOTP, it could set a password, then sign in with it as the user —
-// a session with no marker, and for the owner, the owner's.
+// a session with no marker.
 func TestImpersonationSessionCantChangeTheAccount(t *testing.T) {
 	a, s, _ := newOrgAuth(t)
-	owner := seedUser(t, s, "owner@example.com", "", true) // passwordless: a magic-link or passkey user
+	owner := seedUser(t, s, "founder@x.com", "", true) // passwordless (a magic-link or passkey user); owns an org
 	seedOrg(t, s, "acme", map[string]string{owner.ID: authx.OrgRoleOwner})
 	key := globalKey(t, s, "admin", "admin")
 	imp := impersonate(t, a, key, owner.ID)
 
-	if me := decode(t, imp.do("GET", "/auth/me", nil)); me["impersonatedBy"] == "" || me["email"] != "owner@example.com" {
+	if me := decode(t, imp.do("GET", "/auth/me", nil)); me["impersonatedBy"] == "" || me["email"] != "founder@x.com" {
 		t.Fatalf("an impersonation session reads as its user, marked: %v", me)
 	}
 	if w := imp.do("GET", "/auth/api/account", nil); w.Code != http.StatusOK {

@@ -43,6 +43,9 @@ type APIKeyInfo struct {
 
 // KeyHasScope reports whether an API key may use a given scope. Least privilege: an EMPTY Scopes
 // list grants NOTHING. "*" grants everything; otherwise the scope must be listed explicitly.
+//
+// Scopes the library itself reads: "admin" (the admin API), "scim" (a SCIM mount, by
+// ValidateAPIKeyScope), ScopeApp (the app's own gated routes), and "*" (all of them).
 func KeyHasScope(info *APIKeyInfo, scope string) bool {
 	if info == nil {
 		return false
@@ -55,6 +58,11 @@ func KeyHasScope(info *APIKeyInfo, scope string) bool {
 	return false
 }
 
+// ScopeApp is the scope that lets a global API key through GateHTTP and RequireGroupsHTTP, onto the
+// app's own gated routes. A key without it (or "*") is no principal there — a key minted for the
+// admin API or for a SCIM mount doesn't also open the app.
+const ScopeApp = "app"
+
 // DirectoryStore is the OPTIONAL persistence for groups, group membership, API keys, and admin
 // user management. Wire it with SetDirectoryStore to enable groups, per-group access control
 // (RequireGroups), API-key auth, and the admin REST API. It is intentionally separate from
@@ -65,6 +73,8 @@ type DirectoryStore interface {
 	Groups() ([]Group, error)
 	GroupByName(name string) (*Group, error) // ErrNoGroup if absent
 	DeleteGroup(id string) error
+	// AddUserToGroup adds an EXISTING user to an EXISTING group. An id that names neither must not
+	// leave a membership behind: the next user created with that id would inherit the group.
 	AddUserToGroup(userID, groupID string) error
 	RemoveUserFromGroup(userID, groupID string) error
 	UserGroups(userID string) ([]Group, error)

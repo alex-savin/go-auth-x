@@ -74,6 +74,25 @@ Fixes from a second review, of v0.13.0. Each has a regression test.
   revoked nothing, and no reset ended the user's OAuth grants. The user's reset, the operator's
   reset and the operator's session revoke now end the account's sessions, its OAuth grants and a
   pending change of address.
+- **The app's gate let any API key through** — `GateHTTP` and `RequireGroupsHTTP` admitted every
+  valid global key, whatever its scopes: the `scim` key handed to an IdP, or a key with none, reached
+  every gated route of the app. A key is a principal there only with the new `app` scope
+  (`authx.ScopeApp`) or `*`.
+- **API keys and the owner** — an admin key could mint a wider key that never expires, and could
+  ban, disable, delete, re-password or impersonate the owner. A key now mints only scopes it has
+  and no later expiry than its own, and the owner's account is changed only from an owner session.
+- **Org admins could grant the app's own roles** — only the literal `owner` role was protected, so
+  an admin could give themselves, a member or an invited address a role the app gates like the
+  owner's (the README's own `billing`). Roles other than `admin` and `member` are an owner's to
+  grant, unless `Config.OrgAdminMayGrant` says otherwise; an invite is re-checked the same way when
+  it is accepted.
+- **Lower severity** — `ban` and `disabled` refuse a body without their flag (a malformed one read
+  as `false` and lifted the ban) and answer 404 for an unknown user; a group membership can't be
+  made for a user or group that doesn't exist (the next account with that id inherited it), and the
+  global group verbs refuse an org's groups; a banned or disabled manager's pending invites grant
+  nothing; a sole owner can't leave an org ownerless by deleting their account; a key that
+  authorizes nothing no longer switches CSRF off for a session cookie sent with it; every
+  state-changing admin call is audited with who made it.
 
 ### Behavior changes
 
@@ -96,6 +115,22 @@ Fixes from a second review, of v0.13.0. Each has a regression test.
   passkey or a first password; a password-only step-up answers `403 reauth_required` there.
 - A password reset (the user's or an operator's) and `POST /auth/admin/users/{id}/sessions/revoke`
   also end the user's `oidcprovider` grants.
+- **API keys need the `app` scope to pass `GateHTTP` / `RequireGroupsHTTP`.** Add `"app"` to the
+  scopes of keys that call your own gated routes; keys with only `admin`, `scim` or no scope stop
+  passing (their groups stop counting too).
+- A key minting a key (`POST /auth/admin/apikeys`) is refused scopes it lacks (`403`) and an expiry
+  later than its own; a key it mints without an expiry gets the minter's. Org-bound keys keep their
+  free choice of scopes.
+- An admin key gets `403` on `disabled`, `ban`, `password`, `impersonate` and `DELETE` for the
+  owner's account.
+- An org admin gets `403` granting or inviting with a custom role (set `Config.OrgAdminMayGrant` to
+  allow some).
+- `POST /auth/admin/users/{id}/ban` and `/disabled` require `banned` / `disabled` in the body
+  (`400` otherwise) and answer `404` for an unknown user; the global group-member verbs answer
+  `404` for an unknown user or an org's group.
+- `DELETE /auth/api/account` answers `409` for the sole owner of an organization.
+- gormstore: `AddUserToGroup` returns `ErrNoUser` / `ErrNoGroup` for ids that name no row; the
+  batch form skips such users.
 
 ### Added
 
@@ -107,6 +142,9 @@ Fixes from a second review, of v0.13.0. Each has a regression test.
   signs in to it and end its sessions (documented on `DirectoryStore`; both reference stores do).
 - `TokenRevoker` — an optional `CredentialStore` upgrade (`DeleteTokens(purpose, userID)`), used to
   cancel pending email changes; both reference stores implement it.
+- `authx.ScopeApp` (`"app"`), `Config.OrgAdminMayGrant`.
+- An audit row (`method` `admin`, the route as the action, the actor as the detail) for every
+  state-changing admin API call.
 
 ## [0.13.0] — 2026-11-09
 

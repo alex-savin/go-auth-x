@@ -84,8 +84,10 @@ func (s *Store) AddUserToGroup(userID, groupID string) error {
 	defer s.mu.Unlock()
 	uid, uok := parseID(userID)
 	gid, gok := parseID(groupID)
-	if !uok || !gok {
-		return nil // a membership tying a nonexistent user/group can't exist — nothing to add
+	if !uok || !gok || s.users[uid] == nil || s.groups[gid] == nil {
+		// A membership tying a nonexistent user/group can't exist — nothing to add. (Kept for an id
+		// nobody has yet, it would become the membership of whoever is created with that id next.)
+		return nil
 	}
 	if s.memberships[uid] == nil {
 		s.memberships[uid] = map[uint]bool{}
@@ -114,12 +116,12 @@ func (s *Store) AddUsersToGroup(userIDs []string, groupID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	gid, ok := parseID(groupID)
-	if !ok {
+	if !ok || s.groups[gid] == nil {
 		return nil
 	}
 	for _, id := range userIDs {
 		uid, ok := parseID(id)
-		if !ok {
+		if !ok || s.users[uid] == nil {
 			continue
 		}
 		if s.memberships[uid] == nil {

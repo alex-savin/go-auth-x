@@ -49,6 +49,31 @@ func (a *Authenticator) AccountDelete(c *reqCtx) {
 		c.JSON(http.StatusForbidden, H{"error": "reauth_required"})
 		return
 	}
+	// The last-owner guard that leaving an org has (OrgMemberRemove) holds here too: deleting the
+	// account drops the membership, and an org with no owner has nobody who can make one.
+	if a.orgs != nil {
+		a.orgMu.Lock()
+		defer a.orgMu.Unlock()
+		memberships, oerr := a.orgs.UserOrgs(au.ID)
+		if oerr != nil {
+			c.JSON(http.StatusInternalServerError, H{"error": "could not delete your account"})
+			return
+		}
+		for _, m := range memberships {
+			if m.Role != OrgRoleOwner {
+				continue
+			}
+			sole, serr := a.soleOwner(m.Org.ID, au.ID)
+			if serr != nil {
+				c.JSON(http.StatusInternalServerError, H{"error": "could not delete your account"})
+				return
+			}
+			if sole {
+				c.JSON(http.StatusConflict, H{"error": "you are the only owner of " + m.Org.Name + " — make someone else an owner, or delete the organization, first"})
+				return
+			}
+		}
+	}
 	// Record before the delete so DeleteUser can anonymize this row too (keeps the event, drops PII).
 	a.creds.RecordAudit(au.ID, au.Email, c.ClientIP(), "account", "self_delete", true, "")
 	if err := a.creds.DeleteUser(au.ID); err != nil {

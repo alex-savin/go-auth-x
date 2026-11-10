@@ -81,8 +81,14 @@ func (a *Authenticator) adminSetPassword(c *reqCtx) {
 		c.JSON(http.StatusNotFound, H{"error": "no such user"})
 		return
 	}
+	if a.ownerShielded(c, u) {
+		return
+	}
 	var body struct{ Password string }
-	_ = c.ShouldBindJSON(&body)
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, H{"error": "invalid request"})
+		return
+	}
 	if msg := a.passwordPolicyError(c.Request.Context(), body.Password, u.Email); msg != "" {
 		c.JSON(http.StatusBadRequest, H{"error": msg})
 		return
@@ -114,6 +120,9 @@ func (a *Authenticator) adminDeleteUser(c *reqCtx) {
 		return
 	}
 	u, uerr := a.dir.UserByID(id)
+	if uerr == nil && a.ownerShielded(c, u) {
+		return
+	}
 	if err := a.creds.DeleteUser(id); err != nil {
 		a.adminFail(c, http.StatusInternalServerError, "could not delete user", err)
 		return
@@ -134,12 +143,30 @@ func (a *Authenticator) adminSetBan(c *reqCtx) {
 	if !ok {
 		return
 	}
-	var body struct {
-		Banned bool
+	// The flag is required: a body that doesn't parse, or leaves it out, must not read as
+	// {"banned": false} and lift the ban.
+	var in struct {
+		Banned *bool
 		Reason string
 		Until  *string // optional RFC3339; nil/empty = permanent while banned
 	}
-	_ = c.ShouldBindJSON(&body)
+	if err := c.ShouldBindJSON(&in); err != nil || in.Banned == nil {
+		c.JSON(http.StatusBadRequest, H{"error": "banned (true or false) is required"})
+		return
+	}
+	body := struct {
+		Banned bool
+		Reason string
+		Until  *string
+	}{*in.Banned, in.Reason, in.Until}
+	target, terr := a.dir.UserByID(id)
+	if terr != nil {
+		c.JSON(http.StatusNotFound, H{"error": "no such user"})
+		return
+	}
+	if a.ownerShielded(c, target) {
+		return
+	}
 	var until *time.Time
 	if body.Until != nil && *body.Until != "" {
 		t, perr := time.Parse(time.RFC3339, *body.Until)
@@ -163,7 +190,7 @@ func (a *Authenticator) adminSetBan(c *reqCtx) {
 		if u != nil {
 			email = u.Email
 		}
-		a.creds.RecordAudit(id, email, c.ClientIP(), "admin", event, true, strings.TrimSpace(body.Reason))
+		a.creds.RecordAudit(id, email, c.ClientIP(), "admin", event, true, strings.TrimSpace(a.adminActor(c)+" "+strings.TrimSpace(body.Reason)))
 	}
 	if body.Banned && a.sessions != nil && u != nil {
 		_ = a.sessions.RevokeAllForUser(u.Sub)
@@ -185,6 +212,9 @@ func (a *Authenticator) adminImpersonate(c *reqCtx) {
 	target, err := a.dir.UserByID(id)
 	if err != nil {
 		c.JSON(http.StatusNotFound, H{"error": "no such user"})
+		return
+	}
+	if a.ownerShielded(c, target) { // a key doesn't get to be the owner
 		return
 	}
 	// NOTE: the disabled/banned login gate is intentionally NOT applied here — an operator may need to

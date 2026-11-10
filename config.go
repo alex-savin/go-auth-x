@@ -14,6 +14,11 @@ import (
 // Config is read from the environment at boot. Auth turns on only when an issuer
 // and client id are present.
 type Config struct {
+	// OrgAdminMayGrant, if set, says which custom org roles an org ADMIN may grant (by role change or
+	// invite). By default an admin grants only "admin" and "member"; any other role — the app's own,
+	// such as one it gates like the owner's — takes an org owner. "owner" always does.
+	OrgAdminMayGrant func(role string) bool
+
 	Issuer        string   // OIDC_ISSUER, e.g. https://id.example.com
 	ClientID      string   // OIDC_CLIENT_ID
 	ClientSecret  string   // OIDC_CLIENT_SECRET (confidential client)

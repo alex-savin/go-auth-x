@@ -84,11 +84,11 @@ func (a *Authenticator) GateHTTP(next http.Handler) http.Handler {
 			// RequireGroupsHTTP can authorize by the key's groups (CSRFHTTP already skips Bearer). Only
 			// GLOBAL keys are a principal for the app gate; an ORG-BOUND key authorizes its org's
 			// surfaces (its SCIM mount) via ValidateOrgAPIKeyScope, never the global request gate.
-			if key := bearerToken(r.Header.Get("Authorization")); key != "" {
-				if info, ok := a.ValidateAPIKey(key); ok && info.OrgID == "" {
-					next.ServeHTTP(w, r)
-					return
-				}
+			// And only keys granted the app's routes (ScopeApp): a key for the admin API or a SCIM
+			// mount, or one with no scopes at all, is not a principal here.
+			if _, ok := a.appKey(r); ok {
+				next.ServeHTTP(w, r)
+				return
 			}
 			if p == "/api" || p == "/ws" || strings.HasPrefix(p, "/api/") || strings.HasPrefix(p, "/ws/") {
 				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "unauthenticated"})
@@ -129,7 +129,9 @@ func (a *Authenticator) CSRFHTTP(next http.Handler) http.Handler {
 		}
 		// Bearer (API key) auth isn't cookie-based → not CSRF-able; skip — for a key that validates. Any
 		// other Authorization header proves nothing, and the handler would fall back to the cookie.
-		if key := bearerToken(r.Header.Get("Authorization")); key != "" {
+		// And only without a session cookie: with both, a handler that finds the key insufficient
+		// falls back to the cookie — which is then what authorizes the request, and needs the token.
+		if key := bearerToken(r.Header.Get("Authorization")); key != "" && cookieValue(r, sessionCookie) == "" {
 			if _, ok := a.lookupAPIKey(key); ok {
 				next.ServeHTTP(w, r)
 				return
