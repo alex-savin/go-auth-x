@@ -93,6 +93,26 @@ Fixes from a second review, of v0.13.0. Each has a regression test.
   nothing; a sole owner can't leave an org ownerless by deleting their account; a key that
   authorizes nothing no longer switches CSRF off for a session cookie sent with it; every
   state-changing admin call is audited with who made it.
+- **SCIM acknowledged deprovisions that failed** — `PATCH active=false` (what Entra and Okta send)
+  and a create with `active:false` answered 200/201 when the store write failed, and a failed group
+  member removal was only logged: the IdP never retried, and the leaver kept their account or
+  group. These now answer 5xx. (A failed member *add* stays best-effort and logged.)
+- **The global `scim` scope reached accounts SCIM didn't provision** — a scim-only key could disable
+  the owner's local account, and a replace that left `active` out re-enabled an account an operator
+  had disabled. SCIM activates and deactivates only accounts it provisioned; a replace without
+  `active` leaves the state alone. (Groups remain fully writable by the scope — see the README.)
+- **LDAP sync never removed a group membership** — a user taken out of an LDAP group, or whose
+  group left the directory, kept the directory group and what it gates. Memberships of synced users
+  that LDAP no longer lists are now removed (`Config.KeepStaleMemberships` restores the old
+  behavior).
+- **LDAP: a shared uid re-pointed an account** — the account `ldap:<uid>` followed whichever entry
+  came last, so an entry able to set its own uid attribute to an administrator's moved that account
+  onto its own mailbox. A uid found on more than one entry is synced from none and reported.
+- **Lower severity** — a SCIM create for a userName that already has an account is a 409 (it
+  re-pointed the account, past `If-Match`); a group PATCH this server can't apply is a 400, not a
+  silent 200, and `members[value ne "1"]` no longer removes user 1; the SCIM mount refuses an empty
+  or non-Bearer token before its validator sees it; LDAP DNs are normalized without unescaping
+  (`cn=a\,ou\=b` is not `cn=a,ou=b`).
 
 ### Behavior changes
 
@@ -131,6 +151,14 @@ Fixes from a second review, of v0.13.0. Each has a regression test.
 - `DELETE /auth/api/account` answers `409` for the sole owner of an organization.
 - gormstore: `AddUserToGroup` returns `ErrNoUser` / `ErrNoGroup` for ids that name no row; the
   batch form skips such users.
+- Global SCIM: `DELETE`, `PATCH active` and a `PUT` that changes `active` answer `400 mutability`
+  for an account SCIM didn't provision; a `PUT` without `active` no longer reactivates. Per-org SCIM
+  (`NewOrgScopedDirectory`) is unchanged: deactivating there removes the member from the org.
+- SCIM: a failed deactivation or member removal answers `500`; `POST /Users` with an existing
+  userName answers `409`; unsupported group PATCH forms answer `400`.
+- ldapsync removes memberships LDAP no longer lists (synced `ldap:` users only; not when the user or
+  group search comes back empty) and skips a uid that several entries share. `Result.Removed`
+  counts the removals.
 
 ### Added
 
@@ -145,6 +173,8 @@ Fixes from a second review, of v0.13.0. Each has a regression test.
 - `authx.ScopeApp` (`"app"`), `Config.OrgAdminMayGrant`.
 - An audit row (`method` `admin`, the route as the action, the actor as the detail) for every
   state-changing admin API call.
+- `ldapsync.Config`: `KeepStaleMemberships`, `OwnGroupsOnly` (leave same-named groups the sync
+  didn't create alone) and `MaxDeprovision` (cap on users one run may disable).
 
 ## [0.13.0] — 2026-11-09
 

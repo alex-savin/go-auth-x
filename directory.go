@@ -134,7 +134,8 @@ func AddGroupMembers(dir DirectoryStore, userIDs []string, groupID string) error
 	}
 	var errs []error
 	for _, uid := range userIDs {
-		if err := dir.AddUserToGroup(uid, groupID); err != nil {
+		// An id that names no user is skipped, as the batch form skips it — not an error.
+		if err := dir.AddUserToGroup(uid, groupID); err != nil && !errors.Is(err, ErrNoUser) {
 			errs = append(errs, err)
 		}
 	}

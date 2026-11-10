@@ -301,6 +301,11 @@ func (v *orgScopedDir) bySub(sub string) *AuthUser {
 	return u
 }
 
+// DeactivationRemovesMembership tells a provisioning server (scim) that "inactive" here is "not in
+// this org" — SetUserDisabled removes the membership and leaves the account alone — so it applies to
+// any member of the org, not only to accounts the org's IdP provisioned.
+func (v *orgScopedDir) DeactivationRemovesMembership() bool { return true }
+
 // SetUserDisabled carries the org-scoped deprovision semantics: disabling means "remove from this
 // org" (the account stays — it may belong to other orgs), re-enabling a non-member is refused
 // (re-provision instead), and owners can't be deprovisioned by a customer IdP.

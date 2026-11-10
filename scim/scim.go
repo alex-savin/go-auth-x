@@ -18,6 +18,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -43,12 +44,41 @@ func (s *Server) scimInternal(w http.ResponseWriter, context string, err error) 
 // activeWithDefault reads the optional SCIM `active` field, defaulting to true when it is ABSENT
 // (RFC 7644 — a create/replace that omits active must not disable the account).
 func activeWithDefault(raw []byte) bool {
+	active, _ := activeField(raw)
+	return active
+}
+
+// activeField reads the optional SCIM `active` field: its value (true when absent) and whether the
+// request stated it.
+func activeField(raw []byte) (active, stated bool) {
 	var probe struct {
 		Active *bool `json:"active"`
 	}
 	_ = json.Unmarshal(raw, &probe)
-	return probe.Active == nil || *probe.Active
+	return probe.Active == nil || *probe.Active, probe.Active != nil
 }
+
+// provisioned reports whether SCIM provisioned u (its subject is in SCIM's namespace). Whether an
+// account may sign in is SCIM's to say only for those: a local password account, an OIDC or social
+// sign-in — the owner — is deactivated and reactivated by an operator, not by whoever holds a
+// provisioning token.
+//
+// A directory where "inactive" means something narrower says so (membershipDirectory): an org's view
+// deprovisions by removing the user from the org, which is the org's to do for any of its members.
+func (s *Server) provisioned(u *authx.AuthUser) bool {
+	if md, ok := s.dir.(membershipDirectory); ok && md.DeactivationRemovesMembership() {
+		return true
+	}
+	return strings.HasPrefix(u.Sub, "scim:")
+}
+
+// membershipDirectory is a directory whose SetUserDisabled removes a user from what the directory
+// scopes to (authx.NewOrgScopedDirectory's view of one org) instead of disabling the account.
+type membershipDirectory interface {
+	DeactivationRemovesMembership() bool
+}
+
+const notProvisioned = "an account not provisioned by SCIM can't be activated or deactivated here"
 
 const (
 	schemaUser         = "urn:ietf:params:scim:schemas:core:2.0:User"
@@ -131,8 +161,10 @@ func (s *Server) routes() *http.ServeMux {
 
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
-		if s.auth == nil || !s.auth(strings.TrimSpace(tok)) {
+		// A Bearer token and not an empty one, before the validator sees it: a validator that compares
+		// against a configured secret must not be handed "" (an unset secret) or another scheme's value.
+		tok, isBearer := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if tok = strings.TrimSpace(tok); s.auth == nil || !isBearer || tok == "" || !s.auth(tok) {
 			scimError(w, http.StatusUnauthorized, "invalid or missing bearer token")
 			return
 		}
@@ -368,6 +400,16 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 		s.scimInternal(w, "createUser", cerr)
 		return
 	}
+	// The userName too: an existing account with this one (its email changed since, so the check
+	// above passed) would be re-pointed by the upsert — a create that is an update, past If-Match.
+	if bs, ok := s.dir.(interface {
+		UserBySub(sub string) (*authx.AuthUser, error)
+	}); ok {
+		if existing, serr := bs.UserBySub("scim:" + in.UserName); serr == nil && existing != nil {
+			scimErrorType(w, http.StatusConflict, "uniqueness", "a user with this userName already exists")
+			return
+		}
+	}
 	u, err := s.dir.UpsertExternalUser("scim:"+in.UserName, email, name, true)
 	if err != nil {
 		if errors.Is(err, authx.ErrEmailConflict) {
@@ -379,7 +421,10 @@ func (s *Server) createUser(w http.ResponseWriter, r *http.Request) {
 	}
 	active := activeWithDefault(raw) // absent → true (never disable a freshly created user)
 	if active != !u.Disabled {
-		_ = s.dir.SetUserDisabled(u.ID, !active)
+		if derr := s.dir.SetUserDisabled(u.ID, !active); derr != nil {
+			s.scimInternal(w, "createUser", derr) // not a 201 for a user the IdP asked to be inactive
+			return
+		}
 		u.Disabled = !active
 	}
 	res := s.toSCIMUser(u)
@@ -444,13 +489,26 @@ func (s *Server) patchUser(w http.ResponseWriter, r *http.Request) {
 	}
 	for _, op := range p.Operations {
 		if active, ok := activeFromOp(op.Path, op.Value); ok {
+			if !s.provisioned(cur) {
+				scimErrorType(w, http.StatusBadRequest, "mutability", notProvisioned)
+				return
+			}
+			// A deprovision that didn't happen is not acknowledged: the IdP takes a 200 as done and
+			// never retries, and the leaver keeps their account.
 			if derr := s.dir.SetUserDisabled(id, !active); errors.Is(derr, authx.ErrOrgOwnerDeprovision) {
 				scimError(w, http.StatusForbidden, derr.Error())
+				return
+			} else if derr != nil {
+				s.scimInternal(w, "patchUser", derr)
 				return
 			}
 		}
 	}
 	u, uerr := s.dir.UserByID(id)
+	if uerr != nil && !errors.Is(uerr, authx.ErrNoUser) {
+		s.scimInternal(w, "patchUser", uerr)
+		return
+	}
 	if uerr != nil {
 		// An org-scoped directory deprovisions by REMOVING the user from the org, so the refetch
 		// can legitimately miss. Render the pre-patch resource with the applied active state —
@@ -490,13 +548,19 @@ func (s *Server) putUser(w http.ResponseWriter, r *http.Request) {
 	if in.Name != nil && in.Name.Formatted != "" {
 		name = in.Name.Formatted
 	}
-	active := activeWithDefault(raw)
+	active, activeStated := activeField(raw)
 	// Only an account SCIM provisioned has an address SCIM may re-point. Another one — a local
 	// password account, an OIDC or social sign-in, the owner — keeps its email: moving it would hand
 	// that account's password reset and magic links to whoever the new address belongs to.
 	moved := normEmail(email) != normEmail(cur.Email)
 	if moved && !strings.HasPrefix(cur.Sub, "scim:") {
 		scimErrorType(w, http.StatusBadRequest, "mutability", "the email of an account not provisioned by SCIM can't be changed here")
+		return
+	}
+	// A replace of an account SCIM didn't provision updates its profile and leaves whether it may
+	// sign in alone — unless it asks to change that, which is refused.
+	if !s.provisioned(cur) && activeStated && active == cur.Disabled {
+		scimErrorType(w, http.StatusBadRequest, "mutability", notProvisioned)
 		return
 	}
 	// A deprovisioning PUT only deprovisions: refused (an org owner), it must not have changed anything.
@@ -529,9 +593,13 @@ func (s *Server) putUser(w http.ResponseWriter, r *http.Request) {
 		s.scimInternal(w, "putUser", uerr)
 		return
 	}
-	if derr := s.dir.SetUserDisabled(cur.ID, false); derr != nil {
-		s.scimInternal(w, "putUser", derr)
-		return
+	// Reactivate only when the replace says so, and only an account SCIM provisioned: a replace that
+	// leaves `active` out doesn't undo an operator's disable.
+	if activeStated && s.provisioned(cur) {
+		if derr := s.dir.SetUserDisabled(cur.ID, false); derr != nil {
+			s.scimInternal(w, "putUser", derr)
+			return
+		}
 	}
 	u, uerr := s.dir.UserByID(cur.ID)
 	if uerr != nil {
@@ -551,6 +619,10 @@ func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
 			scimError(w, http.StatusPreconditionFailed, "ETag precondition failed")
 			return
 		}
+	}
+	if cur, err := s.dir.UserByID(id); err == nil && !s.provisioned(cur) {
+		scimErrorType(w, http.StatusBadRequest, "mutability", notProvisioned)
+		return
 	}
 	// SCIM DELETE = deprovision; we soft-disable (safer than a hard delete of audit history).
 	if err := s.dir.SetUserDisabled(id, true); err != nil {
@@ -611,19 +683,44 @@ func (s *Server) listGroups(w http.ResponseWriter, r *http.Request) {
 }
 
 // addMembers / removeMembers apply a group-membership change in one batch when the directory
-// supports it (authx.BatchGroupStore), else member by member. Both are best-effort: the response
-// reflects the membership actually stored, and a failed write is logged rather than failing the
-// whole sync (an IdP would retry a 5xx forever).
+// supports it (authx.BatchGroupStore), else member by member. A member value that names no user (or
+// none the directory lets this server group) is skipped by the directory, not an error.
+//
+// A failed add is best-effort: it is logged, the response shows the membership actually stored, and
+// the sync goes on (an IdP would retry a 5xx forever, and the user merely lacks a group). A failed
+// REMOVE fails the request: answered 200, it would never be retried, and the user would keep what the
+// group gates.
 func (s *Server) addMembers(groupID string, userIDs []string) {
 	if err := authx.AddGroupMembers(s.dir, userIDs, groupID); err != nil {
 		s.log().Warn("scim: group membership add incomplete", "group", groupID, "error", err)
 	}
 }
 
-func (s *Server) removeMembers(groupID string, userIDs []string) {
-	if err := authx.RemoveGroupMembers(s.dir, userIDs, groupID); err != nil {
-		s.log().Warn("scim: group membership remove incomplete", "group", groupID, "error", err)
+func (s *Server) removeMembers(groupID string, userIDs []string) error {
+	return authx.RemoveGroupMembers(s.dir, userIDs, groupID)
+}
+
+// setMembers makes the group's membership exactly want.
+func (s *Server) setMembers(groupID string, want map[string]bool) error {
+	current, err := s.dir.GroupMembers(groupID)
+	if err != nil {
+		return err
 	}
+	var toRemove []string
+	for _, m := range current { // remove members no longer present
+		if !want[m.ID] {
+			toRemove = append(toRemove, m.ID)
+		}
+	}
+	if err := s.removeMembers(groupID, toRemove); err != nil {
+		return err
+	}
+	toAdd := make([]string, 0, len(want))
+	for uid := range want { // add the desired set (idempotent)
+		toAdd = append(toAdd, uid)
+	}
+	s.addMembers(groupID, toAdd)
+	return nil
 }
 
 func (s *Server) createGroup(w http.ResponseWriter, r *http.Request) {
@@ -716,19 +813,10 @@ func (s *Server) putGroup(w http.ResponseWriter, r *http.Request) {
 			want[m.Value] = true
 		}
 	}
-	current, _ := s.dir.GroupMembers(id)
-	var toRemove []string
-	for _, m := range current { // remove members no longer present
-		if !want[m.ID] {
-			toRemove = append(toRemove, m.ID)
-		}
+	if err := s.setMembers(id, want); err != nil {
+		s.scimInternal(w, "putGroup", err)
+		return
 	}
-	s.removeMembers(id, toRemove)
-	var toAdd []string
-	for uid := range want { // add the desired set (idempotent)
-		toAdd = append(toAdd, uid)
-	}
-	s.addMembers(id, toAdd)
 	g, members, _ := s.groupByID(id) // still present — membership edits don't delete the group
 	writeResource(w, http.StatusOK, s.toSCIMGroup(g, members), groupVersion(g, members))
 }
@@ -755,56 +843,67 @@ func (s *Server) patchGroup(w http.ResponseWriter, r *http.Request) {
 		scimErrorType(w, http.StatusBadRequest, st, detail)
 		return
 	}
+	// Every operation is understood before any is applied: an operation this server would only skip
+	// is refused (400) instead of answered 200 — the IdP takes a 200 for "the member was removed".
+	type change struct {
+		op  string // add | remove | replace | clear
+		ids []string
+	}
+	var changes []change
 	for _, op := range p.Operations {
 		opl := strings.ToLower(op.Op)
 		pathl := strings.ToLower(strings.TrimSpace(op.Path))
-
-		// valuePath removal: members[value eq "42"] (the Okta/Azure single-member remove).
-		if strings.HasPrefix(pathl, "members[") {
-			if opl == "remove" {
-				if uid, ok := memberIDFromValuePath(op.Path); ok {
-					s.removeMembers(id, []string{uid})
-				}
+		switch {
+		case strings.HasPrefix(pathl, "members["):
+			// valuePath removal: members[value eq "42"] (the Okta/Azure single-member remove).
+			uid, ok := memberIDFromValuePath(op.Path)
+			if opl != "remove" || !ok {
+				scimErrorType(w, http.StatusBadRequest, "invalidPath", `only remove of members[value eq "<id>"] is supported`)
+				return
 			}
-			continue
+			changes = append(changes, change{"remove", []string{uid}})
+		case pathl == "members":
+			switch {
+			case opl == "remove" && (len(op.Value) == 0 || string(op.Value) == "null"):
+				changes = append(changes, change{op: "clear"}) // `remove` on "members" with no value → clear all members
+			default:
+				changes = append(changes, change{opl, memberValues(op.Value)})
+			}
+		case pathl == "" && opl != "remove":
+			// No path: the value is the (partial) resource, e.g. {"members":[…]} or {"displayName":…}.
+			var res struct {
+				Members *json.RawMessage `json:"members"`
+			}
+			if json.Unmarshal(op.Value, &res) != nil {
+				scimErrorType(w, http.StatusBadRequest, "invalidValue", "a PATCH operation without a path takes an object")
+				return
+			}
+			if res.Members != nil {
+				changes = append(changes, change{opl, memberValues(*res.Members)})
+			}
+		default:
+			// Another attribute (displayName, externalId): not stored here, so nothing to change.
 		}
-		if pathl != "members" {
-			continue
-		}
-		switch opl {
+	}
+	for _, ch := range changes {
+		var err error
+		switch ch.op {
 		case "add":
-			s.addMembers(id, memberValues(op.Value))
-		case "replace":
-			// Replace the ENTIRE membership set with the provided one (not merely additive).
+			s.addMembers(id, ch.ids)
+		case "remove":
+			err = s.removeMembers(id, ch.ids)
+		case "replace": // the ENTIRE membership set becomes the provided one (not merely additive)
 			want := map[string]bool{}
-			for _, uid := range memberValues(op.Value) {
+			for _, uid := range ch.ids {
 				want[uid] = true
 			}
-			current, _ := s.dir.GroupMembers(id)
-			var toRemove []string
-			for _, m := range current {
-				if !want[m.ID] {
-					toRemove = append(toRemove, m.ID)
-				}
-			}
-			s.removeMembers(id, toRemove)
-			var toAdd []string
-			for uid := range want {
-				toAdd = append(toAdd, uid)
-			}
-			s.addMembers(id, toAdd)
-		case "remove":
-			if len(op.Value) == 0 || string(op.Value) == "null" {
-				// `remove` on "members" with no value → clear all members.
-				current, _ := s.dir.GroupMembers(id)
-				var toRemove []string
-				for _, m := range current {
-					toRemove = append(toRemove, m.ID)
-				}
-				s.removeMembers(id, toRemove)
-			} else {
-				s.removeMembers(id, memberValues(op.Value))
-			}
+			err = s.setMembers(id, want)
+		case "clear":
+			err = s.setMembers(id, nil)
+		}
+		if err != nil {
+			s.scimInternal(w, "patchGroup", err)
+			return
 		}
 	}
 	g, members, _ := s.groupByID(id) // still present — membership edits don't delete the group
@@ -1021,26 +1120,18 @@ func activeFromOp(path string, value json.RawMessage) (bool, bool) {
 	return false, false
 }
 
-// memberIDFromValuePath extracts the (opaque) user id from a valuePath like `members[value eq "42"]`
-// (the Okta/Azure member-removal form). Returns false if no quoted value is present.
+// memberValuePath is the one member valuePath this server applies: members[value eq "<id>"].
+var memberValuePath = regexp.MustCompile(`(?i)^\s*members\[\s*value\s+eq\s+"([^"]+)"\s*\]\s*$`)
+
+// memberIDFromValuePath extracts the (opaque) user id from the valuePath `members[value eq "42"]`
+// (the Okta/Azure member-removal form), and reports false for any other filter: one read loosely —
+// the first quoted string of `members[value ne "42"]`, say — would remove the wrong member.
 func memberIDFromValuePath(path string) (string, bool) {
-	l, r := strings.Index(path, "["), strings.LastIndex(path, "]")
-	if l < 0 || r <= l {
+	m := memberValuePath.FindStringSubmatch(path)
+	if m == nil {
 		return "", false
 	}
-	inner := path[l+1 : r] // e.g. value eq "42"
-	q1 := strings.Index(inner, `"`)
-	if q1 < 0 {
-		return "", false
-	}
-	q2 := strings.Index(inner[q1+1:], `"`)
-	if q2 < 0 {
-		return "", false
-	}
-	if v := inner[q1+1 : q1+1+q2]; v != "" {
-		return v, true
-	}
-	return "", false
+	return m[1], true
 }
 
 // memberValues extracts the (opaque) user ids from a members patch value ([{value:"1"}] or {value:"1"}).
