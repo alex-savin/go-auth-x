@@ -120,6 +120,7 @@ Requires **Go 1.26+**. Sub-packages:
 | `github.com/alex-savin/go-auth-x/mailer` | SMTP (STARTTLS) `Mailer` |
 | `github.com/alex-savin/go-auth-x/ldapsync` | LDAP/AD → directory sync |
 | `github.com/alex-savin/go-auth-x/scim` | SCIM 2.0 provisioning server |
+| `github.com/alex-savin/go-auth-x/oidcprovider` | Embeddable OAuth 2.1 / OIDC provider |
 
 ---
 
@@ -241,10 +242,12 @@ flowchart LR
     MR --> SMTP
 ```
 
-**The funnel.** Password, passkey, magic-link, OIDC, and social logins all end in **one**
+**The funnel.** Password, passkey, magic-link, email-code, OIDC, and social logins all end in **one**
 `completeLogin` — which runs the `Authorizer`, enriches the session with the user's groups, mints the
-cookie, and issues a CSRF token. No method can mint a session that skips your provisioning or the
-disabled/verified gates.
+cookie, and issues a CSRF token. No sign-in method can mint a session that skips your provisioning or
+the disabled/verified gates. (Two things mint a session without it, neither a sign-in: an operator's
+impersonation, which is marked and short-lived, and the active-org switch, which re-mints the session
+it already has.)
 
 **The seams** (all small interfaces, so you control storage and policy):
 
@@ -254,6 +257,11 @@ disabled/verified gates.
 | `Authorizer` | post-login hook: identity upsert (+ your provisioning) | `store.Authorizer()` |
 | `Mailer` | send auth emails | `mailer` (SMTP) |
 | `DirectoryStore` *(optional)* | groups, membership, API keys, admin user mgmt | `gormstore`, `memory` |
+| `SessionStore` *(optional)* | server-side sessions: revocation, device list | `gormstore`, `memory` |
+| `TwoFactorStore` *(optional)* | TOTP secrets + recovery codes | `gormstore`, `memory` |
+| `OrgStore` *(optional)* | organizations, memberships, invites | `gormstore`, `memory` |
+| `OAuthStore` *(optional)* | the `oidcprovider`'s clients, grants, tokens, keys | `gormstore`, `memory` |
+| `RateLimiter` / `BreachChecker` *(optional)* | shared-store limits; password-breach screening | in-memory; HIBP |
 
 ---
 
@@ -270,9 +278,11 @@ provider activates when its client id + secret are present.
 | `APP_URL` | `AppURL` | Public origin, e.g. `https://app.example.com`. Used for email links + redirects. |
 | `TRUSTED_ORIGINS` | `TrustedOrigins` | Comma-separated extra origins allowed on state-changing requests (defense-in-depth atop the CSRF token; `AppURL` is always allowed). Fails open when absent. |
 | `HIBP_BREACH_CHECK` | `BreachCheckHIBP` | `true` wires the default HIBP k-anonymity password-breach checker (fail-open). Or call `SetBreachChecker`. |
-| `OWNER_EMAIL` | `OwnerEmail` | Exempt from hard lockout; gates the admin API via session. |
+| `OWNER_EMAIL` | `OwnerEmail` | Gates the admin API via session. Its password login pauses after 30 failed attempts in 15 minutes when a mailer is configured (5 for everyone else); never when there is no other way in. |
 | `BRAND_NAME` | `BrandName` | Product name shown in auth emails and the default WebAuthn RP display name (default `go-auth-x`). |
 | `COOKIE_SECURE` | `CookieSecure` | Force the `Secure` flag (also auto-on when `APP_URL` is `https`, under TLS, or with `X-Forwarded-Proto: https`). |
+| `COOKIE_HOST_PREFIX` | `HostCookies` | Send every cookie under a `__Host-` name (`__Host-sweep_session`, `__Host-sweep_csrf`, …), always `Secure`, so a sibling subdomain can't plant one. Needs an https `APP_URL`. Off by default: turning it on signs everyone out once, and the SPA reads the CSRF cookie under its new name (`csrfCookie` in `GET /auth/config`). |
+| `LOGOUT_POST_ONLY` | `DisableGetLogout` | Turn off `GET /auth/logout`, leaving `POST /auth/logout` (with the CSRF token): a GET lets any page sign a user out. |
 | `OIDC_ISSUER` | `Issuer` | Enables the OIDC client (with `OIDC_CLIENT_ID`). |
 | `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | `ClientID` / `ClientSecret` | Confidential OIDC client. |
 | `OIDC_REDIRECT_URL` | `RedirectURL` | e.g. `https://app.example.com/auth/callback`. |
@@ -287,7 +297,8 @@ provider activates when its client id + secret are present.
 | `MICROSOFT_STRICT_EMAIL_VERIFIED` | `MicrosoftStrictEmailVerified` | For a **pinned single tenant**, also require an explicit `email_verified` rather than trusting the tenant-owned address (default off). Has no effect in multi-tenant mode, where the email is never trusted. |
 | — (programmatic) | `SocialOIDC []SocialOIDCProvider` | Register any OIDC IdP (GitLab, Okta, Auth0, Keycloak, …) as a social login. |
 | — (programmatic) | `Logger *slog.Logger` | Receives internal warnings + errors (boot warnings, failed emails, admin-API store errors). Default `slog.Default()`. `SetLogger` swaps it after `New`; set the field to also capture `New`'s own warnings. |
-| `TRUSTED_PROXIES` | — (`authx.TrustedProxies()`) | CSV of proxy CIDRs; default = private ranges + loopback. |
+| `TRUSTED_PROXIES` | — (`authx.TrustedProxies()`) | CSV of proxy CIDRs; default = private ranges (IPv4 + IPv6) + loopback. **Set it to your proxy's address** wherever a client can reach the app from a private address without passing that proxy — such a client otherwise picks its own IP. |
+| — (programmatic) | `OrgAdminMayGrant func(role string) bool` | Which custom org roles an org admin may grant. Default: none — only owners grant roles other than `admin` and `member`. |
 | `WEBAUTHN_RPID` / `WEBAUTHN_RP_NAME` | — | Override the passkey relying-party id/name (default: app host). |
 | `SMTP_HOST` `SMTP_PORT` `SMTP_USER` `SMTP_PASS` `SMTP_FROM` | — (`mailer.FromEnv()`) | STARTTLS sender. |
 
@@ -384,7 +395,9 @@ HMAC-SHA1 / 6 digits / 30s, ±1-step skew), verified against the published RFC v
   registered passkey (`POST /auth/2fa/webauthn/begin` + `/finish`).
 - **Step-up / re-auth** — wrap sensitive routes with `authn.RequireStepUpHTTP(maxAge)`; a stale/absent
   step-up returns `403 {"error":"reauth_required"}`, and `POST /auth/reauth` (password **or** a 2FA
-  code) sets a short-lived step-up cookie so the action can proceed.
+  code) sets a short-lived step-up cookie so the action can proceed. A user with TOTP adds a sign-in
+  method (a passkey, a first password) only after stepping up **with a code**: the password alone
+  re-proves nothing a stolen password hasn't.
 
 ---
 
@@ -395,13 +408,14 @@ Mounted under `/auth` by `Handler()`:
 | Method | Path | Purpose | Auth |
 |---|---|---|---|
 | GET | `/auth/login` · `/auth/callback` | OIDC start / callback | public |
-| GET | `/auth/logout` · `/auth/me` · `/auth/config` | logout / session info / enabled methods | public |
+| GET | `/auth/me` · `/auth/config` | session info / enabled methods | public |
+| POST · GET | `/auth/logout` | sign out (`POST` with the CSRF token; `GET` unless `LOGOUT_POST_ONLY`) | session |
 | POST | `/auth/password/signup` · `/auth/password/login` | password signup / login | public |
 | POST | `/auth/password/reset/request` · `/auth/password/reset/confirm` | password reset | public |
 | POST | `/auth/email/request` | request a magic-link | public |
 | GET | `/auth/email/login` · `/auth/email/verify` | redeem magic-link / verify email | token |
 | POST | `/auth/email-otp/send` · `/auth/email-otp/verify` | request / redeem a 6-digit sign-in code | public |
-| GET | `/auth/email/change` | confirm a new email (change-email flow) | token |
+| GET | `/auth/email/change` | confirm a new email (change-email flow) | token + the account's session |
 | POST | `/auth/webauthn/login/begin` · `/auth/webauthn/login/finish` | passkey sign-in (discoverable / QR) | public |
 | POST | `/auth/webauthn/register/begin` · `/auth/webauthn/register/finish` | enroll a passkey | session |
 | GET | `/auth/social/{provider}/login` | start social login (Google / GitHub / Facebook / Apple / Microsoft / Discord / any OIDC) | public |
@@ -416,6 +430,7 @@ Mounted under `/auth` by `Handler()`:
 | DELETE | `/auth/api/account` | delete the account (irreversible) | session + step-up + CSRF |
 | POST · DELETE | `/auth/api/passkeys/{id}` | rename / remove a passkey | session + CSRF |
 | DELETE | `/auth/api/identities/{provider}` | unlink a social/OIDC identity | session + CSRF |
+| POST | `/auth/api/identities/{provider}/connect` | ask to (re)connect a provider, then follow `next` to its login | session + CSRF |
 | GET · DELETE | `/auth/api/sessions` · `/auth/api/sessions/{sid}` | list / revoke your sessions | session (+ CSRF) |
 | POST | `/auth/api/sessions/revoke-others` | sign out your other devices | session + CSRF |
 | POST | `/auth/api/stop-impersonating` | end an admin impersonation session | session + CSRF |
@@ -430,6 +445,24 @@ Mounted under `/auth` by `Handler()`:
 The account, session-management, unlink, and delete endpoints require a **`SessionStore`** only for the
 device-list/revoke features; everything else works statelessly. Step-up-gated actions expect a fresh
 `POST /auth/reauth` (see [Two-factor](#two-factor-totp--recovery-codes)).
+
+- **Changing email** — the confirmation link is opened in a browser signed in to the account (signed
+  out, it sends the user to sign in and back). A password reset or change, or signing out the other
+  sessions, cancels a change that is pending.
+- **Disconnecting a provider** — it stays disconnected: it no longer signs in to the account by
+  email until the user reconnects it with `POST /auth/api/identities/{provider}/connect`.
+- **Impersonation** — an operator's impersonation session can read, switch the active org and end
+  itself; every other state-changing `/auth` endpoint answers `403`.
+- **Without a `SessionStore`** sessions are stateless: signing out, a password reset, a ban and
+  deleting the account clear or refuse cookies from then on, but **do not end a cookie someone already
+  holds** — it works until it expires (12 h, or 30 d with remember-me). Wire one for anything that
+  needs revocation.
+
+**The gate's fixed paths.** `GateHTTP` always lets through `/auth/*`, `/_next/*`, `/api/health` and
+`/favicon.ico`, whatever `Config.PublicPath` says — don't serve anything private under them. With no
+`PublicPath`, `/signup`, `/welcome`, `/restore`, `/login`, `/register`, `/recover`, `/reset` and
+`/verify` are public too. An unauthenticated request gets `401` JSON under `/api` and `/ws`, and a
+redirect to `/welcome?next=…` elsewhere; the emails link to `/login`.
 
 ---
 
@@ -449,13 +482,28 @@ mux.Handle("/reports", authn.RequireGroupsHTTP("analysts", "admins")(reportsHand
 
 ### API keys
 `axk_`-prefixed, **sha256-at-rest**, with optional expiry, groups, and **scopes**. Scopes are
-**deny-by-default** (least privilege): an empty list grants **nothing** — use `["admin"]`, `["scim"]`,
-or `["*"]` for a root key. The `Authorization: Bearer <key>` header is validated via
-`authn.ValidateAPIKey(raw)` / `authn.ValidateAPIKeyScope(raw, "scim")`. CSRF is correctly **skipped**
-for Bearer requests (not cookie-based). The raw key is shown **once** at creation.
+**deny-by-default** (least privilege): an empty list grants **nothing**. The library reads four:
+
+| Scope | Opens |
+|---|---|
+| `admin` | the admin API (`/auth/admin/*`) |
+| `scim` | a SCIM mount you gate with `ValidateAPIKeyScope(t, "scim")` |
+| `app` (`authx.ScopeApp`) | your own routes behind `GateHTTP` / `RequireGroupsHTTP` — where the key's groups then count |
+| `*` | all of them (a root key) |
+
+Gate a surface of your own with `authn.ValidateAPIKeyScope(raw, "<scope>")`. The bare
+`authn.ValidateAPIKey(raw)` checks no scope (it does refuse org-bound keys) — don't gate with it.
+CSRF is skipped for a Bearer request that carries no session cookie. The raw key is shown **once** at
+creation.
+
+- A key **mints** only scopes it has itself, and no key that outlives it; the owner's session mints
+  anything.
+- A key **can't act on the owner's account** (disable, ban, delete, set its password, impersonate
+  it): that takes an owner session.
 
 ### Admin REST API (`/auth/admin`)
-Gated by an **owner session** (`OWNER_EMAIL`) **or** a valid API key carrying the `admin` scope:
+Gated by an **owner session** (`OWNER_EMAIL`) **or** a valid API key carrying the `admin` scope. Every
+state-changing call leaves an audit row naming who made it (the owner's subject, or `apikey:<id>`):
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -472,6 +520,20 @@ Gated by an **owner session** (`OWNER_EMAIL`) **or** a valid API key carrying th
 | GET / POST | `/auth/admin/users/{id}/sessions` · `…/sessions/revoke` | list / revoke a user's sessions |
 | GET / POST | `/auth/admin/apikeys` | list / create keys (create returns the raw key once) |
 | DELETE | `/auth/admin/apikeys/{id}` | revoke a key |
+| GET / POST | `/auth/admin/orgs` | list / create organizations |
+| POST / DELETE | `/auth/admin/orgs/{id}` | rename / delete an organization |
+| GET | `/auth/admin/orgs/{id}/members` | list an org's members |
+| POST / DELETE | `/auth/admin/orgs/{id}/members/{userId}` | set a member's role / remove (the recovery path past the last-owner guard) |
+| GET / POST | `/auth/admin/orgs/{id}/groups` | list / create an org's groups |
+| DELETE | `/auth/admin/orgs/{id}/groups/{groupId}` | delete an org's group |
+| GET | `/auth/admin/orgs/{id}/groups/{groupId}/members` | list its members |
+| POST / DELETE | `/auth/admin/orgs/{id}/groups/{groupId}/members/{userId}` | add / remove a member (org members only) |
+
+`disabled` and `ban` take their flag in the body (`{"disabled": true}`, `{"banned": true}`) and refuse a
+request without it. An operator's password reset and session revoke end the user's sessions, OAuth
+grants and any pending change of email. A password set when *creating* an unverified user is
+dropped when the user first verifies their address — create them with `emailVerified: true`, or
+set the password afterwards.
 
 ### LDAP sync
 One-way scheduled pull of users + groups + membership from LDAP/Active Directory:
@@ -487,7 +549,14 @@ result, err := syncer.Sync() // run on a schedule
 
 An entry whose `mail` already belongs to an account the sync didn't create (a local or social sign-in,
 the owner) is skipped and reported in `result.Errors` — set `AdoptExisting: true` only for a directory
-you trust as much as your own sign-in. Deprovisioning (`DeprovisionMissing`) ends the user's sessions.
+you trust as much as your own sign-in. Deprovisioning (`DeprovisionMissing`) ends the user's sessions;
+`MaxDeprovision` caps how many one run may disable (a search that came back partial disables none).
+
+Group memberships follow the directory: a synced user removed from an LDAP group, or whose group left
+LDAP, loses the membership on the next sync (`KeepStaleMemberships` turns that off; members that
+aren't LDAP users are never touched). An LDAP group adopts an existing group of the same name unless
+`OwnGroupsOnly` is set. Key users on an attribute entries can't set themselves (`entryUUID`,
+`objectGUID`): a `uid` found on more than one entry is synced from none.
 An entry whose `mail` changed moves its account to the new address signed out and without its sign-in
 methods (as SCIM does): the new mailbox's holder proves it, or signs in through the IdP.
 
@@ -499,8 +568,13 @@ with **`and`/`or`/`not`** + parens + **valuePath** `emails[type eq "work"]`), **
 (`sortBy`/`sortOrder`), **pagination** (`startIndex`/`count`), and **ETags** (`If-Match` / `If-None-Match`).
 Resources carry `meta.created`/`meta.lastModified`, and discovery is complete: `ServiceProviderConfig` /
 `ResourceTypes` / full **`/Schemas`** documents (+ `/Schemas/{id}`). Bearer-auth with
-`ValidateAPIKeyScope(t, "scim")` — never the bare `ValidateAPIKey`, which checks neither scope nor org
-binding. SCIM may re-point the email only of accounts it provisioned; other accounts keep theirs, and
+`ValidateAPIKeyScope(t, "scim")` — never the bare `ValidateAPIKey`, which checks no scope.
+**What the `scim` scope can do on the global mount:** create users; update, activate and deactivate
+the accounts **it provisioned** (others — a local or social sign-in, the owner — answer
+`400 mutability`, and a replace that omits `active` changes nobody's state); and manage **every**
+group and its membership, including groups your app created — treat a `scim` key as a group
+administrator. A deactivation or member removal the store fails to make answers 5xx, never 200.
+SCIM may re-point the email only of accounts it provisioned; other accounts keep theirs, and
 a replace never verifies an address. An account SCIM moves to another address is signed out and loses
 its sign-in methods (password, passkeys, linked providers, TOTP): it belongs to whoever holds the new
 mailbox, who signs in through the IdP or proves it by link, code or reset.
@@ -535,8 +609,10 @@ needs no schema.
   verified); nothing in the link can be tampered with, and the wrong account can't burn the token.
   Owners/admins invite; only owners may grant `owner`.
 - **Member management** — members list the org; owners/admins set roles and remove members; anyone
-  may leave. A serialized **last-owner guard** refuses demoting/removing the final owner (the admin
-  API bypasses it as the recovery path).
+  may leave. **Admins grant `admin` and `member`; any other role — your app's own, like the
+  `billing` below — takes an owner** (`Config.OrgAdminMayGrant` lets admins grant some). A serialized
+  **last-owner guard** refuses demoting/removing the final owner, and the sole owner deleting their
+  account (the admin API bypasses it as the recovery path).
 - **Org-scoped groups & API keys** (via the `OrgDirectoryStore` upgrade interface — both reference
   stores implement it) — groups and keys bound to one org, invisible to every global surface: two
   orgs both own "engineering" (never in the session cookie; gate with **`RequireOrgGroupsHTTP`**,
@@ -629,13 +705,21 @@ g, err := p.VerifyFor(ctx, bearer, "https://app.example.com/mcp") // g.Subject, 
   `client_id`; the provider fetches its metadata there (the document's `client_id` must equal the
   URL; public clients only, PKCE required). Documents are cached in memory (`Cache-Control` max-age,
   5 min – 24 h, default 1 h), never stored. The fetch only reaches public addresses, is pinned to
-  the address it checked (no DNS rebinding), and is limited to 5 s, 64 KB and https redirects.
+  the address it checked (no DNS rebinding), follows no redirect, and is limited to 5 s and 64 KB.
   Fetches the cache can't answer are limited per address, and concurrent lookups share one fetch.
 - **Signing keys** rotate: after `KeyRotation` (default 90 days) a new key signs and the old one
   stays in the JWKS for `KeyGrace` (default 24 h), then is deleted. Replicas re-read the keys
-  every five minutes. `RotateKeys` forces a rotation. Keys are sealed at rest (AES-GCM, under a key
-  derived from `CryptoKey`), so a copy of the database alone can't sign tokens; changing
-  `CryptoKey` replaces them.
+  every five minutes. `RotateKeys` forces a rotation; **after a leak use `ReplaceKeys`**, which drops
+  the old keys at once (a retired key still verifies what is signed with it). Keys are sealed at
+  rest (AES-GCM, under a key derived from `CryptoKey`), so a copy of the database alone can't sign
+  tokens, and a key written to it unsealed is ignored (`AcceptPlaintextKeys` for the first start
+  after upgrading from before v0.11); changing `CryptoKey` replaces them.
+- **Bounds:** an authorization request's parameters are capped (`state` 2048 bytes, …), requests are
+  limited per address, and unfinished ones are removed within minutes of expiring. A failed client
+  lookup is a bare `invalid_client`.
+- **Impersonation:** the login step, the built-in consent endpoint and the callback refuse an
+  operator's impersonation session. An app that calls `Approve` itself must do the same
+  (`SessionClaims.ImpersonatedBy != ""`).
 - **Consent screen:** show the client's self-chosen name as a claim, together with `RedirectHost`,
   which is where the browser really goes back to. For a metadata-document client, `Client.ID` is
   its URL.
@@ -672,7 +756,9 @@ delete); `""` is the reserved "no user" sentinel.
 - **Sessions** — HS256-signed cookie; **alg-confusion pinned** (rejects `alg:none`/non-HMAC); `exp`/`iat`
   enforced; rotated on every login. Remember-me extends the TTL (12 h → 30 d).
 - **CSRF** — double-submit token (`X-CSRF-Token` ↔ `sweep_csrf` cookie), constant-time compare, enforced
-  on non-GET `/api` + `/auth`; ensured per-session in the gate; skipped for Bearer (API-key) requests.
+  on non-GET `/api` + `/auth`; ensured per-session in the gate; skipped for Bearer (API-key) requests
+  that carry no session cookie. With `COOKIE_HOST_PREFIX` the cookies are `__Host-`-prefixed, which a
+  sibling subdomain can't plant.
 - **Passwords** — bcrypt cost 12; NIST-style policy; constant-cost dummy-hash anti-enumeration; rehash tag.
 - **Tokens** (magic-link / verify / reset) — 256-bit `crypto/rand`, sha256-at-rest, single-use (atomic),
   per-purpose TTL, always-200 anti-enumeration.
@@ -680,10 +766,15 @@ delete); `""` is the reserved "no user" sentinel.
 - **OAuth/OIDC** — Authorization Code + **PKCE (S256)** + `state` + `nonce`, constant-time compares;
   email trusted only when `email_verified` is set (or `OIDC_ASSUME_VERIFIED` for a single trusted IdP).
 - **Rate limiting** — sliding-window per-IP + soft per-account lockout (durable counts; recovery paths
-  stay open; owner exempt). Pluggable: supply a shared-store backend via `SetRateLimiters` for
-  multi-replica deployments.
-- **Trusted proxies** — a built-in `X-Forwarded-For` walk trusting only `TrustedProxies()` ranges, so
-  the client IP (and per-IP limits) can't be spoofed.
+  stay open; a higher threshold for the owner). The windows are in memory per process: supply a
+  shared-store backend via `SetRateLimiters` for multi-replica deployments.
+- **Trusted proxies** — a built-in `X-Forwarded-For` walk trusting only `TrustedProxies()` ranges.
+  The default trusts every private-range peer; where clients can reach the app from one without
+  passing your proxy, set `TRUSTED_PROXIES` to the proxy itself, or they choose their own IP (and
+  per-IP limit, and audit-log address).
+- **Fails closed** — a store error during sign-in ends the sign-in; it is never read as "no such
+  user" or "no second factor".
+- **Reporting a vulnerability** — see [SECURITY.md](./SECURITY.md).
 
 ### Account-linking invariant
 The single most important rule, shipped in both reference stores and **covered by tests**: a credential
@@ -691,7 +782,10 @@ or social identity links to an existing user **only** on a **provider-verified o
 email**. An unverified, non-bootstrap "squatter" row is **never adopted**. When a verified login
 (OIDC/social/redeemed) lands on a squatter, it **reclaims** the email — deleting the squatter and its
 credentials, then provisioning a clean verified user; an *unverified* collision is refused
-(`ErrEmailConflict`). This prevents the classic cross-provider account takeover (attacker pre-registers
+(`ErrEmailConflict`). One kind of unverified account is kept instead of replaced: one a provisioning
+source made (SCIM, an org's SCIM, LDAP) that its user hasn't signed in to yet. A social sign-in with
+its verified address takes that account over — with its id and memberships, and with nothing that
+signs in carried over — so the IdP that provisioned the person can still update and deprovision them. This prevents the classic cross-provider account takeover (attacker pre-registers
 `victim@x`; the real victim must never inherit the attacker's credentials).
 
 ---
@@ -704,10 +798,11 @@ credentials, then provisioning a clean verified user; an *unverified* collision 
 - `GateHTTP` / `CSRFHTTP` — middleware to gate + CSRF-protect your own routes.
 - `RequireGroupsHTTP(...)` — per-group access control.
 - `SessionFromRequest(r)` / `GroupsFromRequest(r)` — read the authenticated principal.
-- `ValidateAPIKey` / `ValidateAPIKeyScope` — Bearer API-key auth for server-to-server + SCIM.
+- `ValidateAPIKeyScope` — Bearer API-key auth for a surface of your own, by scope (SCIM: `"scim"`).
 
 The SCIM server is a standalone `http.Handler` too. Client IP is extracted with a built-in
-trusted-proxy walk (`TrustedProxies()` / `TRUSTED_PROXIES`), so X-Forwarded-For can't be spoofed.
+trusted-proxy walk (`TrustedProxies()` / `TRUSTED_PROXIES`) — see [Security model](#security-model)
+for what the default trusts.
 
 ---
 
@@ -723,7 +818,8 @@ verified-linked), OAuth-identity round-trip, the net/http adapter, the directory
 scopes + `RequireGroupsHTTP` allow/deny, and the **SCIM user lifecycle** (provision → filter → PUT →
 deprovision). The reference stores carry compile-time interface assertions.
 
-CI runs the tests under the race detector, `go vet`, staticcheck and gofmt on every change.
+CI runs the tests under the race detector, `go vet`, staticcheck and gofmt on every change; a release
+tag runs the same plus govulncheck before it is published. Actions are pinned to commits.
 The `security` workflow runs [govulncheck](https://go.dev/doc/security/vuln/) and an
 [OWASP ZAP](https://www.zaproxy.org/) scan of `examples/demo` — a passive baseline on every change, a
 full active scan weekly — with the rules in [`.zap/rules.tsv`](.zap/rules.tsv).
@@ -745,6 +841,7 @@ go-auth-x/
 ├── oidcprovider/         OAuth 2.1 / OIDC provider
 ├── examples/demo/        runnable demo (also the ZAP scan target)
 ├── LICENSE               MIT
+├── SECURITY.md           how to report a vulnerability
 └── README.md
 ```
 

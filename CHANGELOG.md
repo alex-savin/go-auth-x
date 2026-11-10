@@ -245,6 +245,18 @@ Fixes from a second review, of v0.13.0. Each has a regression test.
 - `Config.HostCookies` (`COOKIE_HOST_PREFIX`): `__Host-` cookie names, needs an https `APP_URL`;
   `Authenticator.CSRFCookieName()` and `csrfCookie` in `GET /auth/config`.
 - `POST /auth/api/identities/{provider}/connect`; `authx.NormalizeEmail`.
+- `SECURITY.md` (how to report a vulnerability); Dependabot for Go modules and workflow actions;
+  workflow actions pinned to commits; the release job runs the race detector and govulncheck.
+
+### Fixed
+
+- Documentation: the README's admin API table lists the `/auth/admin/orgs` routes, its install
+  table the `oidcprovider` package; the API-key scopes, the gate's fixed public paths, what the
+  `scim` scope can do, and the limits of sessions without a `SessionStore` are spelled out; the
+  claims that `X-Forwarded-For` "can't be spoofed" and that metadata fetches follow https redirects
+  are corrected.
+- `examples/demo`: `/api/notes` verifies an OAuth access token for the resource it advertises, and
+  encodes its answer as JSON.
 
 ### Known limitations
 

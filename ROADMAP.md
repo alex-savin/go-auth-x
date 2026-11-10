@@ -212,4 +212,4 @@ demands it** — it's the IdP-shaped edge the README's positioning deliberately 
 
 ---
 
-_Updated 2026-11-07._
+_Updated 2026-11-10._

@@ -11,6 +11,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
@@ -99,12 +100,32 @@ func main() {
 	app.HandleFunc("GET /login", page(loginHTML))   // where the library's emails send people
 	app.HandleFunc("GET /welcome", page(loginHTML)) // where the gate sends them
 	app.HandleFunc("GET /consent", page(consentHTML))
+	notes := func(w http.ResponseWriter, sub, email string) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"sub": sub, "email": email, "notes": []string{}})
+	}
 	app.HandleFunc("GET /api/notes", func(w http.ResponseWriter, r *http.Request) {
 		sub, email, _ := authx.SessionFromRequest(r)
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, "{\"sub\":%q,\"email\":%q,\"notes\":[]}\n", sub, email)
+		notes(w, sub, email)
 	})
-	mux.Handle("/", authn.GateHTTP(authn.CSRFHTTP(app)))
+	gated := authn.GateHTTP(authn.CSRFHTTP(app))
+	mux.Handle("/", gated)
+	// /api/notes is also the resource the OAuth provider issues access tokens for: a request carrying
+	// one is verified for this resource here; anything else goes through the session gate.
+	mux.HandleFunc("GET /api/notes", func(w http.ResponseWriter, r *http.Request) {
+		bearer, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if !ok || strings.HasPrefix(bearer, "axk_") { // no token, or an API key: the gate's business
+			gated.ServeHTTP(w, r)
+			return
+		}
+		g, err := provider.VerifyFor(r.Context(), bearer, appURL+"/api/notes")
+		if err != nil {
+			w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)
+			http.Error(w, "invalid access token", http.StatusUnauthorized)
+			return
+		}
+		notes(w, g.Subject, "")
+	})
 
 	srv := &http.Server{Addr: addr, Handler: securityHeaders(mux), ReadHeaderTimeout: 5 * time.Second}
 	log.Printf("go-auth-x demo on %s", appURL)

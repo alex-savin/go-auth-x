@@ -109,8 +109,8 @@ type OAuthRefreshToken struct {
 
 func (OAuthRefreshToken) TableName() string { return "authx_oauth_refresh_tokens" }
 
-// OAuthSigningKey is an ID-token signing key (authx.OAuthSigningKey). The private key is stored as
-// is; wrap the DB or column with encryption-at-rest if your threat model requires it.
+// OAuthSigningKey is an ID-token signing key (authx.OAuthSigningKey). PrivatePEM holds what the
+// provider hands the store: the key sealed under its CryptoKey (AES-GCM), not the PEM itself.
 type OAuthSigningKey struct {
 	ID         string `gorm:"primaryKey"`
 	Algorithm  string

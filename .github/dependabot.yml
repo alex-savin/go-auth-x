@@ -1,0 +1,15 @@
+# Keeps the Go modules and the pinned workflow actions current. A security library's dependencies
+# are part of what it ships.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      go:
+        patterns: ["*"]
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

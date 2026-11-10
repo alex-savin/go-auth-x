@@ -51,7 +51,7 @@ type APIKey struct {
 	Prefix     string
 	Hash       []byte `gorm:"uniqueIndex"`
 	Groups     string // CSV of group names granted to calls made with this key
-	Scopes     string // CSV of scopes this key is limited to (empty = unrestricted)
+	Scopes     string // CSV of the scopes this key carries (empty = none: scopes are deny-by-default)
 	OrgID      uint   `gorm:"default:0;index"` // 0 = global; else the org this key is bound to
 	ExpiresAt  *time.Time
 	CreatedAt  time.Time
