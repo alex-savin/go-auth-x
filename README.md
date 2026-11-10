@@ -851,7 +851,9 @@ go-auth-x/
 
 See **[ROADMAP.md](./ROADMAP.md)** for the full list and **[CHANGELOG.md](./CHANGELOG.md)** for details.
 
-- **v0.14.0** (latest): **security release** — fixes from a second review: OAuth codes handed to
+- **v0.15.0** (latest): **Go 1.27 + dependencies** — Go 1.27 is the minimum; every dependency is on
+  its latest version; the code uses Go 1.27's idioms. No behavior changes.
+- **v0.14.0**: **security release** — fixes from a second review: OAuth codes handed to
   whoever knew a request's id; a `scim` key or an unproven signup becoming the owner; gormstore group
   removals that removed nobody; sign-in failing open on store errors; impersonation, step-up and
   API-key scope gaps; LDAP memberships that never ended. **Upgrade promptly**; several fixes change
