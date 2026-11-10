@@ -7,7 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-Fixes from a second review, of v0.13.0. Each has a regression test.
+## [0.14.0] — 2026-11-10
+
+A security release. A second review, of v0.13.0, found ways to get another user's OAuth tokens, to
+become the instance owner through SCIM or an unproven signup, and to keep access after removal from a
+group; all are fixed here, each with a regression test. **Upgrade promptly.** Several fixes change
+behavior callers can notice — see "Behavior changes" below; the one most deployments will meet is
+that **API keys need the new `app` scope** to pass `GateHTTP` / `RequireGroupsHTTP`.
 
 ### Security
 
@@ -1003,7 +1009,8 @@ First tagged release. A self-contained, embeddable authentication library for Go
 - **Trusted-proxy client-IP** — `X-Forwarded-For` honored only when the direct peer is a
   trusted proxy (`TRUSTED_PROXIES`, or private-range default), so the client IP can't be spoofed.
 
-[Unreleased]: https://github.com/alex-savin/go-auth-x/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/alex-savin/go-auth-x/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/alex-savin/go-auth-x/releases/tag/v0.14.0
 [0.13.0]: https://github.com/alex-savin/go-auth-x/releases/tag/v0.13.0
 [0.12.1]: https://github.com/alex-savin/go-auth-x/releases/tag/v0.12.1
 [0.12.0]: https://github.com/alex-savin/go-auth-x/releases/tag/v0.12.0
