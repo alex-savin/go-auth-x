@@ -74,7 +74,8 @@ IdP hand-off, no "double login page."
   (email-scoped, salted-at-rest, attempt-capped), plus email verification + password reset.
 - 🌐 **OIDC client** — Authorization Code + PKCE; consume any OIDC provider (Keycloak, Auth0, …).
 - 👥 **Social login** — Google, Apple & Microsoft/Entra (OIDC), GitHub, Facebook & Discord (REST/Graph),
-  plus **any OIDC provider** via `Config.SocialOIDC`; verified-email only. Self-service **unlink**.
+  plus **any OIDC provider** via `Config.SocialOIDC`; verified-email only. Self-service **unlink** — a
+  disconnected provider stays disconnected until the user explicitly reconnects it.
 - 🔐 **Two-factor (2FA)** — TOTP authenticator apps + single-use recovery codes; **stdlib, no dependency**.
 - 🔎 **Breached-password check** — optional **HIBP k-anonymity** screening (`BreachChecker`), fail-open.
 
@@ -83,7 +84,8 @@ IdP hand-off, no "double login page."
 - 🔄 **Key rotation** — `PreviousSessionSecrets` verify-list rotates `SESSION_SECRET` without mass logout.
 - 📵 **Revocable sessions** *(optional)* — a pluggable `SessionStore` adds list/revoke-device,
   sign-out-everywhere, and ban-revokes-all over the stateless default.
-- 🛡 **CSRF** — double-submit token + optional **trusted-origins** allow-list (defense-in-depth).
+- 🛡 **CSRF** — double-submit token + optional **trusted-origins** allow-list (defense-in-depth);
+  sign-out by `POST`; opt-in **`__Host-` cookies** a sibling subdomain can't plant.
 - 🧩 **Framework-agnostic** — mount as an `http.Handler`; net/http middleware for chi/echo/stdlib.
 
 **Account self-service**
@@ -91,9 +93,11 @@ IdP hand-off, no "double login page."
 
 **Directory (optional, enterprise tier)**
 - 🗂 **Groups** + per-group **access control** middleware.
-- 🔐 **API keys** (Bearer) + an **admin REST API**: create/disable/**ban**/delete users, set passwords,
-  **impersonate**, and list/revoke a user's sessions.
-- 🏢 **LDAP** sync and a minimal **SCIM 2.0** provisioning server.
+- 🔐 **API keys** (Bearer, **deny-by-default scopes**) + an **admin REST API**: create/disable/**ban**/delete
+  users, set passwords, **impersonate**, list/revoke a user's sessions, manage orgs — every change
+  audited with who made it.
+- 🏢 **LDAP** sync (memberships follow the directory) and a **SCIM 2.0** provisioning server (filters,
+  PATCH, `/Bulk`, ETags, pagination).
 - 🏬 **Organizations (multi-tenant orgs)** — per-org roles, an active-org session claim + switching,
   **email invites** (listable/revocable records), `RequireOrgHTTP` middleware, admin org CRUD, and
   **org-scoped resources**: per-org groups + org-bound API keys unlocking **per-customer SCIM**.
@@ -101,6 +105,8 @@ IdP hand-off, no "double login page."
 **Operational**
 - 🚦 Rate limiting + soft lockout (**`429 + Retry-After`**, IPv6 `/64` keying), trusted-proxy-aware client IP.
 - 🧪 Reference **GORM** and **in-memory** stores; swap in your own via small interfaces.
+- 🛰 **OAuth 2.1 / OIDC provider** (`oidcprovider`) — let other apps and AI assistants (MCP) ask your
+  users for access, with your consent screen.
 
 ---
 
@@ -205,7 +211,7 @@ flowchart LR
       MW["Middleware<br/>Gate · CSRF · RequireGroups"]
       PW["password"]
       PK["passkey / QR"]
-      MK["magic-link"]
+      MK["email link / code"]
       OI["OIDC"]
       SO["social"]
       FUN(["completeLogin — the one funnel<br/>run Authorizer · add groups · mint cookie + CSRF"])
@@ -292,7 +298,7 @@ provider activates when its client id + secret are present.
 | `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` | `GitHubClientID` / `…Secret` | Enables GitHub login. |
 | `FACEBOOK_CLIENT_ID` / `FACEBOOK_CLIENT_SECRET` | `FacebookClientID` / `…Secret` | Enables Facebook login. |
 | `APPLE_CLIENT_ID` `APPLE_TEAM_ID` `APPLE_KEY_ID` `APPLE_PRIVATE_KEY` | `AppleClientID` / `…TeamID` / `…KeyID` / `…PrivateKey` | Sign in with Apple (Services ID, Team ID, Key ID, `.p8` PEM). Requires HTTPS. |
-| `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET` / `MICROSOFT_TENANT` | `MicrosoftClientID` / `…Secret` / `…Tenant` | Microsoft / Entra ID login. **Pin `MICROSOFT_TENANT` to a single tenant GUID / verified domain to enable sign-in** — the default `common` (and `organizations`/`consumers`) is multi-tenant, where the token email is attacker-controllable (nOAuth) and therefore **not trusted**, so those sign-ins are refused. |
+| `MICROSOFT_CLIENT_ID` / `MICROSOFT_CLIENT_SECRET` / `MICROSOFT_TENANT` | `MicrosoftClientID` / `…Secret` / `…Tenant` | Microsoft / Entra ID login. **Pin `MICROSOFT_TENANT` to a single tenant GUID / verified domain to enable sign-in** — the default `common` (and `organizations`, `consumers` or its id `9188040d-…`) is multi-tenant, where the token email is attacker-controllable (nOAuth) and therefore **not trusted**, so those sign-ins are refused. |
 | `DISCORD_CLIENT_ID` / `DISCORD_CLIENT_SECRET` | `DiscordClientID` / `…Secret` | Enables Discord login (verified email required). |
 | `MICROSOFT_STRICT_EMAIL_VERIFIED` | `MicrosoftStrictEmailVerified` | For a **pinned single tenant**, also require an explicit `email_verified` rather than trusting the tenant-owned address (default off). Has no effect in multi-tenant mode, where the email is never trusted. |
 | — (programmatic) | `SocialOIDC []SocialOIDCProvider` | Register any OIDC IdP (GitLab, Okta, Auth0, Keycloak, …) as a social login. |
@@ -324,12 +330,17 @@ Same-origin WebAuthn — no IdP hop. **Registration requires a discoverable (res
 does not pin `authenticatorAttachment`**, so an enrolled passkey works passwordless *and* cross-device.
 **Login is discoverable (usernameless)**, which is exactly what makes the browser offer "use a phone
 or tablet" → a **QR code** (FIDO2 hybrid transport). Sign-count **clone detection** rejects copied
-authenticators. Challenges live in a short-lived signed cookie; the relying-party id is fixed config.
+authenticators. A ceremony's state lives in a short-lived signed cookie and its challenge is
+**single-use** (recorded as spent, so a captured response can't be replayed); the relying-party id is
+fixed config.
 
 ### Email magic-links
 `POST /auth/email/request` emails a one-time sign-in link; `GET /auth/email/login` redeems it (and marks
 the email verified). Same machinery powers email verification and password reset. All tokens are 256-bit,
-**sha256-at-rest**, **single-use** (atomic redemption), per-purpose TTL, with always-200 anti-enumeration.
+**sha256-at-rest**, **single-use** (atomic redemption), per-purpose TTL, with always-200 anti-enumeration,
+and sign in only the account they were mailed for. `POST /auth/email-otp/send` + `/verify` do the same
+with a 6-digit code instead of a link (attempt-capped, throttled per address). The post-login `next`
+is kept to a local path.
 
 ### OIDC
 `GET /auth/login` runs Authorization Code + **PKCE (S256)** with `state` + `nonce`; `GET /auth/callback`
@@ -341,8 +352,10 @@ are compared in constant time (OAuth 2.0 Security BCP / RFC 9700).
 (verified-email id_token + nonce + `azp`); **GitHub** uses REST (`/user` + `/user/emails`,
 primary+verified); **Facebook** uses the Graph API (`/me`, with an `appsecret_proof`); **Discord**
 uses REST (`/users/@me`, verified email). Identities key on **(provider, subject)**; a new identity
-links to a **verified-email** user, **reclaims** an unverified squatter, or creates one (see
-[account-linking invariant](#account-linking-invariant)).
+links to a **verified-email** user, takes over an unverified account a provisioning source made,
+**reclaims** an unverified squatter, or creates one (see
+[account-linking invariant](#account-linking-invariant)). A login started at one provider finishes
+only at that provider's callback.
 
 **Any OIDC provider** — register one programmatically and it mounts at `/auth/social/<name>/…`:
 
@@ -361,11 +374,12 @@ This covers GitLab, Okta, Auth0, Keycloak, and the like with the same PKCE + non
 lists every enabled provider in `socialProviders` so the SPA can render the right buttons.
 
 > **Microsoft / Entra — pin your tenant.** The multi-tenant endpoints (`common`, `organizations`,
-> `consumers`, or an unset `MICROSOFT_TENANT`) accept id_tokens from *any* Entra tenant, so the token's
-> email is attacker-controllable (the [nOAuth](https://www.descope.com/blog/post/noauth) class). go-auth-x
-> therefore does **not** trust the email in multi-tenant mode — because Entra omits `email_verified`,
-> those sign-ins are refused. Set `MICROSOFT_TENANT` to a single tenant GUID or a verified custom domain
-> to enable Microsoft sign-in; only then is the tenant-owned email trusted for account linking.
+> `consumers` — by name or by its tenant id — or an unset `MICROSOFT_TENANT`) accept id_tokens from
+> *any* Entra tenant, so the token's email is attacker-controllable (the
+> [nOAuth](https://www.descope.com/blog/post/noauth) class). go-auth-x therefore does **not** trust
+> the email in multi-tenant mode — because Entra omits `email_verified`, those sign-ins are refused.
+> Set `MICROSOFT_TENANT` to a single tenant GUID or a verified custom domain to enable Microsoft
+> sign-in; only then is the tenant-owned email trusted for account linking.
 
 **Sign in with Apple** needs four env values (`APPLE_CLIENT_ID` = Services ID, `APPLE_TEAM_ID`,
 `APPLE_KEY_ID`, `APPLE_PRIVATE_KEY` = the `.p8` PEM) — the library signs Apple's ES256 client-secret JWT
@@ -390,7 +404,8 @@ HMAC-SHA1 / 6 digits / 30s, ±1-step skew), verified against the published RFC v
   recovery code finishes the login.
 - **Security** — codes are constant-time compared; a used time-step is remembered to reject **replay**;
   recovery codes are **sha256-at-rest + single-use**; `POST /auth/2fa/disable` requires a current code;
-  `/auth/2fa/verify` is rate-limited.
+  `/auth/2fa/verify` is rate-limited, and a code checked by `/auth/reauth` draws on the same budget. A
+  store error never reads as "no second factor": the sign-in fails instead.
 - **Passkey as a second factor** — a 2FA-halted login can instead complete the second step with a
   registered passkey (`POST /auth/2fa/webauthn/begin` + `/finish`).
 - **Step-up / re-auth** — wrap sensitive routes with `authn.RequireStepUpHTTP(maxAge)`; a stale/absent
@@ -408,7 +423,7 @@ Mounted under `/auth` by `Handler()`:
 | Method | Path | Purpose | Auth |
 |---|---|---|---|
 | GET | `/auth/login` · `/auth/callback` | OIDC start / callback | public |
-| GET | `/auth/me` · `/auth/config` | session info / enabled methods | public |
+| GET | `/auth/me` · `/auth/config` | session info / enabled methods, social providers and the CSRF cookie's name | public |
 | POST · GET | `/auth/logout` | sign out (`POST` with the CSRF token; `GET` unless `LOGOUT_POST_ONLY`) | session |
 | POST | `/auth/password/signup` · `/auth/password/login` | password signup / login | public |
 | POST | `/auth/password/reset/request` · `/auth/password/reset/confirm` | password reset | public |
@@ -472,11 +487,12 @@ Optional. Wire `SetDirectoryStore(store)` to enable groups, access control, API 
 API, and the LDAP/SCIM integrations.
 
 ### Groups & access control
-Groups are first-class and **surfaced in the session at login**. Gate routes by group membership —
-for sessions *and* API keys:
+Groups are first-class and **surfaced in the session at login**; `RequireGroupsHTTP` re-reads directory
+groups live, so a removal takes effect at once. Gate routes by group membership — for sessions *and*
+API keys carrying the `app` scope:
 
 ```go
-// gate by group membership — works for both session users and API keys:
+// gate by group membership — works for both session users and API keys (scope "app"):
 mux.Handle("/reports", authn.RequireGroupsHTTP("analysts", "admins")(reportsHandler))
 ```
 
@@ -729,8 +745,8 @@ g, err := p.VerifyFor(ctx, bearer, "https://app.example.com/mcp") // g.Subject, 
 ## Storage
 
 go-auth-x ships two reference stores; both implement `CredentialStore` **and** `DirectoryStore` (plus
-the optional `TwoFactorStore`, `SessionStore`, `OrgStore`, and the `OrgDirectoryStore` /
-`BatchGroupStore` / `SignupStore` upgrades):
+the optional `TwoFactorStore`, `SessionStore`, `OrgStore`, `OAuthStore`, and the `OrgDirectoryStore` /
+`BatchGroupStore` / `SignupStore` / `TokenRevoker` upgrades):
 
 - **`gormstore`** — Postgres/SQLite via GORM. `New(db)` migrates self-contained `authx_*` tables
   (so it won't collide with yours) and adds a unique-email index. Ships the **safe verified-email
@@ -740,7 +756,20 @@ the optional `TwoFactorStore`, `SessionStore`, `OrgStore`, and the `OrgDirectory
 
 **Bring your own:** implement `CredentialStore` (and optionally `DirectoryStore`) over your database.
 The interfaces are deliberately small and return storage-agnostic DTOs, so `authx` never imports your
-ORM. Compile-time conformance: `var _ authx.CredentialStore = (*MyStore)(nil)`.
+ORM. Compile-time conformance: `var _ authx.CredentialStore = (*MyStore)(nil)`. The security
+properties rest on a few contracts the interfaces' doc comments spell out; the reference stores and
+their tests show each one:
+
+- Key emails with **`authx.NormalizeEmail`** (trimmed, lower-cased, without folding a non-ASCII
+  letter into an ASCII one), and keep one user per email.
+- **Single-use tokens** are consumed atomically, expiry checked in the store.
+- `SetUserDisabled(true)` / `SetUserBan(true)` and `DeleteUser` **end the user's sessions** when the
+  store is also the `SessionStore`; `UpsertExternalUser` moving an account to another email removes
+  what signs in to it; `AddUserToGroup` leaves no membership behind for an id that names no user
+  or group (the next account created with that id would inherit it).
+- **`SignupStore`** makes the signup password write and the mailbox proof atomic across replicas
+  (without it the `Authenticator` serializes them within one process); **`TokenRevoker`** lets a
+  password reset cancel a pending email change.
 
 **Entity IDs are opaque `string`s.** `AuthUser.ID`, `Group.ID`, `APIKeyInfo.ID`, and every id
 parameter are opaque — `authx` never parses one or does arithmetic on it, it only hands it back to
@@ -761,8 +790,13 @@ delete); `""` is the reserved "no user" sentinel.
   sibling subdomain can't plant.
 - **Passwords** — bcrypt cost 12; NIST-style policy; constant-cost dummy-hash anti-enumeration; rehash tag.
 - **Tokens** (magic-link / verify / reset) — 256-bit `crypto/rand`, sha256-at-rest, single-use (atomic),
-  per-purpose TTL, always-200 anti-enumeration.
-- **Passkeys** — `rpID`/origin taken from the configured app origin (override with `WEBAUTHN_RPID`), **not** the request `Host` (so it can't be spoofed); signed challenge cookie, **clone detection**.
+  per-purpose TTL, always-200 anti-enumeration, bound to the account they were issued for.
+- **Passkeys** — `rpID`/origin taken from the configured app origin (override with `WEBAUTHN_RPID`),
+  **not** the request `Host` (so it can't be spoofed); signed ceremony cookie with a **single-use
+  challenge**; **clone detection**.
+- **Factors** — adding a sign-in method takes a fresh step-up, with a code when the user has TOTP;
+  impersonation sessions can't change the account; API keys are scoped (`admin`, `scim`, `app`, `*`)
+  and can't act on the owner.
 - **OAuth/OIDC** — Authorization Code + **PKCE (S256)** + `state` + `nonce`, constant-time compares;
   email trusted only when `email_verified` is set (or `OIDC_ASSUME_VERIFIED` for a single trusted IdP).
 - **Rate limiting** — sliding-window per-IP + soft per-account lockout (durable counts; recovery paths
@@ -785,8 +819,9 @@ credentials, then provisioning a clean verified user; an *unverified* collision 
 (`ErrEmailConflict`). One kind of unverified account is kept instead of replaced: one a provisioning
 source made (SCIM, an org's SCIM, LDAP) that its user hasn't signed in to yet. A social sign-in with
 its verified address takes that account over — with its id and memberships, and with nothing that
-signs in carried over — so the IdP that provisioned the person can still update and deprovision them. This prevents the classic cross-provider account takeover (attacker pre-registers
-`victim@x`; the real victim must never inherit the attacker's credentials).
+signs in carried over — so the IdP that provisioned the person can still update and deprovision them.
+This prevents the classic cross-provider account takeover (attacker pre-registers `victim@x`; the real
+victim must never inherit the attacker's credentials).
 
 ---
 
@@ -796,7 +831,9 @@ signs in carried over — so the IdP that provisioned the person can still updat
 
 - `Handler()` — mount `/auth/*` in any mux (net/http, chi, echo, …).
 - `GateHTTP` / `CSRFHTTP` — middleware to gate + CSRF-protect your own routes.
-- `RequireGroupsHTTP(...)` — per-group access control.
+- `RequireGroupsHTTP(...)` — per-group access control; `RequireOrgHTTP(...)` /
+  `RequireOrgGroupsHTTP(...)` — per-org roles and groups; `RequireStepUpHTTP(maxAge)` — a fresh
+  re-authentication.
 - `SessionFromRequest(r)` / `GroupsFromRequest(r)` — read the authenticated principal.
 - `ValidateAPIKeyScope` — Bearer API-key auth for a surface of your own, by scope (SCIM: `"scim"`).
 
@@ -812,17 +849,20 @@ for what the default trusts.
 go test ./...
 ```
 
-Covers: session mint/parse + tamper rejection, bcrypt, the **account-linking matrix**
-(squatter-**reclaimed** by a verified login / unverified-collision refused / bootstrap-adopted /
-verified-linked), OAuth-identity round-trip, the net/http adapter, the directory store + API-key
-scopes + `RequireGroupsHTTP` allow/deny, and the **SCIM user lifecycle** (provision → filter → PUT →
-deprovision). The reference stores carry compile-time interface assertions.
+Covers every sign-in method end to end over HTTP, the **account-linking matrix**, the stores'
+contracts (both reference stores; gormstore on SQLite), SCIM, LDAP sync against a fake directory, the
+OAuth provider's flows, and the admin and org APIs. Every security fix has a regression test, named
+for the behavior it pins, in the `security_*_test.go` files of the package it touches. The reference stores
+carry compile-time interface assertions.
 
-CI runs the tests under the race detector, `go vet`, staticcheck and gofmt on every change; a release
-tag runs the same plus govulncheck before it is published. Actions are pinned to commits.
-The `security` workflow runs [govulncheck](https://go.dev/doc/security/vuln/) and an
+CI runs on every pull request and push to `main`: the tests under the race detector on the oldest Go
+`go.mod` allows (1.27) and the current stable release, `go vet`, staticcheck, gofmt and a tidy
+`go.mod`. The `security` workflow runs [govulncheck](https://go.dev/doc/security/vuln/) and an
 [OWASP ZAP](https://www.zaproxy.org/) scan of `examples/demo` — a passive baseline on every change, a
-full active scan weekly — with the rules in [`.zap/rules.tsv`](.zap/rules.tsv).
+full active scan weekly — with the rules in [`.zap/rules.tsv`](.zap/rules.tsv). A version tag is
+vetted and tested again, checked with govulncheck, and published as a GitHub Release with its
+CHANGELOG section. Actions are pinned to commits, and Dependabot keeps them and the Go modules
+current.
 
 ---
 
@@ -840,8 +880,12 @@ go-auth-x/
 ├── scim/                 SCIM 2.0 provisioning server
 ├── oidcprovider/         OAuth 2.1 / OIDC provider
 ├── examples/demo/        runnable demo (also the ZAP scan target)
-├── LICENSE               MIT
+├── .github/              CI, security scanning, release workflows; Dependabot
+├── .zap/                 the ZAP scan's rules
+├── CHANGELOG.md          every release's changes, behavior changes first
+├── ROADMAP.md            what's shipped and what's next
 ├── SECURITY.md           how to report a vulnerability
+├── LICENSE               MIT
 └── README.md
 ```
 
@@ -925,10 +969,12 @@ See **[ROADMAP.md](./ROADMAP.md)** for the full list and **[CHANGELOG.md](./CHAN
 
 ## Contributing
 
-Issues and PRs welcome. Please run `go test ./...` and `go vet ./...` before submitting, and keep the
-boundaries intact: the `authx` package must stay storage-agnostic (no specific ORM) and framework-free
-(net/http only — no web framework imports). New auth methods should funnel through `completeLogin` and
-respect the account-linking invariant.
+Issues and PRs welcome — but report security issues privately, as [SECURITY.md](./SECURITY.md)
+describes. You need Go 1.27 or later. Please run `go test -race ./...`, `go vet ./...` and `gofmt`
+before submitting (CI also runs staticcheck), add a regression test for a fix, and an entry under
+`[Unreleased]` in the CHANGELOG. Keep the boundaries intact: the `authx` package must stay
+storage-agnostic (no specific ORM) and framework-free (net/http only — no web framework imports). New
+auth methods should funnel through `completeLogin` and respect the account-linking invariant.
 
 ---
 
