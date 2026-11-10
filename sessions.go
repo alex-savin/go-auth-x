@@ -172,6 +172,11 @@ func (a *Authenticator) SessionRevokeOthers(c *reqCtx) {
 		c.JSON(http.StatusInternalServerError, H{"error": "could not revoke sessions"})
 		return
 	}
+	if a.creds != nil {
+		if u, uerr := a.creds.UserBySub(sc.Subject); uerr == nil {
+			a.cancelPendingEmailChange(u.ID)
+		}
+	}
 	c.JSON(http.StatusOK, H{"ok": true, "revoked": revoked})
 }
 

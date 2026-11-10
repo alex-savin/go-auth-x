@@ -399,6 +399,16 @@ func (s *Store) SetPasswordHash(userID, hash, algo string) error {
 }
 
 var _ authx.SignupStore = (*Store)(nil)
+var _ authx.TokenRevoker = (*Store)(nil)
+
+// DeleteTokens removes a user's unredeemed tokens of one purpose (authx.TokenRevoker).
+func (s *Store) DeleteTokens(purpose, userID string) error {
+	n, ok := parseID(userID)
+	if !ok {
+		return nil
+	}
+	return s.db.Where("purpose = ? AND user_id = ? AND consumed_at IS NULL", purpose, n).Delete(&AuthToken{}).Error
+}
 
 // SetPasswordHashIfUnverified sets the password of an account whose email is not verified, and
 // reports false (writing nothing) for a verified or missing one. The check is a write to the user's

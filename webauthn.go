@@ -244,7 +244,7 @@ func (a *Authenticator) WebauthnRegisterFinish(c *reqCtx) {
 		c.JSON(http.StatusBadRequest, H{"error": "passkey registration failed"})
 		return
 	}
-	name := strings.TrimSpace(c.Query("name"))
+	name := clampName(c.Query("name"), 64) // as PasskeyRename caps it
 	if name == "" {
 		name = "Passkey"
 	}

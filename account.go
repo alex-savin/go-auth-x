@@ -98,6 +98,7 @@ func (a *Authenticator) AccountSetPassword(c *reqCtx) {
 	if sc := a.sessionOf(c); sc != nil {
 		a.revokeOtherSessions(au.Sub, sc.SID)
 	}
+	a.cancelPendingEmailChange(au.ID)
 	a.creds.RecordAudit(au.ID, au.Email, c.ClientIP(), "password", "password_changed", true, "")
 	c.JSON(http.StatusOK, H{"ok": true})
 }

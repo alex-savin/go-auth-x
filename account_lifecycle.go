@@ -15,14 +15,19 @@ const accountStepUpMaxAge = 10 * time.Minute
 // verify — a password or enabled TOTP. A purely passwordless (social/OIDC-only) user has neither, so a
 // step-up gate would lock them out permanently; it is not a net protection loss for them, since their
 // session already permits setting a password (i.e. self-service takeover) without a prior factor.
+//
+// A store error counts as having one: the callers then ask for a step-up, rather than waive it for a
+// user whose factors couldn't be read.
 func (a *Authenticator) hasReauthFactor(userID string) bool {
-	if _, _, err := a.passwordHash(userID); err == nil {
+	if _, _, err := a.passwordHash(userID); err == nil || !errors.Is(err, ErrNoCredential) {
 		return true
 	}
 	if a.twoFactor != nil {
-		if info, err := a.twoFactor.TOTP(userID); err == nil && info != nil && info.Enabled {
-			return true
+		info, err := a.twoFactor.TOTP(userID)
+		if err != nil {
+			return !errors.Is(err, ErrNoCredential)
 		}
+		return info != nil && info.Enabled
 	}
 	return false
 }
@@ -141,8 +146,28 @@ func (a *Authenticator) EmailChangeConfirm(c *reqCtx) {
 		fail("missing token")
 		return
 	}
-	claim, err := a.creds.ConsumeToken(purposeChangeEmail, hashToken(token))
+	claim, err := a.creds.PeekToken(purposeChangeEmail, hashToken(token))
 	if err != nil {
+		fail("this link is invalid or has expired")
+		return
+	}
+	// The link proves the new mailbox, not that the account still wants the change: it is confirmed
+	// in a browser signed in to the account. Someone who asked for the change with a stolen password
+	// or session holds the link, and after the account's owner resets the password or signs
+	// everything out, no session to open it with. Not signed in: sign in and come back (the token
+	// isn't spent).
+	signedIn := false
+	if sc := a.sessionOf(c); sc != nil && sc.ImpersonatedBy == "" {
+		if u, uerr := a.creds.UserBySub(sc.Subject); uerr == nil {
+			signedIn = u.ID == claim.UserID
+		}
+	}
+	if !signedIn {
+		c.Redirect(http.StatusFound, a.baseURL()+"/login?message="+url.QueryEscape("Sign in to confirm your new email address.")+
+			"&next="+url.QueryEscape("/auth/email/change?token="+token))
+		return
+	}
+	if _, err := a.creds.ConsumeToken(purposeChangeEmail, hashToken(token)); err != nil {
 		fail("this link is invalid or has expired")
 		return
 	}
@@ -156,4 +181,13 @@ func (a *Authenticator) EmailChangeConfirm(c *reqCtx) {
 	}
 	a.creds.RecordAudit(claim.UserID, claim.Email, c.ClientIP(), "account", "email_changed", true, "")
 	c.Redirect(http.StatusFound, a.baseURL()+"/login?message="+url.QueryEscape("Your email has been updated — please sign in."))
+}
+
+// cancelPendingEmailChange drops the user's unconfirmed email-change links (when the store can: see
+// TokenRevoker). Called wherever an account is taken back — a password reset or change, signing out
+// its other sessions — since whoever it is taken back from may have a change of address pending.
+func (a *Authenticator) cancelPendingEmailChange(userID string) {
+	if tr, ok := a.creds.(TokenRevoker); ok && userID != "" {
+		_ = tr.DeleteTokens(purposeChangeEmail, userID)
+	}
 }

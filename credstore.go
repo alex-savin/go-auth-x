@@ -149,6 +149,14 @@ type CredentialStore interface {
 	RecentFailures(email string, since time.Time) (int, error)
 }
 
+// TokenRevoker is an optional CredentialStore upgrade (both reference stores implement it): DeleteTokens
+// removes a user's unredeemed tokens of one purpose. The Authenticator uses it to cancel a pending
+// email change when the account's password is reset or changed or its sessions are ended — whoever
+// asked for that change may be who the account is being taken back from.
+type TokenRevoker interface {
+	DeleteTokens(purpose, userID string) error
+}
+
 // SignupStore is an optional CredentialStore upgrade (both reference stores implement it) for the two
 // writes around an unverified account's password. Anyone may sign up with any address, so a signup's
 // password counts only while the account is unverified, and a mailbox proof drops it. Those are a

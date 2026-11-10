@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 	"time"
 
@@ -377,20 +378,32 @@ func randToken() string {
 
 // sanitizeNext keeps the post-login redirect to a local path (prevents open-redirect to an attacker
 // host); defaults to the dashboard root. It rejects scheme-relative targets ("//evil.com" AND
-// "/\evil.com" — browsers treat a backslash as a slash) and any target containing a control byte:
-// browsers strip ASCII whitespace such as a tab before parsing a URL, so "/\t/evil.com" would be read
-// as "//evil.com" (scheme-relative) and redirect off-site.
+// "/\evil.com" — browsers treat a backslash as a slash), a backslash anywhere, and any target
+// containing a control byte: browsers strip ASCII whitespace such as a tab before parsing a URL, so
+// "/\t/evil.com" would be read as "//evil.com" (scheme-relative) and redirect off-site.
+//
+// What it returns is what a redirect emits: http.Redirect cleans the path it is given, so a target
+// validated before that cleaning ("/./\evil.com" starts with "/.") came out as another one
+// ("/\evil.com"). The path is cleaned here first, the same way.
 func sanitizeNext(next string) string {
-	if next == "" || !strings.HasPrefix(next, "/") {
+	if next == "" || next[0] != '/' {
 		return "/"
 	}
 	for i := 0; i < len(next); i++ {
-		if next[i] < 0x20 || next[i] == 0x7f { // control byte (tab/newline/…) → reject
+		if next[i] < 0x20 || next[i] == 0x7f || next[i] == '\\' { // control byte (tab/newline/…) or backslash → reject
 			return "/"
 		}
 	}
-	if len(next) > 1 && (next[1] == '/' || next[1] == '\\') {
+	if len(next) > 1 && next[1] == '/' {
 		return "/"
 	}
-	return next
+	p, rest := next, ""
+	if i := strings.IndexAny(next, "?#"); i >= 0 {
+		p, rest = next[:i], next[i:]
+	}
+	trailing := strings.HasSuffix(p, "/")
+	if p = path.Clean(p); trailing && p != "/" {
+		p += "/"
+	}
+	return p + rest
 }

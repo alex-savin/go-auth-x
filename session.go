@@ -146,6 +146,7 @@ func mintSessionWith(secret []byte, base SessionClaims, sub string, now time.Tim
 	if base.AuthTime == nil {
 		base.AuthTime = jwt.NewNumericDate(now)
 	}
+	base.Name = clampName(base.Name, maxNameLen) // whatever a directory or provider stored (see maxNameLen)
 	base.RegisteredClaims = jwt.RegisteredClaims{
 		Subject:   sub,
 		Audience:  jwt.ClaimStrings{audSession},

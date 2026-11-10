@@ -1,6 +1,7 @@
 package authx
 
 import (
+	"errors"
 	"time"
 )
 
@@ -32,6 +33,7 @@ func (e loginBlockedError) Error() string { return e.msg }
 // completeLoginWith is completeLogin carrying the IdP's raw id_token (the OIDC callback's), kept in
 // the session for RP-initiated logout. A login that stops for the second factor drops it.
 func (a *Authenticator) completeLoginWith(c *reqCtx, id Identity, remember bool, firstFactorCred []byte, idToken string) (twoFactorRequired bool, err error) {
+	id.Name = clampName(id.Name, maxNameLen) // it rides in the session and 2fa-pending cookies
 	var role string
 	if a.authorizer != nil {
 		r, aerr := a.authorizer.Authorize(c.Request.Context(), id)
@@ -41,9 +43,15 @@ func (a *Authenticator) completeLoginWith(c *reqCtx, id Identity, remember bool,
 		role = r
 	}
 	// Resolve the local user once (for group enrichment + the 2FA check).
+	// Only "no such user" (a stateless deployment: an IdP login with no stored account) goes on
+	// without one. Any other failure to read the user ends the login: carried on, it would skip the
+	// disabled/banned check and the second factor below.
 	var u *AuthUser
 	if a.creds != nil {
-		u, _ = a.creds.UserBySub(id.Subject)
+		var uerr error
+		if u, uerr = a.creds.UserBySub(id.Subject); uerr != nil && !errors.Is(uerr, ErrNoUser) {
+			return false, uerr
+		}
 	}
 	// Every method funnels here, so this is the one place a disabled or banned user is stopped
 	// (callers check too, with their own responses).
@@ -63,7 +71,14 @@ func (a *Authenticator) completeLoginWith(c *reqCtx, id Identity, remember bool,
 	}
 	// Second-factor gate: if the user has confirmed TOTP, don't mint the session yet — stash the
 	// half-authenticated identity in a signed, short-lived pending cookie and require a code.
-	if u != nil && a.userHasTOTP(u.ID) {
+	needsCode := false
+	if u != nil {
+		var terr error
+		if needsCode, terr = a.userHasTOTP(u.ID); terr != nil {
+			return false, terr // unknown is not "no second factor"
+		}
+	}
+	if needsCode {
 		pending, perr := a.mintPending(Identity{Subject: id.Subject, Email: id.Email, Name: id.Name, Groups: id.Groups}, dirGroups, role, remember, firstFactorCred)
 		if perr != nil {
 			return false, perr

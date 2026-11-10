@@ -208,6 +208,12 @@ func (a *Authenticator) redeemAndLogin(c *reqCtx, purpose string, markVerified b
 		fail("account not found")
 		return
 	}
+	// The link was mailed for one account. If that account has left the address and another holds
+	// it now, the link is not theirs to be signed in by (as with a reset link).
+	if claim.UserID != "" && u.ID != claim.UserID {
+		fail("this link is invalid or has expired")
+		return
+	}
 	if markVerified {
 		if err := a.claimMailbox(c, u, purpose == purposeVerifyEmail); err != nil {
 			fail("sign-in failed")

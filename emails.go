@@ -32,6 +32,20 @@ func (a *Authenticator) brandName() string {
 func normEmail(e string) string { return strings.ToLower(strings.TrimSpace(e)) }
 
 // validEmail is a light syntactic check (exactly one @, non-empty local + domain, no spaces).
+// maxNameLen caps a display name (in characters). A name rides in the session cookie: an unbounded
+// one — anyone can sign up with a name of their choosing for an address not theirs — would push every
+// later session cookie of the account past what browsers keep, and its owner could never sign in.
+const maxNameLen = 128
+
+// clampName trims a display name and cuts it to maxLen characters.
+func clampName(s string, maxLen int) string {
+	s = strings.TrimSpace(s)
+	if r := []rune(s); len(r) > maxLen {
+		s = strings.TrimSpace(string(r[:maxLen]))
+	}
+	return s
+}
+
 func validEmail(e string) bool {
 	if len(e) == 0 || len(e) > 254 || strings.ContainsAny(e, " \t\r\n") {
 		return false

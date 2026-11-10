@@ -1,6 +1,7 @@
 package authx
 
 import (
+	"errors"
 	"net/http"
 	"net/url"
 	"time"
@@ -54,7 +55,11 @@ func (a *Authenticator) TOTPBegin(c *reqCtx) {
 		c.JSON(http.StatusUnauthorized, H{"error": "unauthenticated"})
 		return
 	}
-	if info, _ := a.twoFactor.TOTP(au.ID); info != nil && info.Enabled {
+	// A failed read is not "no TOTP yet": starting over would replace an enabled secret.
+	if info, terr := a.twoFactor.TOTP(au.ID); terr != nil && !errors.Is(terr, ErrNoCredential) {
+		c.JSON(http.StatusInternalServerError, H{"error": "could not start enrollment"})
+		return
+	} else if info != nil && info.Enabled {
 		c.JSON(http.StatusConflict, H{"error": "two-factor auth is already enabled"})
 		return
 	}

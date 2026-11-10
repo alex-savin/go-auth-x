@@ -92,7 +92,10 @@ func (a *Authenticator) PasswordSignup(c *reqCtx) {
 	// existing answers a signup for an account that is verified (or an operator-seeded placeholder its
 	// owner claims by signing in): its password is NOT touched. Nudge them to sign in / reset instead,
 	// and still answer generically.
-	existing := func(u *AuthUser) {
+	existing := func(u *AuthUser, unusedHash string) {
+		// The same cookie a new signup gets, bound to a hash that was never stored (so it keeps no
+		// password at verify): its absence would tell a registered address from a new one.
+		a.setSignupBinding(c, u.ID, unusedHash)
 		base := a.baseURL()
 		if a.acctLimiter == nil || a.acctLimiter.Allow("signup-mail:"+email) { // no mail flood to one address
 			_ = a.sendAuthEmail(email, "You already have an account",
@@ -108,7 +111,7 @@ func (a *Authenticator) PasswordSignup(c *reqCtx) {
 	u, err := a.creds.UserByEmail(email)
 	switch {
 	case errors.Is(err, ErrNoUser):
-		nu, cerr := a.creds.CreateLocalUser(email, strings.TrimSpace(body.Name))
+		nu, cerr := a.creds.CreateLocalUser(email, clampName(body.Name, maxNameLen))
 		if cerr != nil {
 			c.JSON(http.StatusInternalServerError, H{"error": "could not create account"})
 			return
@@ -120,8 +123,8 @@ func (a *Authenticator) PasswordSignup(c *reqCtx) {
 	case u.EmailVerified || strings.HasPrefix(u.Sub, "bootstrap:"):
 		// Burn a bcrypt hash first so this branch costs ~the same as the new-account path below —
 		// otherwise the response time would reveal that the address is already registered.
-		_, _ = bcrypt.GenerateFromPassword([]byte(body.Password), bcryptCost)
-		existing(u)
+		burned, _ := bcrypt.GenerateFromPassword([]byte(body.Password), bcryptCost)
+		existing(u, string(burned))
 		return
 	}
 
@@ -142,7 +145,7 @@ func (a *Authenticator) PasswordSignup(c *reqCtx) {
 		return
 	}
 	if !set {
-		existing(u)
+		existing(u, hash)
 		return
 	}
 	a.setSignupBinding(c, u.ID, hash)
@@ -169,10 +172,21 @@ func (a *Authenticator) PasswordLogin(c *reqCtx) {
 		c.tooMany("too many attempts — try again shortly")
 		return
 	}
+	// Not an address: no account, and nothing worth an audit row (the body may be a megabyte).
+	if !validEmail(email) {
+		_ = bcrypt.CompareHashAndPassword(dummyHash, []byte(body.Password))
+		c.JSON(http.StatusUnauthorized, H{"error": "incorrect email or password"})
+		return
+	}
 	// Per-account soft lockout from durable failure history (owner exempt). Recovery via the
 	// email-link / reset paths stays open regardless.
 	if !a.isOwnerEmail(email) {
-		if fails, _ := a.creds.RecentFailures(email, time.Now().Add(-15*time.Minute)); fails >= 5 {
+		fails, ferr := a.creds.RecentFailures(email, time.Now().Add(-15*time.Minute))
+		if ferr != nil { // a failed read is not "no failures": the lockout doesn't lapse with the store
+			c.JSON(http.StatusInternalServerError, H{"error": "could not sign in — try again shortly"})
+			return
+		}
+		if fails >= 5 {
 			c.tooMany("too many attempts — use “email me a sign-in link” instead")
 			return
 		}
@@ -309,10 +323,12 @@ func (a *Authenticator) PasswordResetConfirm(c *reqCtx) {
 		return
 	}
 	_ = a.creds.SetEmailVerified(claim.UserID, true)
-	// A reset is how someone takes their account back: every session it had ends, whoever holds it.
+	// A reset is how someone takes their account back: every session it had ends, whoever holds it,
+	// and so does a change of address they may have started.
 	if a.sessions != nil {
 		_ = a.sessions.RevokeAllForUser(u.Sub)
 	}
+	a.cancelPendingEmailChange(claim.UserID)
 	a.creds.RecordAudit(claim.UserID, claim.Email, c.ClientIP(), "password", "reset", true, "")
 	c.JSON(http.StatusOK, H{"ok": true, "message": "Your password has been updated. You can now sign in."})
 }

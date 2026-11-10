@@ -35,7 +35,7 @@ func (a *Authenticator) adminCreateUser(c *reqCtx) {
 			return
 		}
 	}
-	u, err := a.creds.CreateLocalUser(email, strings.TrimSpace(body.Name))
+	u, err := a.creds.CreateLocalUser(email, clampName(body.Name, maxNameLen))
 	if err != nil {
 		if errors.Is(err, ErrEmailConflict) {
 			c.JSON(http.StatusConflict, H{"error": "an account already exists for this email"})
