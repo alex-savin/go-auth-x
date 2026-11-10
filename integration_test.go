@@ -116,6 +116,7 @@ type client struct {
 	h       http.Handler
 	cookies map[string]string
 	remote  string // the request's remote IP, when set
+	bearer  string // an API key sent as the Authorization header, when set
 }
 
 func newClient(t *testing.T, a *authx.Authenticator) *client {
@@ -137,6 +138,9 @@ func (c *client) do(method, path string, body any) *httptest.ResponseRecorder {
 	}
 	if c.remote != "" {
 		r.RemoteAddr = net.JoinHostPort(c.remote, "4242")
+	}
+	if c.bearer != "" {
+		r.Header.Set("Authorization", "Bearer "+c.bearer)
 	}
 	if method != http.MethodGet {
 		if tok := c.cookies["sweep_csrf"]; tok != "" {

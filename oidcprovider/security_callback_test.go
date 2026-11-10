@@ -127,3 +127,21 @@ func TestCallbackRefusesAnImpersonationSession(t *testing.T) {
 	impersonated = false
 	_ = h.code(next) // the user's own session still gets it
 }
+
+// The built-in consent endpoint refuses an impersonation session, as the login step does: once the
+// user's own browser has signed in for a request, an admin impersonating them could otherwise approve
+// it in their name.
+func TestConsentEndpointRefusesAnImpersonationSession(t *testing.T) {
+	impersonated := false
+	h := setup(t, func(c *oidcprovider.Config) { c.Auth = impersonatingWhen{c.Auth, &impersonated} })
+	cid := h.publicClient()
+	h.signIn(h.web, "u@x.com", "correct horse battery staple")
+	id := h.authorize(cid, nil)
+	if res := h.get(h.web, "/oauth/consent?id="+id); res.StatusCode != http.StatusOK {
+		t.Fatalf("the user's own session reads the request: %d", res.StatusCode)
+	}
+	impersonated = true
+	if res := h.get(h.web, "/oauth/consent?id="+id); res.StatusCode != http.StatusForbidden {
+		t.Fatalf("an impersonation session on the consent endpoint = %d, want 403", res.StatusCode)
+	}
+}

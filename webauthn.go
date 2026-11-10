@@ -228,6 +228,11 @@ func (a *Authenticator) WebauthnRegisterFinish(c *reqCtx) {
 		c.JSON(http.StatusUnauthorized, H{"error": "sign in first"})
 		return
 	}
+	// Checked again, not only at begin: the enrolment cookie alone doesn't carry the step-up.
+	if !a.factorChangeAllowed(c, au) {
+		c.JSON(http.StatusForbidden, H{"error": "reauth_required"})
+		return
+	}
 	sd, err := a.getWauthnFlow(c)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, H{"error": "enrolment expired — try again"})

@@ -190,6 +190,21 @@ func (a *Authenticator) adminGuard(c *reqCtx) bool {
 	return false
 }
 
+// adminActor names who an admin request acts as, for the audit trail and the impersonation marker:
+// "apikey:<id>" when an admin key authorizes it — whatever session cookie rides along — else the owner
+// session's subject. "" when neither does (adminGuard refuses the request).
+func (a *Authenticator) adminActor(c *reqCtx) string {
+	if key := bearerToken(c.GetHeader("Authorization")); key != "" {
+		if info, ok := a.lookupAPIKey(key); ok && KeyHasScope(info, "admin") && info.OrgID == "" {
+			return "apikey:" + info.ID
+		}
+	}
+	if sc := a.sessionOf(c); sc != nil && sc.ImpersonatedBy == "" && a.isOwnerSession(sc) {
+		return sc.Subject
+	}
+	return ""
+}
+
 // isOwnerSession reports whether a session is the instance owner's. With a CredentialStore the owner
 // is the LIVE account behind the session — its stored, verified address equal to OWNER_EMAIL, and
 // allowed to sign in — not whatever email the cookie was minted with (an address can be re-pointed or

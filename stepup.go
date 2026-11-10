@@ -18,13 +18,21 @@ const (
 	stepUpCookieTTL = 30 * time.Minute // cookie lifetime; RequireStepUp enforces the actual freshness window
 )
 
+// The factor a step-up was made with. A password re-proves what a stolen password already proves; a
+// TOTP or recovery code proves the second factor.
+const (
+	stepUpPassword = "pwd"
+	stepUpCode     = "otp"
+)
+
 type stepUpClaims struct {
+	Factor string `json:"amr,omitempty"`
 	jwt.RegisteredClaims
 }
 
-func (a *Authenticator) setStepUpCookie(c *reqCtx, sub string) {
+func (a *Authenticator) setStepUpCookie(c *reqCtx, sub, factor string) {
 	now := time.Now()
-	tok, err := signJWT(a.cfg.SessionSecret, stepUpClaims{jwt.RegisteredClaims{
+	tok, err := signJWT(a.cfg.SessionSecret, stepUpClaims{Factor: factor, RegisteredClaims: jwt.RegisteredClaims{
 		Subject:   sub,
 		Audience:  jwt.ClaimStrings{audStepUp},
 		IssuedAt:  jwt.NewNumericDate(now),
@@ -40,6 +48,11 @@ func (a *Authenticator) setStepUpCookie(c *reqCtx, sub string) {
 // issued within maxAge. (Bound to the session subject so a step-up from one account can't elevate
 // another.)
 func (a *Authenticator) StepUpFresh(r *http.Request, maxAge time.Duration) bool {
+	return a.stepUpFresh(r, maxAge, "")
+}
+
+// stepUpFresh is StepUpFresh, and with a factor, only for a step-up made with that factor.
+func (a *Authenticator) stepUpFresh(r *http.Request, maxAge time.Duration, factor string) bool {
 	sc, err := parseSessionMulti(a.verifySecrets(), cookieValue(r, sessionCookie))
 	if err != nil || a.sessionRevoked(sc) {
 		return false
@@ -49,6 +62,9 @@ func (a *Authenticator) StepUpFresh(r *http.Request, maxAge time.Duration) bool 
 		return false
 	}
 	if claims.Subject != sc.Subject || claims.IssuedAt == nil {
+		return false
+	}
+	if factor != "" && claims.Factor != factor {
 		return false
 	}
 	return time.Since(claims.IssuedAt.Time) <= maxAge
@@ -90,15 +106,17 @@ func (a *Authenticator) ReAuth(c *reqCtx) {
 	var body struct{ Password, Code string }
 	_ = c.ShouldBindJSON(&body)
 
-	ok := false
-	if body.Password != "" {
-		if hash, _, perr := a.passwordHash(au.ID); perr == nil {
-			ok = bcrypt.CompareHashAndPassword([]byte(hash), []byte(body.Password)) == nil
+	// A code, when sent, is what is checked: it is the stronger proof, and the step-up records which
+	// factor made it (adding a sign-in method to a TOTP account takes the code — factorChangeAllowed).
+	ok, factor := false, ""
+	if body.Code != "" && a.twoFactor != nil {
+		if info, ierr := a.twoFactor.TOTP(au.ID); ierr == nil && info != nil && info.Enabled {
+			ok, factor = a.verifySecondFactor(au.ID, info, body.Code), stepUpCode
 		}
 	}
-	if !ok && body.Code != "" && a.twoFactor != nil {
-		if info, ierr := a.twoFactor.TOTP(au.ID); ierr == nil && info != nil && info.Enabled {
-			ok = a.verifySecondFactor(au.ID, info, body.Code)
+	if !ok && body.Password != "" {
+		if hash, _, perr := a.passwordHash(au.ID); perr == nil {
+			ok, factor = bcrypt.CompareHashAndPassword([]byte(hash), []byte(body.Password)) == nil, stepUpPassword
 		}
 	}
 	if !ok {
@@ -106,7 +124,7 @@ func (a *Authenticator) ReAuth(c *reqCtx) {
 		c.JSON(http.StatusForbidden, H{"error": "re-authentication failed"})
 		return
 	}
-	a.setStepUpCookie(c, au.Sub)
+	a.setStepUpCookie(c, au.Sub, factor)
 	a.creds.RecordAudit(au.ID, au.Email, c.ClientIP(), "reauth", "reauth", true, "")
 	c.JSON(http.StatusOK, H{"ok": true})
 }

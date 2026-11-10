@@ -42,7 +42,15 @@ func (a *Authenticator) allow2FAAttempt(c *reqCtx, sub string) bool {
 // factorChangeAllowed reports whether the signed-in user may add a sign-in factor (TOTP, a passkey, a
 // first password): with a fresh step-up when they already have a factor /auth/reauth can verify, so a
 // stolen session can't give itself one to step up with. A user with none has only the session.
+//
+// A user with TOTP steps up with a code (or a recovery code), not the password: a passkey completes
+// the second-factor step, so someone holding a stolen session and the password — but never a code —
+// could otherwise re-auth with the password, add a passkey of their own, and have it stand in for the
+// TOTP from then on. A TOTP read that fails counts as having TOTP.
 func (a *Authenticator) factorChangeAllowed(c *reqCtx, au *AuthUser) bool {
+	if has, err := a.userHasTOTP(au.ID); has || err != nil {
+		return a.stepUpFresh(c.Request, accountStepUpMaxAge, stepUpCode)
+	}
 	return !a.hasReauthFactor(au.ID) || a.StepUpFresh(c.Request, accountStepUpMaxAge)
 }
 

@@ -37,6 +37,43 @@ Fixes from a second review, of v0.13.0. Each has a regression test.
   or code in between, the signup's password landed on the verified account. The write is now
   conditional on the account still being unverified, and a mailbox proof verifies and drops the
   unproven password in one step.
+- **Sign-in failed open on store errors** — the funnel discarded the error of its one read of the
+  user and treated any TOTP read error as "no second factor": during a database hiccup a password
+  alone signed in to a TOTP account, a banned user got through the OIDC callback, and the lockout
+  lapsed. Only "not found" now means absent; any other error ends the sign-in. Adding a factor and
+  restarting TOTP enrollment fail closed the same way.
+- **Open redirect after sign-in** — `next=/./\evil.example` passed the check (only the second byte
+  was inspected) and `http.Redirect`'s path cleaning turned it into `/\evil.example`, which browsers
+  read as `//evil.example`: reachable through `/auth/login?next=` and through a genuine magic link
+  mailed with an attacker's `next`. The target is cleaned before it is validated, and a backslash
+  anywhere is refused.
+- **A pending email change outlived the account's recovery** — the confirm link needed only its
+  token: someone with a stolen password could ask for the change, wait out the owner's password
+  reset, and open the link with no session. It is now confirmed in a browser signed in to the
+  account, and a password reset or change or signing out the other sessions cancels it.
+- **Lower severity** — a magic or verify link signs in only the account it was mailed for (not
+  another that holds the address since); signup sets its cookie for registered addresses too (its
+  absence told them apart); display names are capped (a 6 KB name chosen at signup made every later
+  session cookie too large for a browser to keep); every `/auth` body is capped at 1 MiB, including
+  the WebAuthn ceremonies and `form_post` callbacks a library reads; a sign-in attempt for something
+  that isn't an address writes no audit row.
+- **Impersonation sessions could change the account** — the marker was enforced only by the admin
+  API and the OAuth login step. An impersonated user with no password or TOTP has no step-up, so the
+  session could set a password and sign in again as the user, unmarked (as the owner, for the
+  owner's account); it could also delete the account, change its email, add factors, and manage its
+  orgs, all audited as the user's own actions. Under `/auth` an impersonation session now only
+  reads, switches the active org and ends itself; `oidcprovider`'s consent endpoint refuses it too.
+  An impersonation started with an admin key is attributed to the key, not to a session cookie
+  sent along.
+- **A password-only step-up let a session replace TOTP** — a passkey completes the second-factor
+  step, and adding one took any step-up: with a stolen session and the password, never a code,
+  someone could add their own passkey and use it instead of the TOTP from then on. A TOTP user now
+  steps up with a code (or recovery code) to add a sign-in method, checked at passkey enrolment's
+  finish as well as its start.
+- **An operator's password reset left the account signed in** — `POST /auth/admin/users/{id}/password`
+  revoked nothing, and no reset ended the user's OAuth grants. The user's reset, the operator's
+  reset and the operator's session revoke now end the account's sessions, its OAuth grants and a
+  pending change of address.
 
 ### Behavior changes
 
@@ -48,6 +85,17 @@ Fixes from a second review, of v0.13.0. Each has a regression test.
   sign-in methods (see above). Its user signs in through the IdP, or proves the new mailbox by link,
   code or password reset. The account's id and its group and org memberships stay.
 - gormstore: `GroupMembers`, `UserGroups` and `UserOrgGroups` return the users' and groups' own ids.
+- The email-change link (`GET /auth/email/change`) must be opened in a browser signed in to the
+  account; otherwise it redirects to `/login?…&next=` back to itself, unspent.
+- A store error during sign-in is a failed sign-in (`500`), where it used to be read as "no such
+  user" / "no second factor".
+- Display names are cut to 128 characters at signup and in session cookies; passkey labels to 64.
+- An impersonation session gets `403` on every state-changing `/auth` endpoint except
+  `stop-impersonating`, `org/switch` and the sign-in entry points.
+- A user with TOTP re-authenticates with a code (`POST /auth/reauth {"code":…}`) before adding a
+  passkey or a first password; a password-only step-up answers `403 reauth_required` there.
+- A password reset (the user's or an operator's) and `POST /auth/admin/users/{id}/sessions/revoke`
+  also end the user's `oidcprovider` grants.
 
 ### Added
 
@@ -57,6 +105,8 @@ Fixes from a second review, of v0.13.0. Each has a regression test.
   `Authenticator` serializes the two).
 - Store contract: `UpsertExternalUser` moving an existing account to another email must remove what
   signs in to it and end its sessions (documented on `DirectoryStore`; both reference stores do).
+- `TokenRevoker` — an optional `CredentialStore` upgrade (`DeleteTokens(purpose, userID)`), used to
+  cancel pending email changes; both reference stores implement it.
 
 ## [0.13.0] — 2026-11-09
 

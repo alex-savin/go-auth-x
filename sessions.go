@@ -201,3 +201,17 @@ func (a *Authenticator) revokeOtherSessions(sub, keepSID string) (int, error) {
 	}
 	return revoked, nil
 }
+
+// endAllAccess ends everything that acts as u: its sessions, the grants it gave OAuth clients (when
+// the credential store is also the OAuth provider's, as both reference stores are), and a change of
+// address it has pending. For when an account is taken back — a password reset, an operator's reset
+// or sign-out — from whoever may hold a session or a refresh token of it.
+func (a *Authenticator) endAllAccess(u *AuthUser) {
+	if a.sessions != nil {
+		_ = a.sessions.RevokeAllForUser(u.Sub)
+	}
+	if os, ok := a.creds.(OAuthStore); ok {
+		_, _ = os.RevokeOAuthGrants(OAuthGrantFilter{Subject: u.Sub}, time.Now().UTC())
+	}
+	a.cancelPendingEmailChange(u.ID)
+}

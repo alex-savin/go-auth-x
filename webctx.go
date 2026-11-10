@@ -28,8 +28,7 @@ func (a *Authenticator) newCtx(w http.ResponseWriter, r *http.Request) *reqCtx {
 	return &reqCtx{Request: r, w: w, a: a}
 }
 
-// wrap adapts an authx handler to a standard net/http handler.
-// Every handler's body is capped here, whatever reads it — the JSON binder, or a library handed the
+// wrap adapts an authx handler to a standard net/http handler. Every handler's body is capped here, whatever reads it — the JSON binder, or a library handed the
 // request itself (the WebAuthn ceremonies, a provider's form_post callback).
 func (a *Authenticator) wrap(h func(*reqCtx)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {

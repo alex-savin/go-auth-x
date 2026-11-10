@@ -92,7 +92,10 @@ func (a *Authenticator) adminSetPassword(c *reqCtx) {
 		a.adminFail(c, http.StatusInternalServerError, "could not set password", herr)
 		return
 	}
-	a.creds.RecordAudit(id, u.Email, c.ClientIP(), "admin", "set_password", true, "")
+	// An operator resets a password to take an account back: as with the user's own reset, what was
+	// signed in to it ends.
+	a.endAllAccess(u)
+	a.creds.RecordAudit(id, u.Email, c.ClientIP(), "admin", "set_password", true, a.adminActor(c))
 	c.JSON(http.StatusOK, H{"ok": true})
 }
 
@@ -191,14 +194,9 @@ func (a *Authenticator) adminImpersonate(c *reqCtx) {
 	// Resolve a NON-EMPTY impersonator marker. ImpersonatedBy == "" is the "not impersonating" sentinel,
 	// so an API-key caller (no session cookie) must be stamped as apikey:<id> — never left blank, which
 	// would mint a genuine-looking session (and, if the target is the owner, a real owner session).
-	adminSub := ""
-	if sc := a.sessionOf(c); sc != nil {
-		adminSub = sc.Subject
-	} else if key := bearerToken(c.GetHeader("Authorization")); key != "" {
-		if info, ok := a.ValidateAPIKey(key); ok {
-			adminSub = "apikey:" + info.ID
-		}
-	}
+	// It names what authorized the request (adminActor): the key when a key did, not whoever's session
+	// cookie the caller also sent.
+	adminSub := a.adminActor(c)
 	if adminSub == "" {
 		c.JSON(http.StatusForbidden, H{"error": "impersonation requires an identifiable admin actor"})
 		return
@@ -302,6 +300,10 @@ func (a *Authenticator) adminRevokeUserSessions(c *reqCtx) {
 	if err := a.sessions.RevokeAllForUser(u.Sub); err != nil {
 		a.adminFail(c, http.StatusInternalServerError, "could not revoke sessions", err)
 		return
+	}
+	if a.creds != nil {
+		a.endAllAccess(u) // the user's OAuth grants and pending change of address too
+		a.creds.RecordAudit(id, u.Email, c.ClientIP(), "admin", "revoke_sessions", true, a.adminActor(c))
 	}
 	c.JSON(http.StatusOK, H{"ok": true})
 }

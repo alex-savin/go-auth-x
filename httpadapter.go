@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 )
 
@@ -26,7 +27,37 @@ const sessionCtxKey ctxKey = 0
 func (a *Authenticator) Handler() http.Handler {
 	mux := http.NewServeMux()
 	a.routes(mux)
-	return a.CSRFHTTP(mux)
+	return a.CSRFHTTP(a.impersonationGuard(mux))
+}
+
+// impersonationGuard keeps an admin's impersonation session to looking: under /auth it may read, end
+// itself, and switch the active org — not change the account. Its password, email, passkeys, second
+// factor, linked sign-ins, sessions and org memberships are the user's to change, and an impersonator
+// who set a password on the account could sign in to it afterwards as the user, unmarked.
+func (a *Authenticator) impersonationGuard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !impersonationMayCall(r) {
+			if sc := a.sessionOf(a.newCtx(w, r)); sc != nil && sc.ImpersonatedBy != "" {
+				writeJSON(w, http.StatusForbidden, map[string]string{"error": "not available while impersonating a user"})
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// impersonationMayCall reports whether an impersonation session may make this /auth request: reads
+// (but not the two links that act on the account), the sign-in entry points (they act on whoever
+// signs in), ending the impersonation, the active-org switch, and the admin API (which authorizes on
+// its own and refuses the session).
+func impersonationMayCall(r *http.Request) bool {
+	p := path.Clean("/" + r.URL.Path)
+	switch r.Method {
+	case http.MethodGet, http.MethodHead, http.MethodOptions:
+		return p != "/auth/org/invite/accept" && p != "/auth/email/change"
+	}
+	return csrfExempt[p] || isSocialCallback(p) || strings.HasPrefix(p, "/auth/admin/") ||
+		p == "/auth/api/stop-impersonating" || p == "/auth/org/switch" || p == "/auth/logout"
 }
 
 // GateHTTP is net/http middleware that enforces a valid session: public paths pass; missing/invalid

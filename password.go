@@ -324,11 +324,8 @@ func (a *Authenticator) PasswordResetConfirm(c *reqCtx) {
 	}
 	_ = a.creds.SetEmailVerified(claim.UserID, true)
 	// A reset is how someone takes their account back: every session it had ends, whoever holds it,
-	// and so does a change of address they may have started.
-	if a.sessions != nil {
-		_ = a.sessions.RevokeAllForUser(u.Sub)
-	}
-	a.cancelPendingEmailChange(claim.UserID)
+	// and so do the grants it gave OAuth clients and a change of address it has pending.
+	a.endAllAccess(u)
 	a.creds.RecordAudit(claim.UserID, claim.Email, c.ClientIP(), "password", "reset", true, "")
 	c.JSON(http.StatusOK, H{"ok": true, "message": "Your password has been updated. You can now sign in."})
 }

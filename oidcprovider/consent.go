@@ -234,7 +234,8 @@ func (p *Provider) Pending(ctx context.Context, id, subject string) (*Request, e
 }
 
 // Approve records the user's approval and returns where to send the browser next (the provider's
-// callback, which issues the code to the client).
+// callback, which issues the code to the client). subject is the session's: call it for the user's
+// own session only, not an admin's impersonation of them (SessionClaims.ImpersonatedBy != "").
 func (p *Provider) Approve(_ context.Context, id, subject string, d Decision) (string, error) {
 	req, err := p.store.request(id)
 	if err != nil || req.Done || req.Subject == "" || req.Subject != subject {
@@ -320,6 +321,12 @@ func (p *Provider) consentJSON(w http.ResponseWriter, r *http.Request) {
 	sc := p.cfg.Auth.SessionOf(r)
 	if sc == nil {
 		writeErr(w, http.StatusUnauthorized, "unauthenticated", "")
+		return
+	}
+	// As at the login step: an admin impersonating a user doesn't decide on grants in their name. (An
+	// app that calls Approve itself checks SessionClaims.ImpersonatedBy the same way.)
+	if sc.ImpersonatedBy != "" {
+		writeErr(w, http.StatusForbidden, "access_denied", "not while impersonating a user")
 		return
 	}
 	switch r.Method {
