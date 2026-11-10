@@ -5,6 +5,13 @@ Direction and planned work for the library. Authoritative usage/feature docs liv
 
 ## Shipped
 
+### v0.15.0 — Go 1.27 + dependencies · requires Go 1.27
+
+- **Go 1.27 is the minimum** (was 1.26); CI tests on 1.27.x and stable.
+- **Every dependency on its latest version** — `zitadel/oidc` v3.52.0, `golang.org/x/oauth2` v0.38.0,
+  OpenTelemetry v1.47.0, `modernc.org/sqlite` v1.62.0, among others.
+- **Go 1.27 idioms** (`go fix`), and the release workflow runs govulncheck on the current Go.
+
 ### v0.14.0 — security release · behavior changes (see CHANGELOG)
 
 - **Token and account takeover closed** — the `oidcprovider` callback bound to the user's session; a
