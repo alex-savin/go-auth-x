@@ -7,6 +7,267 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Fixes from a second review, of v0.13.0. Each has a regression test.
+
+### Security
+
+- **`oidcprovider` handed a request's code to anyone who knew its id** — `{Prefix}/authorize/callback`
+  checked only that the request was approved. Whoever starts a request knows its id: someone with no
+  session could start one with their own PKCE verifier, send a signed-in user its link, let them
+  approve what is a genuine client (or nothing at all, with no consent screen), then fetch the code
+  from the callback and redeem it — tokens for that user. The callback now issues the code only in a
+  session of the user who signed in for the request (never an impersonation session), and once per
+  request (asking again used to mint another valid code).
+- **gormstore returned membership-row ids as user and group ids** — `GroupMembers`, `UserGroups` and
+  `UserOrgGroups` joined without selecting columns, so the membership row's `id` was scanned into the
+  result. On gormstore, removing a member through SCIM (PUT, PATCH `remove`, PATCH `replace`) answered
+  200 and removed nobody, or someone else; SCIM and the admin API reported the wrong member ids.
+- **The global SCIM mount verified an unproven signup** — an IdP that found someone's signup under a
+  user's address (its create answers 409, so it matches by filter and replaces) marked the row
+  verified with the signup's password still on it, which then signed in — as the owner, for
+  `OWNER_EMAIL`. A replace no longer verifies anything.
+- **A `scim`-scoped key could still become the instance owner** — moving a SCIM account's email kept
+  its sessions and credentials and arrived verified: sign in to an account of your own, move it onto
+  an unregistered `OWNER_EMAIL`, and the session was the owner's. A provisioning source (SCIM, LDAP
+  sync) that moves an account to another address now hands over an account nothing signs in to: its
+  sessions end and its password, passkeys, linked providers, TOTP, pending links and OAuth grants are
+  removed, in the same write.
+- **A signup in flight could outlive the mailbox proof** — signup read "unverified", hashed the
+  password, and wrote it unconditionally; if the address's owner opened their verify link, magic link
+  or code in between, the signup's password landed on the verified account. The write is now
+  conditional on the account still being unverified, and a mailbox proof verifies and drops the
+  unproven password in one step.
+- **Sign-in failed open on store errors** — the funnel discarded the error of its one read of the
+  user and treated any TOTP read error as "no second factor": during a database hiccup a password
+  alone signed in to a TOTP account, a banned user got through the OIDC callback, and the lockout
+  lapsed. Only "not found" now means absent; any other error ends the sign-in. Adding a factor and
+  restarting TOTP enrollment fail closed the same way.
+- **Open redirect after sign-in** — `next=/./\evil.example` passed the check (only the second byte
+  was inspected) and `http.Redirect`'s path cleaning turned it into `/\evil.example`, which browsers
+  read as `//evil.example`: reachable through `/auth/login?next=` and through a genuine magic link
+  mailed with an attacker's `next`. The target is cleaned before it is validated, and a backslash
+  anywhere is refused.
+- **A pending email change outlived the account's recovery** — the confirm link needed only its
+  token: someone with a stolen password could ask for the change, wait out the owner's password
+  reset, and open the link with no session. It is now confirmed in a browser signed in to the
+  account, and a password reset or change or signing out the other sessions cancels it.
+- **Lower severity** — a magic or verify link signs in only the account it was mailed for (not
+  another that holds the address since); signup sets its cookie for registered addresses too (its
+  absence told them apart); display names are capped (a 6 KB name chosen at signup made every later
+  session cookie too large for a browser to keep); every `/auth` body is capped at 1 MiB, including
+  the WebAuthn ceremonies and `form_post` callbacks a library reads; a sign-in attempt for something
+  that isn't an address writes no audit row.
+- **Impersonation sessions could change the account** — the marker was enforced only by the admin
+  API and the OAuth login step. An impersonated user with no password or TOTP has no step-up, so the
+  session could set a password and sign in again as the user, unmarked (as the owner, for the
+  owner's account); it could also delete the account, change its email, add factors, and manage its
+  orgs, all audited as the user's own actions. Under `/auth` an impersonation session now only
+  reads, switches the active org and ends itself; `oidcprovider`'s consent endpoint refuses it too.
+  An impersonation started with an admin key is attributed to the key, not to a session cookie
+  sent along.
+- **A password-only step-up let a session replace TOTP** — a passkey completes the second-factor
+  step, and adding one took any step-up: with a stolen session and the password, never a code,
+  someone could add their own passkey and use it instead of the TOTP from then on. A TOTP user now
+  steps up with a code (or recovery code) to add a sign-in method, checked at passkey enrolment's
+  finish as well as its start.
+- **An operator's password reset left the account signed in** — `POST /auth/admin/users/{id}/password`
+  revoked nothing, and no reset ended the user's OAuth grants. The user's reset, the operator's
+  reset and the operator's session revoke now end the account's sessions, its OAuth grants and a
+  pending change of address.
+- **The app's gate let any API key through** — `GateHTTP` and `RequireGroupsHTTP` admitted every
+  valid global key, whatever its scopes: the `scim` key handed to an IdP, or a key with none, reached
+  every gated route of the app. A key is a principal there only with the new `app` scope
+  (`authx.ScopeApp`) or `*`.
+- **API keys and the owner** — an admin key could mint a wider key that never expires, and could
+  ban, disable, delete, re-password or impersonate the owner. A key now mints only scopes it has
+  and no later expiry than its own, and the owner's account is changed only from an owner session.
+- **Org admins could grant the app's own roles** — only the literal `owner` role was protected, so
+  an admin could give themselves, a member or an invited address a role the app gates like the
+  owner's (the README's own `billing`). Roles other than `admin` and `member` are an owner's to
+  grant, unless `Config.OrgAdminMayGrant` says otherwise; an invite is re-checked the same way when
+  it is accepted.
+- **Lower severity** — `ban` and `disabled` refuse a body without their flag (a malformed one read
+  as `false` and lifted the ban) and answer 404 for an unknown user; a group membership can't be
+  made for a user or group that doesn't exist (the next account with that id inherited it), and the
+  global group verbs refuse an org's groups; a banned or disabled manager's pending invites grant
+  nothing; a sole owner can't leave an org ownerless by deleting their account; a key that
+  authorizes nothing no longer switches CSRF off for a session cookie sent with it; every
+  state-changing admin call is audited with who made it.
+- **SCIM acknowledged deprovisions that failed** — `PATCH active=false` (what Entra and Okta send)
+  and a create with `active:false` answered 200/201 when the store write failed, and a failed group
+  member removal was only logged: the IdP never retried, and the leaver kept their account or
+  group. These now answer 5xx. (A failed member *add* stays best-effort and logged.)
+- **The global `scim` scope reached accounts SCIM didn't provision** — a scim-only key could disable
+  the owner's local account, and a replace that left `active` out re-enabled an account an operator
+  had disabled. SCIM activates and deactivates only accounts it provisioned; a replace without
+  `active` leaves the state alone. (Groups remain fully writable by the scope — see the README.)
+- **LDAP sync never removed a group membership** — a user taken out of an LDAP group, or whose
+  group left the directory, kept the directory group and what it gates. Memberships of synced users
+  that LDAP no longer lists are now removed (`Config.KeepStaleMemberships` restores the old
+  behavior).
+- **LDAP: a shared uid re-pointed an account** — the account `ldap:<uid>` followed whichever entry
+  came last, so an entry able to set its own uid attribute to an administrator's moved that account
+  onto its own mailbox. A uid found on more than one entry is synced from none and reported.
+- **Lower severity** — a SCIM create for a userName that already has an account is a 409 (it
+  re-pointed the account, past `If-Match`); a group PATCH this server can't apply is a 400, not a
+  silent 200, and `members[value ne "1"]` no longer removes user 1; the SCIM mount refuses an empty
+  or non-Bearer token before its validator sees it; LDAP DNs are normalized without unescaping
+  (`cn=a\,ou\=b` is not `cn=a,ou=b`).
+- **`oidcprovider` told callers why a client lookup failed** — on the token endpoint a
+  metadata-document `client_id` such as `https://db.internal/x` was answered with "db.internal
+  resolves to 10.0.0.5, which is not public": an oracle for internal hostnames. A failed lookup is
+  now a bare `invalid_client`; the reason is logged.
+- **`oidcprovider` stored unbounded authorization requests** — anyone who knew a client id could
+  have `/authorize` keep megabytes of `state` per request, unthrottled, until an hourly clean-up.
+  Parameters are capped, requests are limited per address, and unfinished ones are removed within
+  minutes of expiring.
+- **Lower severity (`oidcprovider`)** — `/revoke` no longer acts on the store's own keys (a refresh
+  token's hash or an access token's row id, what a copy of the database holds, revoked grants); a
+  signing key stored in the clear is ignored unless `AcceptPlaintextKeys` asks for it (one written
+  row planted a signing key); `ReplaceKeys` drops retired keys at once after a leak (`RotateKeys`
+  keeps them trusted for `KeyGrace`); a client's self-declared name and links are stored without
+  markup characters; the metadata no longer advertises RP-initiated logout or client assertions the
+  provider doesn't do. Reference stores: reclaiming an unverified account ends its sessions
+  (gormstore) and removes its OAuth records (both), as deleting it does.
+- **The owner's password had no failed-attempt threshold** — exempt from the lockout, it was
+  guessable at the per-IP rate from every address an attacker has (and from one, wherever a client
+  on a private network picks its own `X-Forwarded-For`). The owner's password login now pauses
+  after 30 failures in 15 minutes when a mailer is configured (the link and reset paths stay open);
+  without one the owner is still never locked out.
+- **Lower severity** — sign-out is available as `POST /auth/logout` with the CSRF token, and `GET`
+  can be turned off (any page could sign a user out); cookies can be sent under `__Host-` names
+  (opt-in), which a sibling subdomain can't plant; the change-of-address request mails off the
+  request path (its duration told a taken address from a free one); the SMTP sender has a deadline;
+  logout clears the step-up cookie; the default trusted proxies include the IPv6 private range.
+- **A social sign-in replaced provisioned accounts** — a provider-verified email that matched an
+  unverified account an org's SCIM (or SCIM, or LDAP) had provisioned deleted it like a signup
+  squatter's and made a new one: the person lost their org and group memberships, and the IdP could
+  no longer update or deprovision them. Such an account is now kept — verified, linked, with nothing
+  that signs in carried over. A self-signup's unverified row is still replaced.
+- **A disconnected provider reconnected itself** — the "disconnected" record was spent by the first
+  reconnect and could not be made again, so after a second disconnect the provider linked back by
+  email; and reconnecting was any visit to the provider's login in a signed-in browser, which any
+  page can cause. The record now stays, and reconnecting takes
+  `POST /auth/api/identities/{provider}/connect` (session + CSRF) first.
+- **Lower severity** — emails are keyed without folding a non-ASCII letter into an ASCII one
+  (`vİctim@x.com` was `victim@x.com`; `authx.NormalizeEmail`, used by both stores); Microsoft's
+  consumer tenant given by its id is treated as the multi-tenant endpoint it is; a login flow is
+  finished only at the provider it was started with; a WebAuthn challenge is single-use (a captured
+  finish request replayed within five minutes signed in again); a banned or disabled user's cookie
+  drives no account endpoint even without a `SessionStore`; a TOTP code checked by `/auth/reauth`
+  draws on the same attempt budget as `/auth/2fa/verify`; recovery codes are stored before TOTP is
+  switched on; an org invite's mailbox proof drops an unproven password like a sign-in link's; API
+  key groups and scopes can't contain a comma or whitespace.
+
+### Behavior changes
+
+- `oidcprovider`: `{Prefix}/authorize/callback` answers 403 without the session of the user who
+  signed in for the request, and 400 once the request's code was issued. Send the user's browser to
+  the URL `Approve` returns (as the README has it); a server-side fetch of it no longer works.
+- Global SCIM: `PUT /Users/{id}` never marks an account verified.
+- SCIM and LDAP sync: changing the email of an account they provisioned signs it out and removes its
+  sign-in methods (see above). Its user signs in through the IdP, or proves the new mailbox by link,
+  code or password reset. The account's id and its group and org memberships stay.
+- gormstore: `GroupMembers`, `UserGroups` and `UserOrgGroups` return the users' and groups' own ids.
+- The email-change link (`GET /auth/email/change`) must be opened in a browser signed in to the
+  account; otherwise it redirects to `/login?…&next=` back to itself, unspent.
+- A store error during sign-in is a failed sign-in (`500`), where it used to be read as "no such
+  user" / "no second factor".
+- Display names are cut to 128 characters at signup and in session cookies; passkey labels to 64.
+- An impersonation session gets `403` on every state-changing `/auth` endpoint except
+  `stop-impersonating`, `org/switch` and the sign-in entry points.
+- A user with TOTP re-authenticates with a code (`POST /auth/reauth {"code":…}`) before adding a
+  passkey or a first password; a password-only step-up answers `403 reauth_required` there.
+- A password reset (the user's or an operator's) and `POST /auth/admin/users/{id}/sessions/revoke`
+  also end the user's `oidcprovider` grants.
+- **API keys need the `app` scope to pass `GateHTTP` / `RequireGroupsHTTP`.** Add `"app"` to the
+  scopes of keys that call your own gated routes; keys with only `admin`, `scim` or no scope stop
+  passing (their groups stop counting too).
+- A key minting a key (`POST /auth/admin/apikeys`) is refused scopes it lacks (`403`) and an expiry
+  later than its own; a key it mints without an expiry gets the minter's. Org-bound keys keep their
+  free choice of scopes.
+- An admin key gets `403` on `disabled`, `ban`, `password`, `impersonate` and `DELETE` for the
+  owner's account.
+- An org admin gets `403` granting or inviting with a custom role (set `Config.OrgAdminMayGrant` to
+  allow some).
+- `POST /auth/admin/users/{id}/ban` and `/disabled` require `banned` / `disabled` in the body
+  (`400` otherwise) and answer `404` for an unknown user; the global group-member verbs answer
+  `404` for an unknown user or an org's group.
+- `DELETE /auth/api/account` answers `409` for the sole owner of an organization.
+- gormstore: `AddUserToGroup` returns `ErrNoUser` / `ErrNoGroup` for ids that name no row; the
+  batch form skips such users.
+- Global SCIM: `DELETE`, `PATCH active` and a `PUT` that changes `active` answer `400 mutability`
+  for an account SCIM didn't provision; a `PUT` without `active` no longer reactivates. Per-org SCIM
+  (`NewOrgScopedDirectory`) is unchanged: deactivating there removes the member from the org.
+- SCIM: a failed deactivation or member removal answers `500`; `POST /Users` with an existing
+  userName answers `409`; unsupported group PATCH forms answer `400`.
+- ldapsync removes memberships LDAP no longer lists (synced `ldap:` users only; not when the user or
+  group search comes back empty) and skips a uid that several entries share. `Result.Removed`
+  counts the removals.
+- `oidcprovider`: `/authorize` answers `400` for oversized parameters (`state` over 2048 bytes,
+  `nonce` over 512, …) and `429` past 120 requests per address in 10 minutes; a failed client lookup
+  is always `invalid_client`; `/revoke` with something that isn't a bearer value revokes nothing;
+  `end_session_endpoint`, `claims_supported` and the client-assertion algorithms are gone from the
+  metadata.
+- `oidcprovider`: a signing key stored unsealed (a database last used before v0.11) is ignored and
+  replaced unless `Config.AcceptPlaintextKeys` is set for the first start.
+- The owner's password login answers `429` after 30 failed attempts in 15 minutes when a mailer is
+  configured.
+- The default `TRUSTED_PROXIES` also trusts `fc00::/7`.
+- Reconnecting a provider the user disconnected: `POST /auth/api/identities/{provider}/connect`,
+  then send the browser to the `next` it returns. Visiting the provider's login while signed in no
+  longer reconnects it (`409`).
+- A social sign-in on a provider-verified email that matches an unverified SCIM- or LDAP-provisioned
+  account signs in to that account (it used to be replaced by a new one).
+- `MICROSOFT_TENANT=9188040d-6c67-4c5b-b112-36a304b66dad` (personal accounts) is refused like
+  `consumers`.
+- Email addresses with a letter that Unicode lower-cases to ASCII (`İ`, the Kelvin sign) are no
+  longer the same account as their ASCII look-alike. Custom stores should key emails with
+  `authx.NormalizeEmail`.
+
+### Added
+
+- `SignupStore` — an optional `CredentialStore` upgrade (`SetPasswordHashIfUnverified`,
+  `VerifyEmailKeepingPassword`) that makes the signup write and the mailbox proof atomic on every
+  replica; both reference stores implement it. A store without it is covered within one process (the
+  `Authenticator` serializes the two).
+- Store contract: `UpsertExternalUser` moving an existing account to another email must remove what
+  signs in to it and end its sessions (documented on `DirectoryStore`; both reference stores do).
+- `TokenRevoker` — an optional `CredentialStore` upgrade (`DeleteTokens(purpose, userID)`), used to
+  cancel pending email changes; both reference stores implement it.
+- `authx.ScopeApp` (`"app"`), `Config.OrgAdminMayGrant`.
+- An audit row (`method` `admin`, the route as the action, the actor as the detail) for every
+  state-changing admin API call.
+- `ldapsync.Config`: `KeepStaleMemberships`, `OwnGroupsOnly` (leave same-named groups the sync
+  didn't create alone) and `MaxDeprovision` (cap on users one run may disable).
+- `oidcprovider`: `Provider.ReplaceKeys`, `Config.AcceptPlaintextKeys`.
+- `POST /auth/logout`; `Config.DisableGetLogout` (`LOGOUT_POST_ONLY`).
+- `Config.HostCookies` (`COOKIE_HOST_PREFIX`): `__Host-` cookie names, needs an https `APP_URL`;
+  `Authenticator.CSRFCookieName()` and `csrfCookie` in `GET /auth/config`.
+- `POST /auth/api/identities/{provider}/connect`; `authx.NormalizeEmail`.
+- `SECURITY.md` (how to report a vulnerability); Dependabot for Go modules and workflow actions;
+  workflow actions pinned to commits; the release job runs the race detector and govulncheck.
+
+### Fixed
+
+- Documentation: the README's admin API table lists the `/auth/admin/orgs` routes, its install
+  table the `oidcprovider` package; the API-key scopes, the gate's fixed public paths, what the
+  `scim` scope can do, and the limits of sessions without a `SessionStore` are spelled out; the
+  claims that `X-Forwarded-For` "can't be spoofed" and that metadata fetches follow https redirects
+  are corrected.
+- `examples/demo`: `/api/notes` verifies an OAuth access token for the resource it advertises, and
+  encodes its answer as JSON.
+
+### Known limitations
+
+- `oidcprovider`: presenting an already-used authorization code or refresh token ends its grant
+  without client authentication (RFC 6749 §4.1.2, OAuth Security BCP): someone who finds a spent
+  code in a log can't get tokens, but can end that connection.
+- `oidcprovider`: a user can still be led to approve an authorization request someone else started;
+  the code then goes only to the client's registered redirect, in the user's own browser.
+- Without a `SessionStore`, sessions are stateless: logout, a password reset, a ban and deleting the
+  account don't end a cookie someone already holds.
+
 ## [0.13.0] — 2026-11-09
 
 A security release. An audit (seven independent reviews, every finding proven with a test) found

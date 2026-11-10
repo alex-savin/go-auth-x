@@ -98,6 +98,7 @@ func (a *Authenticator) AccountSetPassword(c *reqCtx) {
 	if sc := a.sessionOf(c); sc != nil {
 		a.revokeOtherSessions(au.Sub, sc.SID)
 	}
+	a.cancelPendingEmailChange(au.ID)
 	a.creds.RecordAudit(au.ID, au.Email, c.ClientIP(), "password", "password_changed", true, "")
 	c.JSON(http.StatusOK, H{"ok": true})
 }
@@ -202,7 +203,13 @@ func (a *Authenticator) OAuthUnlink(c *reqCtx) {
 	}
 	a.creds.RecordAudit(au.ID, au.Email, c.ClientIP(), "oauth", "unlinked", true, provider)
 	// Unlinked is disconnected: the provider no longer signs in to this account by email until the user
-	// reconnects it while signed in (see resolveSocialUserFor). A mark already there is fine.
-	_ = a.creds.CreateToken(purposeUnlinkedOAuth, au.ID, au.Email, unlinkMark(au.ID, provider), time.Now().AddDate(100, 0, 0))
+	// reconnects it (OAuthConnect; see resolveSocialUserFor). The mark from an earlier disconnect is
+	// still there; a first one is written, and failing to write it is failing to disconnect.
+	if _, perr := a.creds.PeekToken(purposeUnlinkedOAuth, unlinkMark(au.ID, provider)); perr != nil {
+		if cerr := a.creds.CreateToken(purposeUnlinkedOAuth, au.ID, au.Email, unlinkMark(au.ID, provider), time.Now().AddDate(100, 0, 0)); cerr != nil {
+			c.JSON(http.StatusInternalServerError, H{"error": "the sign-in was removed, but could not be marked disconnected — try again"})
+			return
+		}
+	}
 	c.JSON(http.StatusOK, H{"ok": true})
 }

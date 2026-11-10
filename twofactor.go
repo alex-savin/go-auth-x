@@ -58,13 +58,21 @@ func (a *Authenticator) SetTwoFactorStore(s TwoFactorStore) {
 // TwoFactorEnabled reports whether 2FA is wired at all (a store is set).
 func (a *Authenticator) TwoFactorEnabled() bool { return a != nil && a.twoFactor != nil }
 
-// userHasTOTP reports whether the user has CONFIRMED TOTP (so login must challenge for a code).
-func (a *Authenticator) userHasTOTP(userID string) bool {
+// userHasTOTP reports whether the user has CONFIRMED TOTP (so login must challenge for a code). Only
+// ErrNoCredential means "none": a store error is returned, so a failed read never reads as "no second
+// factor" and lets a password alone sign in.
+func (a *Authenticator) userHasTOTP(userID string) (bool, error) {
 	if a.twoFactor == nil {
-		return false
+		return false, nil
 	}
 	info, err := a.twoFactor.TOTP(userID)
-	return err == nil && info != nil && info.Enabled
+	if err != nil {
+		if errors.Is(err, ErrNoCredential) {
+			return false, nil
+		}
+		return false, err
+	}
+	return info != nil && info.Enabled, nil
 }
 
 // --- recovery codes ---
@@ -132,7 +140,14 @@ func (a *Authenticator) completePendingLogin(c *reqCtx, pc *pendingClaims) error
 	}
 	var uid string
 	if a.creds != nil {
-		if u, e := a.creds.UserBySub(pc.Subject); e == nil {
+		u, e := a.creds.UserBySub(pc.Subject)
+		if e != nil && !errors.Is(e, ErrNoUser) {
+			return e // as in completeLogin: a failed read ends the login
+		}
+		if blocked, msg := u.loginBlocked(); blocked {
+			return loginBlockedError{msg}
+		}
+		if u != nil {
 			uid = u.ID
 		}
 	}

@@ -89,25 +89,13 @@ func (a *Authenticator) PasswordSignup(c *reqCtx) {
 	}
 	const generic = "Check your email to finish creating your account."
 
-	u, err := a.creds.UserByEmail(email)
-	switch {
-	case errors.Is(err, ErrNoUser):
-		nu, cerr := a.creds.CreateLocalUser(email, strings.TrimSpace(body.Name))
-		if cerr != nil {
-			c.JSON(http.StatusInternalServerError, H{"error": "could not create account"})
-			return
-		}
-		u = nu
-	case err != nil:
-		c.JSON(http.StatusInternalServerError, H{"error": "could not create account"})
-		return
-	case u.EmailVerified || strings.HasPrefix(u.Sub, "bootstrap:"):
-		// Account already exists and is verified (or is an operator-seeded placeholder its owner
-		// claims by signing in): do NOT touch its password. Nudge them to
-		// sign in / reset instead, and still answer generically. Burn a bcrypt hash first so this
-		// branch costs ~the same as the new-account path below — otherwise the response time would
-		// reveal that the address is already registered.
-		_, _ = bcrypt.GenerateFromPassword([]byte(body.Password), bcryptCost)
+	// existing answers a signup for an account that is verified (or an operator-seeded placeholder its
+	// owner claims by signing in): its password is NOT touched. Nudge them to sign in / reset instead,
+	// and still answer generically.
+	existing := func(u *AuthUser, unusedHash string) {
+		// The same cookie a new signup gets, bound to a hash that was never stored (so it keeps no
+		// password at verify): its absence would tell a registered address from a new one.
+		a.setSignupBinding(c, u.ID, unusedHash)
 		base := a.baseURL()
 		if a.acctLimiter == nil || a.acctLimiter.Allow("signup-mail:"+email) { // no mail flood to one address
 			_ = a.sendAuthEmail(email, "You already have an account",
@@ -118,6 +106,25 @@ func (a *Authenticator) PasswordSignup(c *reqCtx) {
 		}
 		a.creds.RecordAudit(u.ID, email, c.ClientIP(), "password", "signup_existing", false, "")
 		c.JSON(http.StatusOK, H{"ok": true, "message": generic})
+	}
+
+	u, err := a.creds.UserByEmail(email)
+	switch {
+	case errors.Is(err, ErrNoUser):
+		nu, cerr := a.creds.CreateLocalUser(email, clampName(body.Name, maxNameLen))
+		if cerr != nil {
+			c.JSON(http.StatusInternalServerError, H{"error": "could not create account"})
+			return
+		}
+		u = nu
+	case err != nil:
+		c.JSON(http.StatusInternalServerError, H{"error": "could not create account"})
+		return
+	case u.EmailVerified || strings.HasPrefix(u.Sub, "bootstrap:"):
+		// Burn a bcrypt hash first so this branch costs ~the same as the new-account path below —
+		// otherwise the response time would reveal that the address is already registered.
+		burned, _ := bcrypt.GenerateFromPassword([]byte(body.Password), bcryptCost)
+		existing(u, string(burned))
 		return
 	}
 
@@ -130,8 +137,15 @@ func (a *Authenticator) PasswordSignup(c *reqCtx) {
 		c.JSON(http.StatusInternalServerError, H{"error": "could not create account"})
 		return
 	}
-	if err := a.creds.SetPasswordHash(u.ID, hash, "bcrypt"); err != nil {
+	// "Still unverified" was read before the hashing above, long enough ago for the address's owner
+	// to have proven the mailbox since: the write is conditional on it still being true.
+	set, err := a.setSignupPassword(u.ID, email, hash)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, H{"error": "could not create account"})
+		return
+	}
+	if !set {
+		existing(u, hash)
 		return
 	}
 	a.setSignupBinding(c, u.ID, hash)
@@ -141,6 +155,13 @@ func (a *Authenticator) PasswordSignup(c *reqCtx) {
 	a.creds.RecordAudit(u.ID, email, c.ClientIP(), "password", "signup", true, "")
 	c.JSON(http.StatusOK, H{"ok": true, "message": generic})
 }
+
+// Failed password sign-ins in 15 minutes before the account's password login pauses: for everyone, and
+// for the owner (see PasswordLogin).
+const (
+	lockoutFailures      = 5
+	ownerLockoutFailures = 30
+)
 
 // PasswordLogin (POST /auth/password/login) verifies email+password and starts a session.
 func (a *Authenticator) PasswordLogin(c *reqCtx) {
@@ -158,10 +179,31 @@ func (a *Authenticator) PasswordLogin(c *reqCtx) {
 		c.tooMany("too many attempts — try again shortly")
 		return
 	}
-	// Per-account soft lockout from durable failure history (owner exempt). Recovery via the
-	// email-link / reset paths stays open regardless.
-	if !a.isOwnerEmail(email) {
-		if fails, _ := a.creds.RecentFailures(email, time.Now().Add(-15*time.Minute)); fails >= 5 {
+	// Not an address: no account, and nothing worth an audit row (the body may be a megabyte).
+	if !validEmail(email) {
+		_ = bcrypt.CompareHashAndPassword(dummyHash, []byte(body.Password))
+		c.JSON(http.StatusUnauthorized, H{"error": "incorrect email or password"})
+		return
+	}
+	// Per-account soft lockout from durable failure history. Recovery via the email-link / reset paths
+	// stays open regardless. The owner gets a higher threshold, and only where that recovery exists (a
+	// mailer): locked out with no other way in, the instance would have no owner — but with no
+	// threshold at all, the per-IP limit was all that stood between the owner's password and anyone
+	// with enough addresses.
+	threshold := lockoutFailures
+	if a.isOwnerEmail(email) {
+		threshold = ownerLockoutFailures
+		if a.email == nil || !a.email.Configured() {
+			threshold = 0
+		}
+	}
+	if threshold > 0 {
+		fails, ferr := a.creds.RecentFailures(email, time.Now().Add(-15*time.Minute))
+		if ferr != nil { // a failed read is not "no failures": the lockout doesn't lapse with the store
+			c.JSON(http.StatusInternalServerError, H{"error": "could not sign in — try again shortly"})
+			return
+		}
+		if fails >= threshold {
 			c.tooMany("too many attempts — use “email me a sign-in link” instead")
 			return
 		}
@@ -298,10 +340,9 @@ func (a *Authenticator) PasswordResetConfirm(c *reqCtx) {
 		return
 	}
 	_ = a.creds.SetEmailVerified(claim.UserID, true)
-	// A reset is how someone takes their account back: every session it had ends, whoever holds it.
-	if a.sessions != nil {
-		_ = a.sessions.RevokeAllForUser(u.Sub)
-	}
+	// A reset is how someone takes their account back: every session it had ends, whoever holds it,
+	// and so do the grants it gave OAuth clients and a change of address it has pending.
+	a.endAllAccess(u)
 	a.creds.RecordAudit(claim.UserID, claim.Email, c.ClientIP(), "password", "reset", true, "")
 	c.JSON(http.StatusOK, H{"ok": true, "message": "Your password has been updated. You can now sign in."})
 }

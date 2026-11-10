@@ -116,6 +116,11 @@ type Config struct {
 	Logger *slog.Logger
 	// Insecure allows an http issuer and http redirect URIs (development only).
 	Insecure bool
+	// AcceptPlaintextKeys lets the provider use signing keys stored unsealed, and seals them. Only a
+	// database last used by a version before v0.11 holds any: set it for the first start after such
+	// an upgrade. Off, an unsealed key is ignored (a new one is made if none is left) — so that
+	// someone able to write a row to the store can't plant a key the provider then signs with.
+	AcceptPlaintextKeys bool
 }
 
 const (
@@ -133,6 +138,7 @@ type Provider struct {
 	prefix string
 	mux    *http.ServeMux
 	reg    *limiter
+	authz  *limiter // authorization requests started, per address
 
 	now func() time.Time // the clock of key rotation and the metadata cache (tests replace it)
 
@@ -235,6 +241,8 @@ func New(ctx context.Context, cfg Config) (*Provider, error) {
 	mux := http.NewServeMux()
 	mux.HandleFunc(p.prefix+"/authorize", p.authorize)
 	mux.HandleFunc(p.prefix+"/login", p.login)
+	mux.HandleFunc(p.prefix+"/authorize/callback", p.callback)
+	p.authz = newLimiter(authorizeRequests, authorizeRequestsPer)
 	mux.HandleFunc(p.prefix+"/consent", p.consentJSON)
 	if cfg.Registration {
 		mux.HandleFunc(p.prefix+"/register", p.register)
@@ -266,6 +274,9 @@ func corsOptions() *cors.Options {
 func (p *Provider) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
+		if r.Body != nil { // no endpoint here takes more (a token request, a registration document)
+			r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+		}
 		// The client's rate-limit key rides along, for the limits deep inside zitadel's handlers
 		// (fetching a metadata document happens wherever a client is looked up).
 		key := authx.RateLimitKey(p.cfg.Auth.ClientIP(r))
@@ -285,9 +296,11 @@ func (p *Provider) Issuer() string { return p.cfg.Issuer }
 func (p *Provider) Close() { p.once.Do(func() { close(p.stop) }) }
 
 func (p *Provider) gc() {
-	t := time.NewTicker(time.Hour)
+	// Every five minutes: an authorization request nobody finished is gone soon after its ten minutes,
+	// not up to an hour later. The signing keys' upkeep stays hourly.
+	t := time.NewTicker(5 * time.Minute)
 	defer t.Stop()
-	for {
+	for tick := 1; ; tick++ {
 		select {
 		case <-p.stop:
 			return
@@ -296,10 +309,13 @@ func (p *Provider) gc() {
 			if err := p.cfg.Store.DeleteExpiredOAuth(now, now.Add(-authRequestTTL), now.Add(-p.cfg.UnusedClientTTL)); err != nil {
 				p.cfg.Logger.Warn("oidcprovider: clean-up failed", "err", err)
 			}
-			if err := p.store.rotateKeys(false); err != nil {
-				p.cfg.Logger.Warn("oidcprovider: signing-key upkeep failed", "err", err)
+			if tick%12 == 0 {
+				if err := p.store.rotateKeys(false); err != nil {
+					p.cfg.Logger.Warn("oidcprovider: signing-key upkeep failed", "err", err)
+				}
 			}
 			p.reg.sweep(now)
+			p.authz.sweep(now)
 			p.cimd.limit.sweep(now)
 		}
 	}

@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -233,11 +234,122 @@ func TestUnlinkedProviderStaysDisconnected(t *testing.T) {
 	if w := idp.socialSignIn(t, newClient(t, a), "gitlab", gl); w.Code != http.StatusConflict {
 		t.Fatalf("the disconnected provider signing in = %d, want 409", w.Code)
 	}
-	// Reconnecting from a signed-in session works, and then it signs in again.
-	if w := idp.socialSignIn(t, c, "gitlab", gl); w.Code != http.StatusFound {
-		t.Fatalf("reconnecting while signed in = %d %s", w.Code, w.Body.String())
+	// Being signed in is not asking to reconnect: any page can send a signed-in browser to the
+	// provider's login.
+	if w := idp.socialSignIn(t, c, "gitlab", gl); w.Code != http.StatusConflict {
+		t.Fatalf("the provider's login in a signed-in browser, unasked = %d, want 409", w.Code)
 	}
+	// Reconnecting is the user's explicit, CSRF-checked request; then it signs in again.
+	reconnect := func() {
+		t.Helper()
+		if w := c.do("POST", "/auth/api/identities/gitlab/connect", nil); w.Code != http.StatusOK || decode(t, w)["next"] != "/auth/social/gitlab/login" {
+			t.Fatalf("connect = %d %s", w.Code, w.Body.String())
+		}
+		if w := idp.socialSignIn(t, c, "gitlab", gl); w.Code != http.StatusFound {
+			t.Fatalf("reconnecting = %d %s", w.Code, w.Body.String())
+		}
+	}
+	reconnect()
 	if w := idp.socialSignIn(t, newClient(t, a), "gitlab", gl); w.Code != http.StatusFound {
 		t.Fatalf("after reconnecting, gitlab sign-in = %d", w.Code)
+	}
+	// Disconnected a second time, it stays disconnected again (the record of the first disconnect
+	// used to be spent by the reconnect, and could not be made again).
+	if w := c.do("DELETE", "/auth/api/identities/gitlab", nil); w.Code != http.StatusOK {
+		t.Fatalf("second unlink = %d %s", w.Code, w.Body.String())
+	}
+	if w := idp.socialSignIn(t, newClient(t, a), "gitlab", gl); w.Code != http.StatusConflict {
+		t.Fatalf("after a second disconnect the provider signs in again: %d", w.Code)
+	}
+	reconnect()
+}
+
+// midSignupStore runs then() once, right after a read of a user by email: the moment a signup has
+// read "unverified" and is about to spend a bcrypt before it writes its password.
+type midSignupStore struct {
+	authx.CredentialStore
+	armed atomic.Bool
+	then  func()
+}
+
+func (s *midSignupStore) UserByEmail(email string) (*authx.AuthUser, error) {
+	u, err := s.CredentialStore.UserByEmail(email)
+	if s.armed.CompareAndSwap(true, false) {
+		s.then()
+	}
+	return u, err
+}
+
+// atomicMidSignupStore is midSignupStore over a store that makes the signup writes atomic itself.
+type atomicMidSignupStore struct {
+	*midSignupStore
+	authx.SignupStore
+}
+
+// A signup in flight when the address's owner proves the mailbox doesn't leave its password on the
+// account. The signup read "unverified" before hashing; written unconditionally afterwards, its
+// password would sit on a verified account. Both with a store that makes the write conditional
+// (SignupStore) and with one that leaves it to the Authenticator.
+func TestSignupInFlightDuringMailboxProofSetsNoPassword(t *testing.T) {
+	for _, kind := range []string{"store with atomic signup writes", "store without them"} {
+		t.Run(kind, func(t *testing.T) {
+			base := memory.New()
+			mid := &midSignupStore{CredentialStore: base}
+			var creds authx.CredentialStore = mid
+			if kind == "store with atomic signup writes" {
+				creds = atomicMidSignupStore{mid, base}
+			}
+			if _, atomic := creds.(authx.SignupStore); atomic != (kind == "store with atomic signup writes") {
+				t.Fatalf("the test store is the wrong kind: SignupStore = %v", atomic)
+			}
+			m := &capMailer{}
+			a, err := authx.New(context.Background(), authx.Config{
+				SessionSecret: []byte(testSecret), AppURL: "https://app.example.com", OwnerEmail: "owner@example.com",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = a.Close() })
+			a.SetCredentialStore(creds)
+			a.SetDirectoryStore(base)
+			a.SetSessionStore(base)
+			a.SetMailer(m)
+			a.SetAuthorizer(base.Authorizer())
+			a.SetLocalEnabled(true)
+
+			// The owner signs up for their own address and gets the verify link.
+			owner := newClient(t, a)
+			if w := owner.do("POST", "/auth/password/signup", map[string]any{"email": "victim@x.com", "password": "owners-own-password-1"}); w.Code != http.StatusOK {
+				t.Fatalf("owner signup = %d", w.Code)
+			}
+			tok := tokenRe.FindStringSubmatch(m.waitFor(t, "/auth/email/verify").text)[1]
+
+			// Someone else's signup for the address reads the account, and the owner opens the link
+			// before that signup writes.
+			mid.then = func() {
+				owner.do("GET", "/auth/email/verify?token="+tok, nil)
+				if owner.cookies["sweep_session"] == "" {
+					t.Error("the owner's verify link must sign them in")
+				}
+			}
+			mid.armed.Store(true)
+			if w := newClient(t, a).do("POST", "/auth/password/signup", map[string]any{"email": "victim@x.com", "password": squatterPW}); w.Code != http.StatusOK {
+				t.Fatalf("the other signup = %d", w.Code)
+			}
+			if mid.armed.Load() {
+				t.Fatal("the signup never read the account")
+			}
+
+			if u, _ := base.UserByEmail("victim@x.com"); !u.EmailVerified {
+				t.Fatal("the owner's link must have verified the account")
+			}
+			if code := newClient(t, a).loginCode("victim@x.com", squatterPW); code == http.StatusOK {
+				t.Fatal("a signup that finished after the mailbox was proven left its password on the account")
+			}
+			// The owner's own password — set and verified in one browser — is the one that stays.
+			if code := newClient(t, a).loginCode("victim@x.com", "owners-own-password-1"); code != http.StatusOK {
+				t.Fatalf("the owner's own password = %d", code)
+			}
+		})
 	}
 }

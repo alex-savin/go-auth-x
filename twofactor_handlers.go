@@ -1,6 +1,7 @@
 package authx
 
 import (
+	"errors"
 	"net/http"
 	"net/url"
 	"time"
@@ -41,7 +42,15 @@ func (a *Authenticator) allow2FAAttempt(c *reqCtx, sub string) bool {
 // factorChangeAllowed reports whether the signed-in user may add a sign-in factor (TOTP, a passkey, a
 // first password): with a fresh step-up when they already have a factor /auth/reauth can verify, so a
 // stolen session can't give itself one to step up with. A user with none has only the session.
+//
+// A user with TOTP steps up with a code (or a recovery code), not the password: a passkey completes
+// the second-factor step, so someone holding a stolen session and the password — but never a code —
+// could otherwise re-auth with the password, add a passkey of their own, and have it stand in for the
+// TOTP from then on. A TOTP read that fails counts as having TOTP.
 func (a *Authenticator) factorChangeAllowed(c *reqCtx, au *AuthUser) bool {
+	if has, err := a.userHasTOTP(au.ID); has || err != nil {
+		return a.stepUpFresh(c.Request, accountStepUpMaxAge, stepUpCode)
+	}
 	return !a.hasReauthFactor(au.ID) || a.StepUpFresh(c.Request, accountStepUpMaxAge)
 }
 
@@ -54,7 +63,11 @@ func (a *Authenticator) TOTPBegin(c *reqCtx) {
 		c.JSON(http.StatusUnauthorized, H{"error": "unauthenticated"})
 		return
 	}
-	if info, _ := a.twoFactor.TOTP(au.ID); info != nil && info.Enabled {
+	// A failed read is not "no TOTP yet": starting over would replace an enabled secret.
+	if info, terr := a.twoFactor.TOTP(au.ID); terr != nil && !errors.Is(terr, ErrNoCredential) {
+		c.JSON(http.StatusInternalServerError, H{"error": "could not start enrollment"})
+		return
+	} else if info != nil && info.Enabled {
 		c.JSON(http.StatusConflict, H{"error": "two-factor auth is already enabled"})
 		return
 	}
@@ -111,7 +124,8 @@ func (a *Authenticator) TOTPConfirm(c *reqCtx) {
 		return
 	}
 	codes, hashes, gerr := newRecoveryCodes(recoveryCodeCount)
-	if gerr != nil || a.twoFactor.EnableTOTP(au.ID) != nil || a.twoFactor.ReplaceRecoveryCodes(au.ID, hashes) != nil {
+	// Codes first: failing between the two must not leave TOTP on with no recovery codes.
+	if gerr != nil || a.twoFactor.ReplaceRecoveryCodes(au.ID, hashes) != nil || a.twoFactor.EnableTOTP(au.ID) != nil {
 		c.JSON(http.StatusInternalServerError, H{"error": "could not enable 2fa"})
 		return
 	}

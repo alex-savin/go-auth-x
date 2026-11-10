@@ -82,7 +82,7 @@ func TestAdminAPI_GroupsKeysAndDisable(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	mint("axk_admin_key", "admin")
+	mint("axk_admin_key", "admin", "scim") // it mints a scim key below: a key grants only scopes it has
 	mint("axk_scim_key", "scim")
 	call := func(method, path string, body any) *httptest.ResponseRecorder {
 		return adminCall(t, a, "axk_admin_key", method, path, body)

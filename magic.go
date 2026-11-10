@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
+	"errors"
 	"net/http"
 	"net/url"
 	"time"
@@ -34,6 +35,8 @@ func (a *Authenticator) AuthConfig(c *reqCtx) {
 		},
 		// Every enabled social provider by slug (built-ins + generic OIDC), for rendering buttons.
 		"socialProviders": a.enabledSocialProviders(),
+		// The cookie whose value the SPA echoes in X-CSRF-Token (its name depends on Config.HostCookies).
+		"csrfCookie": a.CSRFCookieName(),
 	})
 }
 
@@ -80,7 +83,7 @@ func (a *Authenticator) setSignupBinding(c *reqCtx, userID, hash string) {
 // signupBound reports whether this browser signed up for userID with the password hash it holds now.
 func (a *Authenticator) signupBound(c *reqCtx, userID, hash string) bool {
 	var claims signupClaims
-	if parseJWTMulti(a.verifySecrets(), cookieValue(c.Request, signupCookie), &claims, audSignup) != nil {
+	if parseJWTMulti(a.verifySecrets(), a.cookieValue(c.Request, signupCookie), &claims, audSignup) != nil {
 		return false
 	}
 	return claims.Subject == userID && subtle.ConstantTimeCompare([]byte(claims.PasswordHash), []byte(signupHashID(hash))) == 1
@@ -90,17 +93,85 @@ func (a *Authenticator) signupBound(c *reqCtx, userID, hash string) bool {
 // address, a password already on the account was set by someone who hadn't proven the mailbox — a
 // signup by anyone — so it is dropped, unless keepBoundPassword and this very browser set it
 // (signupBound). The person who proved the mailbox is signed in and can set a password of their own.
+// The drop and the verification are one step against a signup still in flight (setSignupPassword):
+// its password lands before, and is dropped here, or not at all.
 func (a *Authenticator) claimMailbox(c *reqCtx, u *AuthUser, keepBoundPassword bool) error {
 	defer a.clearCookie(c, signupCookie)
 	if u.EmailVerified {
 		return nil
 	}
+	if ss, ok := a.creds.(SignupStore); ok {
+		keep := ""
+		if hash, _, err := a.passwordHash(u.ID); err == nil && keepBoundPassword && a.signupBound(c, u.ID, hash) {
+			keep = hash
+		}
+		return ss.VerifyEmailKeepingPassword(u.ID, keep)
+	}
+	a.signupMu.Lock()
+	defer a.signupMu.Unlock()
 	if hash, _, err := a.passwordHash(u.ID); err == nil && !(keepBoundPassword && a.signupBound(c, u.ID, hash)) {
 		if err := a.creds.SetPasswordHash(u.ID, "", ""); err != nil {
 			return err
 		}
 	}
 	return a.creds.SetEmailVerified(u.ID, true)
+}
+
+// takeOver hands an unverified account to whoever just proved its mailbox some other way than a
+// link (a provider's verified email): the address is marked verified, and nothing that signs in is
+// kept — the password (a signup's, by anyone), and, though an unverified account shouldn't have any,
+// its passkeys, linked sign-ins, second factor and sessions.
+func (a *Authenticator) takeOver(u *AuthUser) error {
+	if a.sessions != nil {
+		_ = a.sessions.RevokeAllForUser(u.Sub)
+	}
+	if pks, err := a.creds.Passkeys(u.ID); err == nil {
+		for _, pk := range pks {
+			if err := a.creds.RemovePasskey(u.ID, pk.ID); err != nil {
+				return err
+			}
+		}
+	}
+	if ids, err := a.creds.OAuthIdentities(u.ID); err == nil {
+		for _, p := range ids {
+			if err := a.creds.UnlinkOAuth(u.ID, p); err != nil {
+				return err
+			}
+		}
+	}
+	if a.twoFactor != nil {
+		if err := a.twoFactor.DisableTOTP(u.ID); err != nil {
+			return err
+		}
+	}
+	if ss, ok := a.creds.(SignupStore); ok {
+		return ss.VerifyEmailKeepingPassword(u.ID, "")
+	}
+	a.signupMu.Lock()
+	defer a.signupMu.Unlock()
+	if err := a.creds.SetPasswordHash(u.ID, "", ""); err != nil {
+		return err
+	}
+	return a.creds.SetEmailVerified(u.ID, true)
+}
+
+// setSignupPassword sets a signup's password on an account that is still unverified, and reports
+// false — writing nothing — when the account has been verified since the signup read it: hashing
+// takes long enough for the address's owner to prove the mailbox in between, and a password written
+// after that would be an unproven one on a verified account.
+func (a *Authenticator) setSignupPassword(userID, email, hash string) (bool, error) {
+	if ss, ok := a.creds.(SignupStore); ok {
+		return ss.SetPasswordHashIfUnverified(userID, hash, "bcrypt")
+	}
+	a.signupMu.Lock()
+	defer a.signupMu.Unlock()
+	if u, err := a.creds.UserByEmail(email); err != nil || u.ID != userID || u.EmailVerified {
+		if err != nil && !errors.Is(err, ErrNoUser) {
+			return false, err
+		}
+		return false, nil
+	}
+	return true, a.creds.SetPasswordHash(userID, hash, "bcrypt")
 }
 
 // EmailRequest (POST /auth/email/request) emails a one-time sign-in (magic) link. Always 200
@@ -175,6 +246,12 @@ func (a *Authenticator) redeemAndLogin(c *reqCtx, purpose string, markVerified b
 	u, err := a.creds.UserByEmail(claim.Email)
 	if err != nil {
 		fail("account not found")
+		return
+	}
+	// The link was mailed for one account. If that account has left the address and another holds
+	// it now, the link is not theirs to be signed in by (as with a reset link).
+	if claim.UserID != "" && u.ID != claim.UserID {
+		fail("this link is invalid or has expired")
 		return
 	}
 	if markVerified {

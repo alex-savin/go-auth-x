@@ -68,6 +68,12 @@ func (s *storage) seal(id string, pemBytes []byte) ([]byte, error) {
 // open returns a stored key's PEM: unsealed, or as stored when it predates sealing (plain).
 func (s *storage) open(id string, stored []byte) (pemBytes []byte, plain bool, err error) {
 	if bytes.HasPrefix(stored, []byte("-----BEGIN")) {
+		// A key stored in the clear carries no proof it is ours: sealing binds a key to CryptoKey, and
+		// a plain PEM is accepted from whoever could write the row. Only an upgrade from before keys
+		// were sealed (v0.11) has any, and asks for them once (Config.AcceptPlaintextKeys).
+		if !s.p.cfg.AcceptPlaintextKeys {
+			return nil, false, errors.New("a signing key stored in the clear (see Config.AcceptPlaintextKeys)")
+		}
 		return stored, true, nil
 	}
 	rest, ok := bytes.CutPrefix(stored, sealedPrefix)
@@ -319,14 +325,41 @@ func (s *storage) dropUnreadable(keys []authx.OAuthSigningKey, now time.Time) []
 			}
 		}
 	}
-	s.p.cfg.Logger.Warn("oidcprovider: ignoring signing keys this CryptoKey can't open (did it change, or do replicas disagree on it?)", "keys", ids)
+	s.p.cfg.Logger.Warn("oidcprovider: ignoring signing keys this CryptoKey can't open (did it change, do replicas disagree on it, or are they unsealed keys from before v0.11 — see Config.AcceptPlaintextKeys?)", "keys", ids)
 	return errs
 }
 
-// RotateKeys adds a new signing key now and retires the others, which stay published for
-// Config.KeyGrace (e.g. after a key may have leaked; rotation is otherwise automatic). Other
-// replicas start signing with the new key within a few minutes.
+// RotateKeys adds a new signing key now and retires the others, which stay published — and trusted
+// by clients — for Config.KeyGrace, so tokens they signed keep verifying. Rotation is otherwise
+// automatic. Other replicas start signing with the new key within a few minutes. For a key that
+// may have leaked use ReplaceKeys: a retired key still verifies whatever is signed with it.
 func (p *Provider) RotateKeys(context.Context) error { return p.store.rotateKeys(true) }
+
+// ReplaceKeys adds a new signing key now and DELETES every other one at once: for when a signing key
+// may have leaked. ID tokens signed before stop verifying as clients refresh the key set (they are
+// short-lived; access and refresh tokens are not signed with these keys and are unaffected). Other
+// replicas follow within a few minutes.
+func (p *Provider) ReplaceKeys(context.Context) error {
+	if err := p.store.rotateKeys(true); err != nil {
+		return err
+	}
+	keys, unreadable, err := p.store.readKeys()
+	if err != nil {
+		return err
+	}
+	cur := newest(keys)
+	var errs []error
+	for _, k := range keys {
+		if cur != nil && k.id != cur.id {
+			errs = append(errs, p.store.st().DeleteOAuthSigningKey(k.id))
+		}
+	}
+	for _, k := range unreadable {
+		errs = append(errs, p.store.st().DeleteOAuthSigningKey(k.ID))
+	}
+	errs = append(errs, p.store.loadKeys())
+	return errors.Join(errs...)
+}
 
 func (s *storage) SigningKey(context.Context) (op.SigningKey, error) {
 	k := newest(s.currentKeys())

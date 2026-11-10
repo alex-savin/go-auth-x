@@ -9,6 +9,8 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"golang.org/x/crypto/bcrypt"
+
 	"github.com/alex-savin/go-auth-x/scim"
 )
 
@@ -44,7 +46,12 @@ func TestPasswordResetAndChangeEndOtherSessions(t *testing.T) {
 // Deprovisioning through SCIM ends the user's sessions at once.
 func TestSCIMDeprovisionEndsSessions(t *testing.T) {
 	a, s, _ := newTestAuth(t)
-	u := seedUser(t, s, "leaver@x.com", "leaver-password-1", true)
+	u, err := s.UpsertExternalUser("scim:leaver", "leaver@x.com", "Leaver", true) // an account SCIM provisioned
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash, _ := bcrypt.GenerateFromPassword([]byte("leaver-password-1"), bcrypt.MinCost)
+	_ = s.SetPasswordHash(u.ID, string(hash), "bcrypt")
 	c := newClient(t, a)
 	c.login("leaver@x.com", "leaver-password-1")
 	raw := "axk_scim_key"

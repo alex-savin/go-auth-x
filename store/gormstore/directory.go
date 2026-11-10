@@ -51,7 +51,7 @@ type APIKey struct {
 	Prefix     string
 	Hash       []byte `gorm:"uniqueIndex"`
 	Groups     string // CSV of group names granted to calls made with this key
-	Scopes     string // CSV of scopes this key is limited to (empty = unrestricted)
+	Scopes     string // CSV of the scopes this key carries (empty = none: scopes are deny-by-default)
 	OrgID      uint   `gorm:"default:0;index"` // 0 = global; else the org this key is bound to
 	ExpiresAt  *time.Time
 	CreatedAt  time.Time
@@ -166,8 +166,23 @@ func (s *Store) AddUserToGroup(userID, groupID string) error {
 	if !ok {
 		return authx.ErrNoGroup
 	}
-	return s.db.Clauses(clause.OnConflict{DoNothing: true}).
-		Create(&GroupMembership{UserID: uid, GroupID: gid}).Error
+	// Both rows must exist: a membership for an id nobody has yet would become the membership of
+	// whoever is created with that id next (as SetOrgMember guards against).
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		var n int64
+		if err := tx.Model(&User{}).Where("id = ?", uid).Count(&n).Error; err != nil {
+			return err
+		} else if n == 0 {
+			return authx.ErrNoUser
+		}
+		if err := tx.Model(&Group{}).Where("id = ?", gid).Count(&n).Error; err != nil {
+			return err
+		} else if n == 0 {
+			return authx.ErrNoGroup
+		}
+		return tx.Clauses(clause.OnConflict{DoNothing: true}).
+			Create(&GroupMembership{UserID: uid, GroupID: gid}).Error
+	})
 }
 
 func (s *Store) RemoveUserFromGroup(userID, groupID string) error {
@@ -193,11 +208,29 @@ func (s *Store) AddUsersToGroup(userIDs []string, groupID string) error {
 	if len(uids) == 0 {
 		return nil
 	}
-	rows := make([]GroupMembership, len(uids))
-	for i, uid := range uids {
-		rows[i] = GroupMembership{UserID: uid, GroupID: gid}
-	}
-	return s.db.Clauses(clause.OnConflict{DoNothing: true}).CreateInBatches(rows, memberBatch).Error
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		var n int64
+		if err := tx.Model(&Group{}).Where("id = ?", gid).Count(&n).Error; err != nil {
+			return err
+		} else if n == 0 {
+			return authx.ErrNoGroup
+		}
+		// Only ids that name a user (see AddUserToGroup): the others are skipped, like ids that can't.
+		var rows []GroupMembership
+		for i := 0; i < len(uids); i += memberBatch {
+			var existing []uint
+			if err := tx.Model(&User{}).Where("id IN ?", uids[i:min(i+memberBatch, len(uids))]).Pluck("id", &existing).Error; err != nil {
+				return err
+			}
+			for _, uid := range existing {
+				rows = append(rows, GroupMembership{UserID: uid, GroupID: gid})
+			}
+		}
+		if len(rows) == 0 {
+			return nil
+		}
+		return tx.Clauses(clause.OnConflict{DoNothing: true}).CreateInBatches(rows, memberBatch).Error
+	})
 }
 
 // RemoveUsersFromGroup is the batch RemoveUserFromGroup (authx.BatchGroupStore): one DELETE per
@@ -236,7 +269,9 @@ func (s *Store) UserGroups(userID string) ([]authx.Group, error) {
 		return []authx.Group{}, nil
 	}
 	var rows []Group
-	err := s.db.Table("authx_groups").
+	// Select the group's columns only: both tables have an id, and a bare SELECT * would scan the
+	// membership row's id into Group.ID.
+	err := s.db.Table("authx_groups").Select("authx_groups.*").
 		Joins("JOIN authx_group_members m ON m.group_id = authx_groups.id").
 		Where("m.user_id = ?", n).Order("authx_groups.name").Scan(&rows).Error
 	if err != nil {
@@ -255,7 +290,8 @@ func (s *Store) GroupMembers(groupID string) ([]authx.AuthUser, error) {
 		return []authx.AuthUser{}, nil
 	}
 	var rows []User
-	err := s.db.Table("authx_users").
+	// The user's columns only (see UserGroups): never the membership row's id as User.ID.
+	err := s.db.Table("authx_users").Select("authx_users.*").
 		Joins("JOIN authx_group_members m ON m.user_id = authx_users.id").
 		Where("m.group_id = ?", n).Order("authx_users.email").Scan(&rows).Error
 	if err != nil {
@@ -334,9 +370,11 @@ func (s *Store) SetUserBan(userID string, banned bool, until *time.Time, reason 
 	})
 }
 
-// UpsertExternalUser provisions a directory-sourced user (LDAP/SCIM) via the safe linking rule.
+// UpsertExternalUser provisions a directory-sourced user (LDAP/SCIM) via the safe linking rule. An
+// existing account the source moves to another address is signed out and loses its sign-in methods
+// (see upsertUser).
 func (s *Store) UpsertExternalUser(sub, email, name string, emailVerified bool) (*authx.AuthUser, error) {
-	return s.UpsertUserOnLogin(sub, email, name, emailVerified)
+	return s.upsertUser(sub, email, name, emailVerified, true)
 }
 
 // --- api keys ---

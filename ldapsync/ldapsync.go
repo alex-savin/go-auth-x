@@ -1,7 +1,9 @@
 // Package ldapsync syncs users and groups from an LDAP/Active Directory server into an
 // authx.DirectoryStore (and the user records behind it). It is a one-way pull: run it on a
-// schedule. It is additive — users/groups present in LDAP are upserted; it does not delete or
-// disable records that have disappeared from LDAP (that's a deliberate, separate policy choice).
+// schedule. Users and groups present in LDAP are upserted, and a synced user's group memberships
+// follow the directory: one LDAP no longer lists is removed (Config.KeepStaleMemberships keeps
+// them). It never deletes users or groups; disabling users that left LDAP is opt-in
+// (Config.DeprovisionMissing).
 package ldapsync
 
 import (
@@ -9,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"sort"
 	"strings"
 
 	"github.com/go-ldap/ldap/v3"
@@ -46,7 +49,26 @@ type Config struct {
 	// entry's mail attribute would otherwise take the account (and the owner's). Turn it on only for a
 	// directory you trust as much as your own sign-in.
 	AdoptExisting bool
+
+	// KeepStaleMemberships turns off the removal of group memberships LDAP no longer lists. By default
+	// a synced ("ldap:") user who was removed from an LDAP group — or whose group left the directory —
+	// loses that membership on the next sync, so access a group gates ends when the directory says
+	// so. Members that aren't LDAP users (added by an operator, SCIM, …) are never removed.
+	KeepStaleMemberships bool
+
+	// OwnGroupsOnly makes the sync leave alone any existing group it didn't create: an LDAP group
+	// with the name of an operator-made one (say "admins") is skipped and reported instead of having
+	// its members merged in. Off by default (an LDAP group adopts a same-named group).
+	OwnGroupsOnly bool
+
+	// MaxDeprovision caps how many users one run may disable with DeprovisionMissing (0 = no cap).
+	// A run that would disable more — a search that came back partial after an ACL or filter
+	// change — disables none and reports it.
+	MaxDeprovision int
 }
+
+// groupMarker is the description of a group the sync created: how it knows its own groups.
+const groupMarker = "synced from LDAP"
 
 func (c *Config) withDefaults() {
 	if c.UserFilter == "" {
@@ -102,6 +124,7 @@ type Result struct {
 	Users         int
 	Groups        int
 	Memberships   int
+	Removed       int // memberships of "ldap:" users removed because LDAP no longer lists them
 	Deprovisioned int // "ldap:" users disabled because they vanished from LDAP (if enabled)
 	Errors        []string
 }
@@ -163,11 +186,29 @@ func (s *Syncer) Sync() (*Result, error) {
 		return nil, fmt.Errorf("ldap user search: %w", err)
 	}
 	seen := map[string]bool{} // "ldap:<uid>" subjects present in this run
+	// A uid on more than one entry names no one: whichever entry came last would own the account —
+	// its groups, its sessions' identity — and its mail. An entry that can set its own uid attribute
+	// to someone else's would take their account that way, so none of the entries is synced.
+	entriesPerUID := map[string]int{}
+	for _, e := range users.Entries {
+		if uid := e.GetAttributeValue(s.cfg.AttrUID); uid != "" {
+			entriesPerUID[uid]++
+		}
+	}
+	reported := map[string]bool{}
 	for _, e := range users.Entries {
 		uid := e.GetAttributeValue(s.cfg.AttrUID)
 		email := e.GetAttributeValue(s.cfg.AttrEmail)
 		if uid == "" || email == "" {
 			continue // a user with no uid/email can't be keyed or linked
+		}
+		if entriesPerUID[uid] > 1 {
+			seen["ldap:"+uid] = true // present, if ambiguous: not "missing from LDAP"
+			if !reported[uid] {
+				reported[uid] = true
+				res.Errors = append(res.Errors, fmt.Sprintf("user %s: %d entries share this %s; none synced (use an attribute that is unique and that entries can't set themselves, e.g. entryUUID or objectGUID)", uid, entriesPerUID[uid], s.cfg.AttrUID))
+			}
+			continue
 		}
 		// Mark PRESENCE as soon as a valid uid is read — BEFORE the upsert — so a user who is present in
 		// LDAP but whose upsert transiently fails (DB deadlock / connection blip) is NOT then deprovisioned
@@ -197,6 +238,10 @@ func (s *Syncer) Sync() (*Result, error) {
 		if gerr != nil {
 			return res, fmt.Errorf("ldap group search: %w", gerr)
 		}
+		// Memberships LDAP no longer lists are removed — unless nothing came back to compare with
+		// (no users, or no groups: a mis-set base or filter must not strip every membership).
+		prune := !s.cfg.KeepStaleMemberships && res.Users > 0 && len(groups.Entries) > 0
+		synced := map[string]bool{} // ids of the groups present in this run
 		for _, e := range groups.Entries {
 			name := e.GetAttributeValue(s.cfg.AttrGroupName)
 			if name == "" {
@@ -208,16 +253,34 @@ func (s *Syncer) Sync() (*Result, error) {
 				continue
 			}
 			res.Groups++
+			synced[g.ID] = true
+			listed := map[string]bool{}
 			for _, m := range e.GetAttributeValues(s.cfg.AttrGroupMember) {
 				uid, ok := resolveMember(m, userByDN, userByUID)
 				if !ok {
 					continue
 				}
+				listed[uid] = true
 				if err := s.dir.AddUserToGroup(uid, g.ID); err != nil {
 					res.Errors = append(res.Errors, fmt.Sprintf("group %s member %s: %v", name, m, err))
 					continue
 				}
 				res.Memberships++
+			}
+			if prune {
+				s.pruneMembers(res, *g, listed)
+			}
+		}
+		if prune {
+			// A group the sync made that LDAP no longer has: its LDAP members leave it.
+			if all, lerr := s.dir.Groups(); lerr != nil {
+				res.Errors = append(res.Errors, fmt.Sprintf("stale groups: %v", lerr))
+			} else {
+				for _, g := range all {
+					if g.Description == groupMarker && !synced[g.ID] {
+						s.pruneMembers(res, g, nil)
+					}
+				}
 			}
 		}
 	}
@@ -233,14 +296,22 @@ func (s *Syncer) Sync() (*Result, error) {
 		if lerr != nil {
 			res.Errors = append(res.Errors, fmt.Sprintf("deprovision list: %v", lerr))
 		} else {
+			var missing []authx.AuthUser
 			for _, u := range all {
 				if strings.HasPrefix(u.Sub, "ldap:") && !seen[u.Sub] && !u.Disabled {
-					if err := s.dir.SetUserDisabled(u.ID, true); err != nil {
-						res.Errors = append(res.Errors, fmt.Sprintf("deprovision %s: %v", u.Sub, err))
-						continue
-					}
-					res.Deprovisioned++
+					missing = append(missing, u)
 				}
+			}
+			if s.cfg.MaxDeprovision > 0 && len(missing) > s.cfg.MaxDeprovision {
+				res.Errors = append(res.Errors, fmt.Sprintf("deprovision skipped: %d users are missing from the search, more than MaxDeprovision (%d)", len(missing), s.cfg.MaxDeprovision))
+				missing = nil
+			}
+			for _, u := range missing {
+				if err := s.dir.SetUserDisabled(u.ID, true); err != nil {
+					res.Errors = append(res.Errors, fmt.Sprintf("deprovision %s: %v", u.Sub, err))
+					continue
+				}
+				res.Deprovisioned++
 			}
 		}
 	}
@@ -250,12 +321,35 @@ func (s *Syncer) Sync() (*Result, error) {
 func (s *Syncer) getOrCreateGroup(name string) (*authx.Group, error) {
 	g, err := s.dir.GroupByName(name)
 	if err == nil {
+		if s.cfg.OwnGroupsOnly && g.Description != groupMarker {
+			return nil, errors.New("a group with this name exists that the sync didn't create; skipped (see Config.OwnGroupsOnly)")
+		}
 		return g, nil
 	}
 	if errors.Is(err, authx.ErrNoGroup) {
-		return s.dir.CreateGroup(name, "synced from LDAP")
+		return s.dir.CreateGroup(name, groupMarker)
 	}
 	return nil, err
+}
+
+// pruneMembers removes from g the LDAP users ("ldap:" subjects) that listed doesn't hold. Members
+// from elsewhere — an operator's, SCIM's — are not the sync's to remove.
+func (s *Syncer) pruneMembers(res *Result, g authx.Group, listed map[string]bool) {
+	members, err := s.dir.GroupMembers(g.ID)
+	if err != nil {
+		res.Errors = append(res.Errors, fmt.Sprintf("group %s members: %v", g.Name, err))
+		return
+	}
+	for _, m := range members {
+		if listed[m.ID] || !strings.HasPrefix(m.Sub, "ldap:") {
+			continue
+		}
+		if err := s.dir.RemoveUserFromGroup(m.ID, g.ID); err != nil {
+			res.Errors = append(res.Errors, fmt.Sprintf("group %s: removing %s: %v", g.Name, m.Sub, err))
+			continue
+		}
+		res.Removed++
+	}
 }
 
 // resolveMember maps an LDAP group member value (a full DN, or a bare uid for posixGroup) to a user.
@@ -272,19 +366,26 @@ func resolveMember(member string, byDN, byUID map[string]string) (string, bool) 
 	return id, ok
 }
 
-// normalizeDN parses a DN and rebuilds a canonical, lower-cased "attr=value,attr=value" form so two
-// DNs that differ only in spacing or attribute case compare equal. Falls back to a trimmed
+// normalizeDN parses a DN and rebuilds a canonical, lower-cased form so two DNs that differ only in
+// spacing, attribute case or the order of a multi-valued RDN's parts compare equal — and only those:
+// the separators inside a value stay escaped, so "cn=a\,ou\=b,dc=x" (one RDN whose value holds a
+// comma) is not "cn=a,ou=b,dc=x" (two RDNs). Rebuilt unescaped, an entry could be named so that it
+// normalized to another user's DN and received their group memberships. Falls back to a trimmed
 // lower-case of the raw string when the DN can't be parsed.
 func normalizeDN(dn string) string {
 	parsed, err := ldap.ParseDN(dn)
 	if err != nil {
 		return strings.ToLower(strings.TrimSpace(dn))
 	}
-	parts := make([]string, 0, len(parsed.RDNs))
+	esc := strings.NewReplacer(`\`, `\\`, `,`, `\,`, `+`, `\+`, `=`, `\=`)
+	rdns := make([]string, 0, len(parsed.RDNs))
 	for _, rdn := range parsed.RDNs {
+		avs := make([]string, 0, len(rdn.Attributes))
 		for _, av := range rdn.Attributes {
-			parts = append(parts, strings.ToLower(av.Type)+"="+strings.ToLower(strings.TrimSpace(av.Value)))
+			avs = append(avs, strings.ToLower(av.Type)+"="+esc.Replace(strings.ToLower(strings.TrimSpace(av.Value))))
 		}
+		sort.Strings(avs)
+		rdns = append(rdns, strings.Join(avs, "+"))
 	}
-	return strings.Join(parts, ",")
+	return strings.Join(rdns, ",")
 }

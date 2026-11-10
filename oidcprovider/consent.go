@@ -16,6 +16,20 @@ import (
 	authx "github.com/alex-savin/go-auth-x"
 )
 
+// Bounds on an authorization request (see authorize). The parameters are far above what a client
+// sends: an S256 challenge is 43 characters, a state rarely more than a few hundred.
+const (
+	maxAuthorizeBody     = 64 << 10
+	authorizeRequests    = 120 // per address, in each authorizeRequestsPer
+	authorizeRequestsPer = 10 * time.Minute
+)
+
+var authorizeParamLimits = map[string]int{
+	"state": 2048, "nonce": 512, "code_challenge": 128, "code_challenge_method": 16, "redirect_uri": 2048,
+	"scope": 2048, "client_id": 2048, "resource": 2048, "response_type": 64, "response_mode": 64, "prompt": 64,
+	"max_age": 32,
+}
+
 // Errors of the consent and verification API.
 var (
 	// ErrNoRequest: the authorization request is unknown, expired, or someone else's.
@@ -26,9 +40,29 @@ var (
 
 // authorize checks the resource indicators and fills in default scopes, then hands the request
 // to zitadel, which validates the client, redirect and PKCE and sends the browser to login.
+//
+// The request is stored until the user decides, by anyone who knows a client id — so it is bounded
+// first: its size (a megabyte of state would be kept whole for the request's lifetime) and how many
+// one address may start.
 func (p *Provider) authorize(w http.ResponseWriter, r *http.Request) {
+	if r.Body != nil {
+		r.Body = http.MaxBytesReader(w, r.Body, maxAuthorizeBody)
+	}
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	for name, limit := range authorizeParamLimits {
+		for _, v := range r.Form[name] {
+			if len(v) > limit {
+				writeErr(w, http.StatusBadRequest, "invalid_request", name+" is too long")
+				return
+			}
+		}
+	}
+	if !p.authz.allow(authx.RateLimitKey(p.cfg.Auth.ClientIP(r)), time.Now()) {
+		w.Header().Set("Retry-After", "60")
+		writeErr(w, http.StatusTooManyRequests, "temporarily_unavailable", "too many authorization requests from this address")
 		return
 	}
 	res, ok := p.resources(r.Form["resource"])
@@ -120,6 +154,34 @@ func (p *Provider) login(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, p.cfg.ConsentURL(id), http.StatusFound)
 }
 
+// callback is where an approved request's code is issued and the browser sent back to the client.
+// zitadel's handler answers anyone who knows the request's id — and whoever started the request
+// knows it. Someone could start one with their own PKCE verifier, have a signed-in user open its
+// link and approve what is a genuine client, then fetch the code here themselves, with no session at
+// all. So the code is issued only in the browser of the user who signed in for the request, and once.
+func (p *Provider) callback(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		w.Header().Set("Allow", "GET, HEAD")
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	req, err := p.store.request(r.URL.Query().Get("id"))
+	if err != nil || !req.Done || req.Subject == "" {
+		p.op.ServeHTTP(w, r) // unknown, expired or not approved: zitadel's answer, which issues nothing
+		return
+	}
+	sc := p.cfg.Auth.SessionOf(r)
+	if sc == nil || sc.Subject != req.Subject || sc.ImpersonatedBy != "" {
+		http.Error(w, "This sign-in request belongs to another session. Start again from the application.", http.StatusForbidden)
+		return
+	}
+	if req.CodeHash != "" {
+		http.Error(w, "This sign-in request was already completed. Start again from the application.", http.StatusBadRequest)
+		return
+	}
+	p.op.ServeHTTP(w, r)
+}
+
 // sessionAuthTime is when the session's user signed in, zero when the cookie predates the claim.
 func sessionAuthTime(sc *authx.SessionClaims) time.Time {
 	if sc.AuthTime == nil {
@@ -206,7 +268,8 @@ func (p *Provider) Pending(ctx context.Context, id, subject string) (*Request, e
 }
 
 // Approve records the user's approval and returns where to send the browser next (the provider's
-// callback, which issues the code to the client).
+// callback, which issues the code to the client). subject is the session's: call it for the user's
+// own session only, not an admin's impersonation of them (SessionClaims.ImpersonatedBy != "").
 func (p *Provider) Approve(_ context.Context, id, subject string, d Decision) (string, error) {
 	req, err := p.store.request(id)
 	if err != nil || req.Done || req.Subject == "" || req.Subject != subject {
@@ -292,6 +355,12 @@ func (p *Provider) consentJSON(w http.ResponseWriter, r *http.Request) {
 	sc := p.cfg.Auth.SessionOf(r)
 	if sc == nil {
 		writeErr(w, http.StatusUnauthorized, "unauthenticated", "")
+		return
+	}
+	// As at the login step: an admin impersonating a user doesn't decide on grants in their name. (An
+	// app that calls Approve itself checks SessionClaims.ImpersonatedBy the same way.)
+	if sc.ImpersonatedBy != "" {
+		writeErr(w, http.StatusForbidden, "access_denied", "not while impersonating a user")
 		return
 	}
 	switch r.Method {

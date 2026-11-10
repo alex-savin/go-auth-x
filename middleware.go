@@ -22,14 +22,17 @@ func (a *Authenticator) enforcing() bool {
 }
 
 // TrustedProxies returns the proxy IPs/CIDRs to trust when extracting the client IP from
-// X-Forwarded-For, read from TRUSTED_PROXIES (comma-separated) or a private-range default that
-// matches the usual reverse-proxy-on-a-private-network deployment. Without it XFF is honored from
-// any peer, letting a client spoof it to defeat per-IP rate limits.
+// X-Forwarded-For, read from TRUSTED_PROXIES (comma-separated) or a private-range default (IPv4 and
+// IPv6) that matches the usual reverse-proxy-on-a-private-network deployment. The default trusts
+// EVERY peer with a private address: where clients can reach the app from one without passing a
+// proxy that rewrites the header (an intranet, a load balancer that keeps the client's address, a
+// published container port), they choose their own IP — and with it their per-IP rate limit and the
+// address in the audit log. Set TRUSTED_PROXIES to the proxy's own address there.
 func TrustedProxies() []string {
 	if v := strings.TrimSpace(os.Getenv("TRUSTED_PROXIES")); v != "" {
 		return splitCSV(v)
 	}
-	return []string{"127.0.0.1/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
+	return []string{"127.0.0.1/8", "::1/128", "10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7"}
 }
 
 // publicPath reports routes reachable without a session: the auth flow itself, static assets, the
@@ -58,7 +61,7 @@ func (a *Authenticator) publicPath(p string) bool {
 // sessionOf resolves the session straight from the cookie — for /auth handlers (admin API, account
 // endpoints) that self-gate rather than sitting behind GateHTTP.
 func (a *Authenticator) sessionOf(c *reqCtx) *SessionClaims {
-	sc, err := parseSessionMulti(a.verifySecrets(), cookieValue(c.Request, sessionCookie))
+	sc, err := parseSessionMulti(a.verifySecrets(), a.cookieValue(c.Request, sessionCookie))
 	if err != nil {
 		return nil
 	}
@@ -71,11 +74,15 @@ func (a *Authenticator) sessionOf(c *reqCtx) *SessionClaims {
 // setCookie writes a hardened HttpOnly cookie.
 func (a *Authenticator) setCookie(c *reqCtx, name, value string, maxAge int) {
 	http.SetCookie(c.w, &http.Cookie{
-		Name: name, Value: value, MaxAge: maxAge, Path: "/",
+		Name: a.cookieName(name), Value: value, MaxAge: maxAge, Path: "/",
 		Secure: a.cookieSecureHTTP(c.Request), HttpOnly: true, SameSite: http.SameSiteLaxMode,
 	})
 }
 
 func (a *Authenticator) clearCookie(c *reqCtx, name string) {
-	http.SetCookie(c.w, &http.Cookie{Name: name, Value: "", MaxAge: -1, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode})
+	// Secure as it was set: a browser takes a __Host- cookie's removal, like the cookie, only so.
+	http.SetCookie(c.w, &http.Cookie{
+		Name: a.cookieName(name), Value: "", MaxAge: -1, Path: "/",
+		Secure: a.cookieSecureHTTP(c.Request), HttpOnly: true, SameSite: http.SameSiteLaxMode,
+	})
 }

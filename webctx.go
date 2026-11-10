@@ -28,9 +28,15 @@ func (a *Authenticator) newCtx(w http.ResponseWriter, r *http.Request) *reqCtx {
 	return &reqCtx{Request: r, w: w, a: a}
 }
 
-// wrap adapts an authx handler to a standard net/http handler.
+// wrap adapts an authx handler to a standard net/http handler. Every handler's body is capped here, whatever reads it — the JSON binder, or a library handed the
+// request itself (the WebAuthn ceremonies, a provider's form_post callback).
 func (a *Authenticator) wrap(h func(*reqCtx)) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) { h(a.newCtx(w, r)) }
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+		}
+		h(a.newCtx(w, r))
+	}
 }
 
 func (c *reqCtx) JSON(code int, obj any)    { writeJSON(c.w, code, obj) }
@@ -38,7 +44,7 @@ func (c *reqCtx) Query(k string) string     { return c.Request.URL.Query().Get(k
 func (c *reqCtx) Param(k string) string     { return c.Request.PathValue(k) }
 func (c *reqCtx) GetHeader(k string) string { return c.Request.Header.Get(k) }
 func (c *reqCtx) Cookie(name string) (string, error) {
-	ck, err := c.Request.Cookie(name)
+	ck, err := c.Request.Cookie(c.a.cookieName(name))
 	if err != nil {
 		return "", err
 	}

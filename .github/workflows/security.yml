@@ -27,8 +27,8 @@ jobs:
   govulncheck:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: stable
       - name: govulncheck
@@ -37,8 +37,8 @@ jobs:
   zap:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-go@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version: stable
       - name: Start the demo server
@@ -53,7 +53,7 @@ jobs:
           exit 1
       - name: ZAP baseline scan (passive)
         if: github.event_name == 'push' || github.event_name == 'pull_request'
-        uses: zaproxy/action-baseline@v0.15.0
+        uses: zaproxy/action-baseline@de8ad967d3548d44ef623df22cf95c3b0baf8b25 # v0.15.0
         with:
           target: http://127.0.0.1:8080
           rules_file_name: .zap/rules.tsv
@@ -63,7 +63,7 @@ jobs:
           artifact_name: zap-baseline
       - name: ZAP full scan (active)
         if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-        uses: zaproxy/action-full-scan@v0.13.0
+        uses: zaproxy/action-full-scan@3c58388149901b9a03b7718852c5ba889646c27c # v0.13.0
         with:
           target: http://127.0.0.1:8080
           rules_file_name: .zap/rules.tsv

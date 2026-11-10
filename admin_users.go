@@ -35,7 +35,7 @@ func (a *Authenticator) adminCreateUser(c *reqCtx) {
 			return
 		}
 	}
-	u, err := a.creds.CreateLocalUser(email, strings.TrimSpace(body.Name))
+	u, err := a.creds.CreateLocalUser(email, clampName(body.Name, maxNameLen))
 	if err != nil {
 		if errors.Is(err, ErrEmailConflict) {
 			c.JSON(http.StatusConflict, H{"error": "an account already exists for this email"})
@@ -81,8 +81,14 @@ func (a *Authenticator) adminSetPassword(c *reqCtx) {
 		c.JSON(http.StatusNotFound, H{"error": "no such user"})
 		return
 	}
+	if a.ownerShielded(c, u) {
+		return
+	}
 	var body struct{ Password string }
-	_ = c.ShouldBindJSON(&body)
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, H{"error": "invalid request"})
+		return
+	}
 	if msg := a.passwordPolicyError(c.Request.Context(), body.Password, u.Email); msg != "" {
 		c.JSON(http.StatusBadRequest, H{"error": msg})
 		return
@@ -92,7 +98,10 @@ func (a *Authenticator) adminSetPassword(c *reqCtx) {
 		a.adminFail(c, http.StatusInternalServerError, "could not set password", herr)
 		return
 	}
-	a.creds.RecordAudit(id, u.Email, c.ClientIP(), "admin", "set_password", true, "")
+	// An operator resets a password to take an account back: as with the user's own reset, what was
+	// signed in to it ends.
+	a.endAllAccess(u)
+	a.creds.RecordAudit(id, u.Email, c.ClientIP(), "admin", "set_password", true, a.adminActor(c))
 	c.JSON(http.StatusOK, H{"ok": true})
 }
 
@@ -111,6 +120,9 @@ func (a *Authenticator) adminDeleteUser(c *reqCtx) {
 		return
 	}
 	u, uerr := a.dir.UserByID(id)
+	if uerr == nil && a.ownerShielded(c, u) {
+		return
+	}
 	if err := a.creds.DeleteUser(id); err != nil {
 		a.adminFail(c, http.StatusInternalServerError, "could not delete user", err)
 		return
@@ -131,12 +143,30 @@ func (a *Authenticator) adminSetBan(c *reqCtx) {
 	if !ok {
 		return
 	}
-	var body struct {
-		Banned bool
+	// The flag is required: a body that doesn't parse, or leaves it out, must not read as
+	// {"banned": false} and lift the ban.
+	var in struct {
+		Banned *bool
 		Reason string
 		Until  *string // optional RFC3339; nil/empty = permanent while banned
 	}
-	_ = c.ShouldBindJSON(&body)
+	if err := c.ShouldBindJSON(&in); err != nil || in.Banned == nil {
+		c.JSON(http.StatusBadRequest, H{"error": "banned (true or false) is required"})
+		return
+	}
+	body := struct {
+		Banned bool
+		Reason string
+		Until  *string
+	}{*in.Banned, in.Reason, in.Until}
+	target, terr := a.dir.UserByID(id)
+	if terr != nil {
+		c.JSON(http.StatusNotFound, H{"error": "no such user"})
+		return
+	}
+	if a.ownerShielded(c, target) {
+		return
+	}
 	var until *time.Time
 	if body.Until != nil && *body.Until != "" {
 		t, perr := time.Parse(time.RFC3339, *body.Until)
@@ -160,7 +190,7 @@ func (a *Authenticator) adminSetBan(c *reqCtx) {
 		if u != nil {
 			email = u.Email
 		}
-		a.creds.RecordAudit(id, email, c.ClientIP(), "admin", event, true, strings.TrimSpace(body.Reason))
+		a.creds.RecordAudit(id, email, c.ClientIP(), "admin", event, true, strings.TrimSpace(a.adminActor(c)+" "+strings.TrimSpace(body.Reason)))
 	}
 	if body.Banned && a.sessions != nil && u != nil {
 		_ = a.sessions.RevokeAllForUser(u.Sub)
@@ -184,6 +214,9 @@ func (a *Authenticator) adminImpersonate(c *reqCtx) {
 		c.JSON(http.StatusNotFound, H{"error": "no such user"})
 		return
 	}
+	if a.ownerShielded(c, target) { // a key doesn't get to be the owner
+		return
+	}
 	// NOTE: the disabled/banned login gate is intentionally NOT applied here — an operator may need to
 	// impersonate a suspended user to investigate. This is safe: the endpoint is adminGuard-protected,
 	// the ImpersonatedBy marker blocks re-escalation through adminGuard, the session is short-lived
@@ -191,14 +224,9 @@ func (a *Authenticator) adminImpersonate(c *reqCtx) {
 	// Resolve a NON-EMPTY impersonator marker. ImpersonatedBy == "" is the "not impersonating" sentinel,
 	// so an API-key caller (no session cookie) must be stamped as apikey:<id> — never left blank, which
 	// would mint a genuine-looking session (and, if the target is the owner, a real owner session).
-	adminSub := ""
-	if sc := a.sessionOf(c); sc != nil {
-		adminSub = sc.Subject
-	} else if key := bearerToken(c.GetHeader("Authorization")); key != "" {
-		if info, ok := a.ValidateAPIKey(key); ok {
-			adminSub = "apikey:" + info.ID
-		}
-	}
+	// It names what authorized the request (adminActor): the key when a key did, not whoever's session
+	// cookie the caller also sent.
+	adminSub := a.adminActor(c)
 	if adminSub == "" {
 		c.JSON(http.StatusForbidden, H{"error": "impersonation requires an identifiable admin actor"})
 		return
@@ -302,6 +330,10 @@ func (a *Authenticator) adminRevokeUserSessions(c *reqCtx) {
 	if err := a.sessions.RevokeAllForUser(u.Sub); err != nil {
 		a.adminFail(c, http.StatusInternalServerError, "could not revoke sessions", err)
 		return
+	}
+	if a.creds != nil {
+		a.endAllAccess(u) // the user's OAuth grants and pending change of address too
+		a.creds.RecordAudit(id, u.Email, c.ClientIP(), "admin", "revoke_sessions", true, a.adminActor(c))
 	}
 	c.JSON(http.StatusOK, H{"ok": true})
 }

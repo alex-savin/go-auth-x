@@ -84,8 +84,10 @@ func (s *Store) AddUserToGroup(userID, groupID string) error {
 	defer s.mu.Unlock()
 	uid, uok := parseID(userID)
 	gid, gok := parseID(groupID)
-	if !uok || !gok {
-		return nil // a membership tying a nonexistent user/group can't exist — nothing to add
+	if !uok || !gok || s.users[uid] == nil || s.groups[gid] == nil {
+		// A membership tying a nonexistent user/group can't exist — nothing to add. (Kept for an id
+		// nobody has yet, it would become the membership of whoever is created with that id next.)
+		return nil
 	}
 	if s.memberships[uid] == nil {
 		s.memberships[uid] = map[uint]bool{}
@@ -114,12 +116,12 @@ func (s *Store) AddUsersToGroup(userIDs []string, groupID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	gid, ok := parseID(groupID)
-	if !ok {
+	if !ok || s.groups[gid] == nil {
 		return nil
 	}
 	for _, id := range userIDs {
 		uid, ok := parseID(id)
-		if !ok {
+		if !ok || s.users[uid] == nil {
 			continue
 		}
 		if s.memberships[uid] == nil {
@@ -251,9 +253,11 @@ func (s *Store) SetUserBan(userID string, banned bool, until *time.Time, reason 
 	return nil
 }
 
-// UpsertExternalUser provisions a directory-sourced user (LDAP/SCIM) via the safe linking rule.
+// UpsertExternalUser provisions a directory-sourced user (LDAP/SCIM) via the safe linking rule. An
+// existing account the source moves to another address is signed out and loses its sign-in methods
+// (see upsertUser).
 func (s *Store) UpsertExternalUser(sub, email, name string, emailVerified bool) (*authx.AuthUser, error) {
-	return s.UpsertUserOnLogin(sub, email, name, emailVerified)
+	return s.upsertUser(sub, email, name, emailVerified, true)
 }
 
 // --- api keys ---

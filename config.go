@@ -14,6 +14,11 @@ import (
 // Config is read from the environment at boot. Auth turns on only when an issuer
 // and client id are present.
 type Config struct {
+	// OrgAdminMayGrant, if set, says which custom org roles an org ADMIN may grant (by role change or
+	// invite). By default an admin grants only "admin" and "member"; any other role — the app's own,
+	// such as one it gates like the owner's — takes an org owner. "owner" always does.
+	OrgAdminMayGrant func(role string) bool
+
 	Issuer        string   // OIDC_ISSUER, e.g. https://id.example.com
 	ClientID      string   // OIDC_CLIENT_ID
 	ClientSecret  string   // OIDC_CLIENT_SECRET (confidential client)
@@ -27,6 +32,16 @@ type Config struct {
 	// also be at least 32 bytes.
 	PreviousSessionSecrets [][]byte
 	CookieSecure           bool // COOKIE_SECURE — force the Secure flag (also auto-on under TLS)
+	// HostCookies (COOKIE_HOST_PREFIX=true) sends every cookie under a "__Host-" name
+	// (__Host-sweep_session, __Host-sweep_csrf, …), always Secure. Browsers accept such a cookie only
+	// from this host over https, so a sibling subdomain can't plant a session, a CSRF pair or a
+	// signup binding in a user's browser. It needs an https APP_URL (New refuses otherwise). Off by
+	// default: turning it on signs everyone out once, and a SPA must read the CSRF cookie under its
+	// new name (Authenticator.CSRFCookieName, or csrfCookie in GET /auth/config).
+	HostCookies bool
+	// DisableGetLogout (LOGOUT_POST_ONLY=true) turns off GET /auth/logout, leaving POST /auth/logout
+	// (with the CSRF token). A GET that signs out lets any page a user visits sign them out.
+	DisableGetLogout bool
 	// TrustedOrigins is an optional allow-list of exact origins (scheme://host[:port]) accepted on
 	// state-changing requests as defense-in-depth ON TOP OF the double-submit CSRF token. AppURL's
 	// origin is always allowed. Empty (and an absent Origin/Referer) fails open — the token remains
@@ -124,6 +139,8 @@ func ConfigFromEnv() Config {
 		SessionSecret:          []byte(os.Getenv("SESSION_SECRET")),
 		PreviousSessionSecrets: envSecrets("SESSION_SECRET_PREVIOUS"),
 		CookieSecure:           os.Getenv("COOKIE_SECURE") == "true",
+		HostCookies:            os.Getenv("COOKIE_HOST_PREFIX") == "true",
+		DisableGetLogout:       os.Getenv("LOGOUT_POST_ONLY") == "true",
 		TrustedOrigins:         splitCSV(os.Getenv("TRUSTED_ORIGINS")),
 		AppURL:                 strings.TrimRight(os.Getenv("APP_URL"), "/"),
 		OwnerEmail:             strings.ToLower(strings.TrimSpace(os.Getenv("OWNER_EMAIL"))),

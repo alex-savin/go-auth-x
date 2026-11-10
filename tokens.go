@@ -16,6 +16,8 @@ const (
 	// their account by email until they reconnect it from a signed-in session.
 	purposeUnlinkedOAuth = "oauth_unlinked"
 	purposeEmailOTP      = "email_otp" // short numeric sign-in code (see emailotp.go)
+	// purposeWebauthnChallenge records a WebAuthn ceremony's challenge as used (see spendChallenge).
+	purposeWebauthnChallenge = "webauthn_challenge"
 )
 
 // Token TTLs by purpose (used by the Phase 1+ email flows).

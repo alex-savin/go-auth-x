@@ -174,3 +174,223 @@ func TestOAuthIdentitiesListsProvidersOnce(t *testing.T) {
 		t.Fatalf("OAuthIdentities = %v, want [microsoft]", got)
 	}
 }
+
+// The group joins return the user's and the group's own ids. Both joined tables have an id column, and
+// a bare SELECT * scanned the membership row's id into them — so SCIM and the admin API reported, and
+// removed, the wrong members. The memberships here are made in an order that keeps a membership row's
+// id different from its user's and its group's.
+func TestGroupJoinsReturnEntityIDs(t *testing.T) {
+	s := newStore(t)
+	_, _ = s.CreateLocalUser("a@x.com", "A")
+	b, _ := s.CreateLocalUser("b@x.com", "B")
+	c, _ := s.CreateLocalUser("c@x.com", "C")
+	_, _ = s.CreateGroup("g1", "")
+	_, _ = s.CreateGroup("g2", "")
+	g3, _ := s.CreateGroup("g3", "")
+	for _, u := range []*authx.AuthUser{c, b} { // membership rows 1 and 2, for users 3 and 2, in group 3
+		if err := s.AddUserToGroup(u.ID, g3.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	members, err := s.GroupMembers(g3.ID)
+	if err != nil || len(members) != 2 {
+		t.Fatalf("GroupMembers = %v, %v", members, err)
+	}
+	want := map[string]string{"b@x.com": b.ID, "c@x.com": c.ID}
+	for _, m := range members {
+		if m.ID != want[m.Email] {
+			t.Errorf("GroupMembers: %s has id %s, want %s", m.Email, m.ID, want[m.Email])
+		}
+	}
+	groups, err := s.UserGroups(c.ID)
+	if err != nil || len(groups) != 1 || groups[0].ID != g3.ID {
+		t.Fatalf("UserGroups = %+v, %v; want only group %s", groups, err, g3.ID)
+	}
+
+	org, err := s.CreateOrg("acme", "Acme")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetOrgMember(org.ID, c.ID, authx.OrgRoleMember); err != nil {
+		t.Fatal(err)
+	}
+	og, err := s.CreateOrgGroup(org.ID, "engineering", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.AddUserToGroup(c.ID, og.ID); err != nil { // membership row 3, group 4
+		t.Fatal(err)
+	}
+	orgGroups, err := s.UserOrgGroups(org.ID, c.ID)
+	if err != nil || len(orgGroups) != 1 || orgGroups[0].ID != og.ID {
+		t.Fatalf("UserOrgGroups = %+v, %v; want only group %s", orgGroups, err, og.ID)
+	}
+}
+
+// A provisioning source that moves an existing account to another address hands the account to
+// whoever holds that mailbox: nothing that signs in comes along, and what was signed in ends. A login
+// that reports a new address for its own account (UpsertUserOnLogin) changes none of that.
+func TestProvisionedEmailMoveResetsSignIn(t *testing.T) {
+	s := newStore(t)
+	seed := func(sub, email string) *authx.AuthUser {
+		t.Helper()
+		u, err := s.UpsertExternalUser(sub, email, "U", true)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = s.SetPasswordHash(u.ID, "h", "bcrypt")
+		_ = s.AddPasskey(u.ID, authx.Passkey{CredentialID: []byte("cred-" + sub), Name: "key"})
+		_ = s.LinkOAuth(u.ID, "google", "g-"+sub, email)
+		_ = s.SetTOTPSecret(u.ID, "SECRET")
+		_ = s.EnableTOTP(u.ID)
+		_ = s.CreateToken("reset", u.ID, email, []byte("tok-"+sub), time.Now().Add(time.Hour))
+		_ = s.RecordSession(authx.SessionRecord{SID: "sid-" + sub, Subject: sub, UserID: u.ID, CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)})
+		if err := s.CreateOAuthGrant(&authx.OAuthGrant{ID: "grant-" + sub, ClientID: "c", Subject: sub, CreatedAt: time.Now()}); err != nil {
+			t.Fatal(err)
+		}
+		return u
+	}
+	signIns := func(u *authx.AuthUser, sub string) (n int) {
+		t.Helper()
+		if _, _, err := s.PasswordHash(u.ID); err == nil {
+			n++
+		}
+		if pks, _ := s.Passkeys(u.ID); len(pks) != 0 {
+			n++
+		}
+		if _, err := s.UserByOAuth("google", "g-"+sub); err == nil {
+			n++
+		}
+		if _, err := s.TOTP(u.ID); err == nil {
+			n++
+		}
+		if _, err := s.PeekToken("reset", []byte("tok-"+sub)); err == nil {
+			n++
+		}
+		if revoked, _ := s.IsRevoked("sid-" + sub); !revoked {
+			n++
+		}
+		if _, err := s.OAuthGrant("grant-" + sub); err == nil {
+			n++
+		}
+		return n
+	}
+	g, _ := s.CreateGroup("staff", "")
+
+	u := seed("scim:mallory", "mallory@evil.test")
+	if err := s.AddUserToGroup(u.ID, g.ID); err != nil {
+		t.Fatal(err)
+	}
+	if n := signIns(u, "scim:mallory"); n != 7 {
+		t.Fatalf("precondition: %d of 7 sign-in records", n)
+	}
+	if _, err := s.UpsertExternalUser("scim:mallory", "mallory@evil.test", "Renamed", true); err != nil {
+		t.Fatal(err)
+	}
+	if n := signIns(u, "scim:mallory"); n != 7 {
+		t.Fatalf("an update that keeps the address must keep the account's sign-in: %d of 7 left", n)
+	}
+	moved, err := s.UpsertExternalUser("scim:mallory", "owner@example.com", "U", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if moved.ID != u.ID || moved.Email != "owner@example.com" {
+		t.Fatalf("the move must keep the account: %+v", moved)
+	}
+	if n := signIns(u, "scim:mallory"); n != 0 {
+		t.Fatalf("%d sign-in records survived the move", n)
+	}
+	if gs, _ := s.UserGroups(u.ID); len(gs) != 1 {
+		t.Fatalf("the account's memberships must stay: %+v", gs)
+	}
+
+	login := seed("oidc-sub-1", "old@corp.com")
+	if _, err := s.UpsertUserOnLogin("oidc-sub-1", "new@corp.com", "U", true); err != nil {
+		t.Fatal(err)
+	}
+	if n := signIns(login, "oidc-sub-1"); n != 7 {
+		t.Fatalf("a login reporting a new address must keep the account's sign-in: %d of 7 left", n)
+	}
+}
+
+// A signup's password is written only while the account is unverified, and a mailbox proof verifies
+// the account and drops any password but the one it is told to keep — each in one step, so a signup
+// and a proof can't interleave into an unproven password on a verified account.
+func TestSignupStoreWritesAreConditional(t *testing.T) {
+	s := newStore(t)
+	u, _ := s.CreateLocalUser("a@x.com", "A")
+	if set, err := s.SetPasswordHashIfUnverified(u.ID, "h1", "bcrypt"); err != nil || !set {
+		t.Fatalf("an unverified account takes a signup's password: %v, %v", set, err)
+	}
+	if err := s.VerifyEmailKeepingPassword(u.ID, "h1"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.UserByID(u.ID); !got.EmailVerified {
+		t.Fatal("the account must be verified")
+	}
+	if h, _, err := s.PasswordHash(u.ID); err != nil || h != "h1" {
+		t.Fatalf("the password it was told to keep must stay: %q, %v", h, err)
+	}
+	if set, err := s.SetPasswordHashIfUnverified(u.ID, "h2", "bcrypt"); err != nil || set {
+		t.Fatalf("a verified account must refuse a signup's password: %v, %v", set, err)
+	}
+	if h, _, _ := s.PasswordHash(u.ID); h != "h1" {
+		t.Fatalf("the refused write changed the password to %q", h)
+	}
+
+	for _, keep := range []string{"", "another-hash"} {
+		v, _ := s.CreateLocalUser("keep"+keep+"@x.com", "B")
+		_, _ = s.SetPasswordHashIfUnverified(v.ID, "squatter", "bcrypt")
+		if err := s.VerifyEmailKeepingPassword(v.ID, keep); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := s.PasswordHash(v.ID); !errors.Is(err, authx.ErrNoCredential) {
+			t.Fatalf("keeping %q must drop a different password, got %v", keep, err)
+		}
+	}
+	if set, err := s.SetPasswordHashIfUnverified("999999", "h", "bcrypt"); err != nil || set {
+		t.Fatalf("a missing account takes no password: %v, %v", set, err)
+	}
+	if _, _, err := s.PasswordHash("999999"); !errors.Is(err, authx.ErrNoCredential) {
+		t.Fatal("no password row may be left for a user that doesn't exist")
+	}
+}
+
+// Reclaiming an unverified account for a verified login ends that account's sessions and removes its
+// OAuth records, as deleting it does: it can have both, signed in before a provisioning source moved
+// it onto the address.
+func TestReclaimEndsTheOldAccountsSessionsAndGrants(t *testing.T) {
+	s := newStore(t)
+	old, _ := s.UpsertUserOnLogin("scim:old", "taken@x.com", "Old", false) // unverified, not a bootstrap row
+	_ = s.RecordSession(authx.SessionRecord{SID: "sid-old", Subject: "scim:old", UserID: old.ID, CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)})
+	if err := s.CreateOAuthGrant(&authx.OAuthGrant{ID: "grant-old", ClientID: "c", Subject: "scim:old", CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	nu, err := s.UpsertUserOnLogin("oidc:new", "taken@x.com", "New", true)
+	if err != nil || nu.ID == old.ID {
+		t.Fatalf("a verified login reclaims the address with a new account: %+v, %v", nu, err)
+	}
+	if revoked, _ := s.IsRevoked("sid-old"); !revoked {
+		t.Fatal("the reclaimed account's session is still live")
+	}
+	if _, err := s.OAuthGrant("grant-old"); err == nil {
+		t.Fatal("the reclaimed account's OAuth grant was left behind")
+	}
+}
+
+// Emails are keyed without folding a non-ASCII letter into an ASCII one (authx.NormalizeEmail):
+// "vİctim@x.com" is not "victim@x.com".
+func TestEmailKeysDontFoldUnicodeIntoASCII(t *testing.T) {
+	s := newStore(t)
+	u, _ := s.CreateLocalUser("victim@x.com", "Real")
+	if got, err := s.UserByEmail("vİctim@x.com"); err == nil && got.ID == u.ID {
+		t.Fatal("the account is found under a look-alike address")
+	}
+	other, err := s.CreateLocalUser("vİctim@x.com", "Other")
+	if err != nil || other.ID == u.ID {
+		t.Fatalf("the look-alike is its own address: %+v, %v", other, err)
+	}
+	if got, _ := s.UserByEmail("VICTIM@X.COM"); got == nil || got.ID != u.ID {
+		t.Fatal("ASCII case still folds")
+	}
+}

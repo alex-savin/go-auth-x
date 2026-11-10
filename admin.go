@@ -3,6 +3,7 @@ package authx
 import (
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 )
@@ -33,18 +34,30 @@ func (a *Authenticator) RequireGroupsHTTP(groups ...string) func(http.Handler) h
 }
 
 // authenticated reports whether the request carries a GLOBAL principal: a session attached by
-// GateHTTP, or a valid GLOBAL API-key Bearer token. An org-bound key is not a global principal (it
-// authorizes only its org's surfaces), so it does NOT satisfy an empty-groups RequireGroupsHTTP.
+// GateHTTP, or a GLOBAL API key that may act on the app's routes (appKey). An org-bound key is not a
+// global principal (it authorizes only its org's surfaces), so it does NOT satisfy an empty-groups
+// RequireGroupsHTTP.
 func (a *Authenticator) authenticated(r *http.Request) bool {
 	if _, _, ok := SessionFromRequest(r); ok {
 		return true
 	}
-	if key := bearerToken(r.Header.Get("Authorization")); key != "" {
-		if info, ok := a.ValidateAPIKey(key); ok {
-			return info.OrgID == ""
-		}
+	_, ok := a.appKey(r)
+	return ok
+}
+
+// appKey returns the API key a request presents as its principal on the app's own routes: a valid
+// GLOBAL key carrying ScopeApp (or "*"). Scopes are deny-by-default here as everywhere — a key with
+// none, or one minted only for the admin API or a SCIM mount, is not let through the app's gate.
+func (a *Authenticator) appKey(r *http.Request) (*APIKeyInfo, bool) {
+	key := bearerToken(r.Header.Get("Authorization"))
+	if key == "" {
+		return nil, false
 	}
-	return false
+	info, ok := a.ValidateAPIKey(key)
+	if !ok || info.OrgID != "" || !KeyHasScope(info, ScopeApp) {
+		return nil, false
+	}
+	return info, true
 }
 
 // GroupsFromRequest returns the groups of the session attached by GateHTTP, as of sign-in
@@ -57,14 +70,12 @@ func GroupsFromRequest(r *http.Request) []string {
 }
 
 // requestGroups returns the groups of whichever principal authenticated the request — the gated
-// session user, plus a GLOBAL API key's groups if a valid Bearer key is present. An org-bound
+// session user, plus a GLOBAL API key's groups if the request presents one for the app (appKey). An org-bound
 // key's groups never merge: group gates are global surfaces, outside an org key's blast radius.
 func (a *Authenticator) requestGroups(r *http.Request) []string {
 	have := a.sessionGroups(r)
-	if key := bearerToken(r.Header.Get("Authorization")); key != "" {
-		if info, ok := a.ValidateAPIKey(key); ok && info.OrgID == "" {
-			have = append(have, info.Groups...)
-		}
+	if info, ok := a.appKey(r); ok {
+		have = append(have, info.Groups...)
 	}
 	return have
 }
@@ -190,6 +201,82 @@ func (a *Authenticator) adminGuard(c *reqCtx) bool {
 	return false
 }
 
+// adminActor names who an admin request acts as, for the audit trail and the impersonation marker:
+// "apikey:<id>" when an admin key authorizes it — whatever session cookie rides along — else the owner
+// session's subject. "" when neither does (adminGuard refuses the request).
+func (a *Authenticator) adminActor(c *reqCtx) string {
+	if key := bearerToken(c.GetHeader("Authorization")); key != "" {
+		if info, ok := a.lookupAPIKey(key); ok && KeyHasScope(info, "admin") && info.OrgID == "" {
+			return "apikey:" + info.ID
+		}
+	}
+	if sc := a.sessionOf(c); sc != nil && sc.ImpersonatedBy == "" && a.isOwnerSession(sc) {
+		return sc.Subject
+	}
+	return ""
+}
+
+// mintingKey returns the admin API key that authorizes this request, nil when the owner's session does.
+func (a *Authenticator) mintingKey(c *reqCtx) *APIKeyInfo {
+	if key := bearerToken(c.GetHeader("Authorization")); key != "" {
+		if info, ok := a.lookupAPIKey(key); ok && KeyHasScope(info, "admin") && info.OrgID == "" {
+			return info
+		}
+	}
+	return nil
+}
+
+// wrapAdmin is wrap for the admin API: every state-changing call leaves an audit row naming who made
+// it (adminActor), what it was (the route), the user it was about when the route names one, and
+// whether it succeeded. The verbs that say more (a ban's reason) add their own row.
+func (a *Authenticator) wrapAdmin(h func(*reqCtx)) http.HandlerFunc {
+	inner := a.wrap(h)
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet || r.Method == http.MethodHead || a.creds == nil {
+			inner(w, r)
+			return
+		}
+		actor := a.adminActor(a.newCtx(w, r)) // before the call: it may end the actor's own session
+		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+		inner(sw, r)
+		if actor == "" {
+			return // refused by adminGuard: not an admin action
+		}
+		target := r.PathValue("userId")
+		if target == "" && strings.Contains(r.Pattern, "/users/{id}") {
+			target = r.PathValue("id")
+		}
+		a.creds.RecordAudit(target, "", a.clientIP(r), "admin", r.Pattern, sw.status < 400, actor)
+	}
+}
+
+// statusWriter remembers the status a handler answered with.
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (s *statusWriter) WriteHeader(code int) {
+	s.status = code
+	s.ResponseWriter.WriteHeader(code)
+}
+
+// ownerShielded refuses (403) an admin verb that would change the owner's account when an API key
+// is what authorizes it, and reports whether it did. An admin key runs the admin API, but the owner
+// is who can take a key away: a key that could ban, delete or re-password the owner, or sign in as
+// them, would be the owner — and a leaked one could lock the owner out. The owner's own session
+// still may.
+func (a *Authenticator) ownerShielded(c *reqCtx, target *AuthUser) bool {
+	if target == nil || !target.EmailVerified || !a.isOwnerEmail(target.Email) {
+		return false
+	}
+	if !strings.HasPrefix(a.adminActor(c), "apikey:") {
+		return false
+	}
+	c.JSON(http.StatusForbidden, H{"error": "the owner's account can only be changed from an owner session"})
+	return true
+}
+
 // isOwnerSession reports whether a session is the instance owner's. With a CredentialStore the owner
 // is the LIVE account behind the session — its stored, verified address equal to OWNER_EMAIL, and
 // allowed to sign in — not whatever email the cookie was minted with (an address can be re-pointed or
@@ -216,24 +303,24 @@ func (a *Authenticator) isOwnerSession(sc *SessionClaims) bool {
 // adminRoutes mounts the admin REST API under /auth/admin (called by routes() when a directory
 // store is wired). Each handler self-gates via adminGuard.
 func (a *Authenticator) adminRoutes(mux *http.ServeMux) {
-	mux.HandleFunc("GET /auth/admin/groups", a.wrap(a.adminListGroups))
-	mux.HandleFunc("POST /auth/admin/groups", a.wrap(a.adminCreateGroup))
-	mux.HandleFunc("DELETE /auth/admin/groups/{id}", a.wrap(a.adminDeleteGroup))
-	mux.HandleFunc("POST /auth/admin/groups/{id}/members/{userId}", a.wrap(a.adminAddMember))
-	mux.HandleFunc("DELETE /auth/admin/groups/{id}/members/{userId}", a.wrap(a.adminRemoveMember))
-	mux.HandleFunc("GET /auth/admin/groups/{id}/members", a.wrap(a.adminGroupMembers))
-	mux.HandleFunc("GET /auth/admin/users", a.wrap(a.adminListUsers))
-	mux.HandleFunc("POST /auth/admin/users", a.wrap(a.adminCreateUser))
-	mux.HandleFunc("POST /auth/admin/users/{id}/disabled", a.wrap(a.adminSetDisabled))
-	mux.HandleFunc("POST /auth/admin/users/{id}/password", a.wrap(a.adminSetPassword))
-	mux.HandleFunc("POST /auth/admin/users/{id}/ban", a.wrap(a.adminSetBan))
-	mux.HandleFunc("DELETE /auth/admin/users/{id}", a.wrap(a.adminDeleteUser))
-	mux.HandleFunc("POST /auth/admin/users/{id}/impersonate", a.wrap(a.adminImpersonate))
-	mux.HandleFunc("GET /auth/admin/users/{id}/sessions", a.wrap(a.adminListUserSessions))
-	mux.HandleFunc("POST /auth/admin/users/{id}/sessions/revoke", a.wrap(a.adminRevokeUserSessions))
-	mux.HandleFunc("GET /auth/admin/apikeys", a.wrap(a.adminListKeys))
-	mux.HandleFunc("POST /auth/admin/apikeys", a.wrap(a.adminCreateKey))
-	mux.HandleFunc("DELETE /auth/admin/apikeys/{id}", a.wrap(a.adminRevokeKey))
+	mux.HandleFunc("GET /auth/admin/groups", a.wrapAdmin(a.adminListGroups))
+	mux.HandleFunc("POST /auth/admin/groups", a.wrapAdmin(a.adminCreateGroup))
+	mux.HandleFunc("DELETE /auth/admin/groups/{id}", a.wrapAdmin(a.adminDeleteGroup))
+	mux.HandleFunc("POST /auth/admin/groups/{id}/members/{userId}", a.wrapAdmin(a.adminAddMember))
+	mux.HandleFunc("DELETE /auth/admin/groups/{id}/members/{userId}", a.wrapAdmin(a.adminRemoveMember))
+	mux.HandleFunc("GET /auth/admin/groups/{id}/members", a.wrapAdmin(a.adminGroupMembers))
+	mux.HandleFunc("GET /auth/admin/users", a.wrapAdmin(a.adminListUsers))
+	mux.HandleFunc("POST /auth/admin/users", a.wrapAdmin(a.adminCreateUser))
+	mux.HandleFunc("POST /auth/admin/users/{id}/disabled", a.wrapAdmin(a.adminSetDisabled))
+	mux.HandleFunc("POST /auth/admin/users/{id}/password", a.wrapAdmin(a.adminSetPassword))
+	mux.HandleFunc("POST /auth/admin/users/{id}/ban", a.wrapAdmin(a.adminSetBan))
+	mux.HandleFunc("DELETE /auth/admin/users/{id}", a.wrapAdmin(a.adminDeleteUser))
+	mux.HandleFunc("POST /auth/admin/users/{id}/impersonate", a.wrapAdmin(a.adminImpersonate))
+	mux.HandleFunc("GET /auth/admin/users/{id}/sessions", a.wrapAdmin(a.adminListUserSessions))
+	mux.HandleFunc("POST /auth/admin/users/{id}/sessions/revoke", a.wrapAdmin(a.adminRevokeUserSessions))
+	mux.HandleFunc("GET /auth/admin/apikeys", a.wrapAdmin(a.adminListKeys))
+	mux.HandleFunc("POST /auth/admin/apikeys", a.wrapAdmin(a.adminCreateKey))
+	mux.HandleFunc("DELETE /auth/admin/apikeys/{id}", a.wrapAdmin(a.adminRevokeKey))
 }
 
 // paramID reads an opaque entity-id path parameter; on a missing/blank value it writes a 400 and
@@ -309,6 +396,21 @@ func (a *Authenticator) adminDeleteGroup(c *reqCtx) {
 	c.JSON(http.StatusOK, H{"ok": true})
 }
 
+// globalGroup reports whether gid is a global group, answering 404 for an org's: the global verbs
+// don't reach into an org's groups (its own verbs, under /auth/admin/orgs/{id}/groups, check that the
+// user is a member of the org).
+func (a *Authenticator) globalGroup(c *reqCtx, gid string) bool {
+	od := a.orgDir()
+	if od == nil {
+		return true
+	}
+	if org, err := od.OrgOfGroup(gid); err == nil && org != "" {
+		c.JSON(http.StatusNotFound, H{"error": "no such group (an organization's groups are managed under /auth/admin/orgs/{id}/groups)"})
+		return false
+	}
+	return true
+}
+
 func (a *Authenticator) adminAddMember(c *reqCtx) {
 	if !a.adminGuard(c) {
 		return
@@ -316,6 +418,13 @@ func (a *Authenticator) adminAddMember(c *reqCtx) {
 	uid, ok := paramID(c, "userId")
 	gid, ok2 := paramID(c, "id")
 	if !ok || !ok2 {
+		return
+	}
+	if !a.globalGroup(c, gid) {
+		return
+	}
+	if _, err := a.dir.UserByID(uid); err != nil { // a membership for an id nobody has yet would be the next such user's
+		c.JSON(http.StatusNotFound, H{"error": "no such user"})
 		return
 	}
 	if err := a.dir.AddUserToGroup(uid, gid); err != nil {
@@ -332,6 +441,9 @@ func (a *Authenticator) adminRemoveMember(c *reqCtx) {
 	uid, ok := paramID(c, "userId")
 	gid, ok2 := paramID(c, "id")
 	if !ok || !ok2 {
+		return
+	}
+	if !a.globalGroup(c, gid) {
 		return
 	}
 	if err := a.dir.RemoveUserFromGroup(uid, gid); err != nil {
@@ -377,22 +489,33 @@ func (a *Authenticator) adminSetDisabled(c *reqCtx) {
 	if !ok {
 		return
 	}
+	// The flag is required: a body that doesn't parse, or leaves it out, must not read as
+	// {"disabled": false} and re-enable the user.
 	var body struct {
-		Disabled bool `json:"disabled"`
+		Disabled *bool `json:"disabled"`
 	}
-	_ = c.ShouldBindJSON(&body)
-	if err := a.dir.SetUserDisabled(id, body.Disabled); err != nil {
+	if err := c.ShouldBindJSON(&body); err != nil || body.Disabled == nil {
+		c.JSON(http.StatusBadRequest, H{"error": "disabled (true or false) is required"})
+		return
+	}
+	u, uerr := a.dir.UserByID(id)
+	if uerr != nil {
+		c.JSON(http.StatusNotFound, H{"error": "no such user"})
+		return
+	}
+	if a.ownerShielded(c, u) {
+		return
+	}
+	if err := a.dir.SetUserDisabled(id, *body.Disabled); err != nil {
 		a.adminFail(c, http.StatusInternalServerError, "could not update user", err)
 		return
 	}
 	// Parity with ban: when disabling and a SessionStore is wired, cut the user's live sessions so the
 	// disable takes effect immediately instead of lingering until the cookie expires.
-	if body.Disabled && a.sessions != nil {
-		if u, uerr := a.dir.UserByID(id); uerr == nil {
-			_ = a.sessions.RevokeAllForUser(u.Sub)
-		}
+	if *body.Disabled && a.sessions != nil {
+		_ = a.sessions.RevokeAllForUser(u.Sub)
 	}
-	c.JSON(http.StatusOK, H{"ok": true, "disabled": body.Disabled})
+	c.JSON(http.StatusOK, H{"ok": true, "disabled": *body.Disabled})
 }
 
 func (a *Authenticator) adminListKeys(c *reqCtx) {
@@ -422,6 +545,13 @@ func (a *Authenticator) adminCreateKey(c *reqCtx) {
 		c.JSON(http.StatusBadRequest, H{"error": "name required"})
 		return
 	}
+	// A store may keep these as comma-separated lists (gormstore does): "x,*" would come back as two.
+	for _, v := range append(slices.Clone(body.Groups), body.Scopes...) {
+		if strings.ContainsAny(v, ", \t\r\n") || v == "" {
+			c.JSON(http.StatusBadRequest, H{"error": "a group or scope can't be empty or contain a comma or whitespace"})
+			return
+		}
+	}
 	var expires *time.Time
 	if body.ExpiresAt != nil && *body.ExpiresAt != "" {
 		t, perr := time.Parse(time.RFC3339, *body.ExpiresAt)
@@ -430,6 +560,27 @@ func (a *Authenticator) adminCreateKey(c *reqCtx) {
 			return
 		}
 		expires = &t
+	}
+	// A key mints no key wider or longer-lived than itself: otherwise one leaked short-lived admin key
+	// is a permanent root key. (An org-bound key's scopes reach only its org; its expiry is still
+	// capped.) The owner's session mints anything.
+	if minter := a.mintingKey(c); minter != nil {
+		if strings.TrimSpace(body.Org) == "" {
+			for _, sc := range body.Scopes {
+				if !KeyHasScope(minter, sc) {
+					c.JSON(http.StatusForbidden, H{"error": "an API key can't grant a scope it doesn't have: " + sc})
+					return
+				}
+			}
+		}
+		if minter.ExpiresAt != nil && (expires == nil || expires.After(*minter.ExpiresAt)) {
+			if expires != nil {
+				c.JSON(http.StatusForbidden, H{"error": "an API key can't mint a key that outlives it"})
+				return
+			}
+			t := *minter.ExpiresAt
+			expires = &t
+		}
 	}
 	raw, prefix, hash := generateAPIKey()
 	var info *APIKeyInfo

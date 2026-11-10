@@ -10,9 +10,11 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
+	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/facebook"
 	"golang.org/x/oauth2/github"
@@ -86,7 +88,7 @@ func (a *Authenticator) SocialLogin(c *reqCtx) {
 		return
 	}
 	state, nonce, verifier := randToken(), randToken(), oauth2.GenerateVerifier()
-	flow, err := mintFlow(a.cfg.SessionSecret, flowClaims{State: state, Nonce: nonce, Verifier: verifier, Next: sanitizeNext(c.Query("next"))}, time.Now())
+	flow, err := mintFlow(a.cfg.SessionSecret, flowClaims{State: state, Nonce: nonce, Verifier: verifier, Next: sanitizeNext(c.Query("next")), Provider: provider}, time.Now())
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, H{"error": "login init failed"})
 		return
@@ -122,7 +124,7 @@ func (a *Authenticator) SocialCallback(c *reqCtx) {
 	ctx := c.Request.Context()
 	flowTok, _ := c.Cookie(flowCookie)
 	fc, err := parseFlowMulti(a.verifySecrets(), flowTok)
-	if err != nil {
+	if err != nil || fc.Provider != provider { // a flow started at another provider isn't finished here
 		c.JSON(http.StatusBadRequest, H{"error": "login session expired — try again"})
 		return
 	}
@@ -217,11 +219,9 @@ func (a *Authenticator) SocialCallback(c *reqCtx) {
 		}
 	}
 
-	signedInSub := ""
-	if sc := a.sessionOf(c); sc != nil {
-		signedInSub = sc.Subject
-	}
-	au, err := a.resolveSocialUserFor(provider, subject, email, name, signedInSub)
+	// Who, signed in in this browser, asked to connect this provider (OAuthConnect) — not merely who is
+	// signed in.
+	au, err := a.resolveSocialUserFor(provider, subject, email, name, a.connecting(c, provider))
 	if err != nil {
 		if errors.Is(err, errProviderDisconnected) {
 			c.JSON(http.StatusConflict, H{"error": provider + " was disconnected from this account — sign in another way, then connect " + provider + " again"})
@@ -261,15 +261,77 @@ func (a *Authenticator) resolveSocialUser(provider, subject, email, name string)
 // errProviderDisconnected refuses linking a provider the account's user disconnected.
 var errProviderDisconnected = errors.New("authx: this sign-in was disconnected from the account")
 
-// unlinkMark keys the "disconnected" record of a user's provider in the token store.
+// unlinkMark keys the "disconnected" record of a user's provider in the token store. The record is
+// never consumed: it matters only while the provider isn't linked, and stays for the next disconnect.
+// (Consumed on reconnect, as it was, the one-per-user-and-provider record could not be made again,
+// and a second disconnect left the provider free to link back.)
 func unlinkMark(userID, provider string) []byte {
-	return hashToken("unlinked|" + userID + "|" + provider)
+	return hashToken("unlinked2|" + userID + "|" + provider)
 }
 
-// resolveSocialUserFor is resolveSocialUser for a request that may already be signed in as
-// signedInSub: disconnecting a provider stops it linking back by email (a compromised provider
-// account would otherwise walk back in), unless the account's user reconnects it while signed in.
-func (a *Authenticator) resolveSocialUserFor(provider, subject, email, name, signedInSub string) (*AuthUser, error) {
+// linkCookie carries a signed-in user's intent to connect a provider (OAuthConnect) to that
+// provider's callback.
+const (
+	linkCookie = "sweep_link"
+	linkTTL    = 10 * time.Minute
+)
+
+type linkClaims struct {
+	Provider string `json:"pr"`
+	jwt.RegisteredClaims
+}
+
+// OAuthConnect (POST /auth/api/identities/{provider}/connect) records that the signed-in user wants
+// to connect — or reconnect — this provider, and answers where to send the browser to do it. Only
+// with it does the provider's next callback link back a provider the user had disconnected: signed
+// in is not enough, since any page can send a signed-in user's browser to the provider's login.
+func (a *Authenticator) OAuthConnect(c *reqCtx) {
+	au, err := a.currentAuthUser(c)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, H{"error": "unauthenticated"})
+		return
+	}
+	provider := c.Param("provider")
+	if a.socialOAuth(provider) == nil {
+		c.JSON(http.StatusNotFound, H{"error": "provider not enabled"})
+		return
+	}
+	now := time.Now()
+	tok, err := signJWT(a.cfg.SessionSecret, linkClaims{Provider: provider, RegisteredClaims: jwt.RegisteredClaims{
+		Subject: au.Sub, Audience: jwt.ClaimStrings{audLink},
+		IssuedAt: jwt.NewNumericDate(now), ExpiresAt: jwt.NewNumericDate(now.Add(linkTTL)),
+	}})
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, H{"error": "could not start connecting"})
+		return
+	}
+	a.setCookie(c, linkCookie, tok, int(linkTTL/time.Second))
+	c.JSON(http.StatusOK, H{"ok": true, "next": "/auth/social/" + provider + "/login"})
+}
+
+// connecting returns the subject of the signed-in user who asked to connect provider (OAuthConnect)
+// in this browser, or "" — and spends the intent.
+func (a *Authenticator) connecting(c *reqCtx, provider string) string {
+	tok, _ := c.Cookie(linkCookie)
+	if tok == "" {
+		return ""
+	}
+	a.clearCookie(c, linkCookie)
+	var lc linkClaims
+	if parseJWTMulti(a.verifySecrets(), tok, &lc, audLink) != nil || lc.Provider != provider {
+		return ""
+	}
+	if sc := a.sessionOf(c); sc == nil || sc.Subject != lc.Subject || sc.ImpersonatedBy != "" {
+		return ""
+	}
+	return lc.Subject
+}
+
+// resolveSocialUserFor is resolveSocialUser for a request whose signed-in user connectingSub asked to
+// connect the provider (OAuthConnect; "" when nobody did): disconnecting a provider stops it linking
+// back by email (a compromised provider account would otherwise walk back in), unless the account's
+// user reconnects it that way.
+func (a *Authenticator) resolveSocialUserFor(provider, subject, email, name, connectingSub string) (*AuthUser, error) {
 	if u, err := a.creds.UserByOAuth(provider, subject); err == nil {
 		return u, nil
 	} else if !errors.Is(err, ErrNoUser) {
@@ -277,15 +339,28 @@ func (a *Authenticator) resolveSocialUserFor(provider, subject, email, name, sig
 	}
 	if u, err := a.creds.UserByEmail(email); err == nil {
 		if u.EmailVerified {
-			if _, perr := a.creds.PeekToken(purposeUnlinkedOAuth, unlinkMark(u.ID, provider)); perr == nil {
-				if signedInSub != u.Sub {
-					return nil, errProviderDisconnected
-				}
-				_, _ = a.creds.ConsumeToken(purposeUnlinkedOAuth, unlinkMark(u.ID, provider)) // reconnected
+			if _, perr := a.creds.PeekToken(purposeUnlinkedOAuth, unlinkMark(u.ID, provider)); perr == nil && connectingSub != u.Sub {
+				return nil, errProviderDisconnected
 			}
 			if err := a.creds.LinkOAuth(u.ID, provider, subject, email); err != nil {
 				return nil, err
 			}
+			return u, nil
+		}
+		// An unverified account a provisioning source made (SCIM, an org's SCIM, LDAP) that its user
+		// hasn't signed in to yet: the provider's verified email is their mailbox proof, and the
+		// account becomes theirs — kept, with its id and its group and org memberships, so the IdP
+		// that provisioned the person can still update and deprovision them. Replaced with a fresh
+		// account (as a squatter's is, below), the person lost those memberships and the IdP its
+		// handle on them. Nothing that signs in is carried over (takeOver).
+		if strings.HasPrefix(u.Sub, "scim:") || strings.HasPrefix(u.Sub, "ldap:") {
+			if err := a.takeOver(u); err != nil {
+				return nil, err
+			}
+			if err := a.creds.LinkOAuth(u.ID, provider, subject, email); err != nil {
+				return nil, err
+			}
+			u.EmailVerified = true
 			return u, nil
 		}
 		// Unverified squatter on a provider-verified email. With a directory wired, reclaim it

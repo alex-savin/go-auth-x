@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net/http"
 	"net/url"
+	"path"
 	"strings"
 	"time"
 
@@ -27,7 +28,12 @@ func ctEqual(a, b string) bool {
 func (a *Authenticator) routes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /auth/login", a.wrap(a.Login))       // OIDC: start Authorization Code + PKCE
 	mux.HandleFunc("GET /auth/callback", a.wrap(a.Callback)) // OIDC: redirect target
-	mux.HandleFunc("GET /auth/logout", a.wrap(a.Logout))
+	// POST (with the CSRF token) is the way to sign out. GET still works unless Config.DisableGetLogout:
+	// it lets any page the user visits sign them out.
+	mux.HandleFunc("POST /auth/logout", a.wrap(a.Logout))
+	if !a.cfg.DisableGetLogout {
+		mux.HandleFunc("GET /auth/logout", a.wrap(a.Logout))
+	}
 	mux.HandleFunc("GET /auth/me", a.wrap(a.Me))
 	mux.HandleFunc("GET /auth/config", a.wrap(a.AuthConfig)) // public: which methods are available
 	// Session management + impersonation-exit act on the session cookie regardless of which methods are
@@ -57,8 +63,9 @@ func (a *Authenticator) routes(mux *http.ServeMux) {
 		mux.HandleFunc("DELETE /auth/api/account", a.wrap(a.AccountDelete))                 // self-service delete
 		mux.HandleFunc("DELETE /auth/api/passkeys/{id}", a.wrap(a.PasskeyRemove))
 		mux.HandleFunc("POST /auth/api/passkeys/{id}", a.wrap(a.PasskeyRename))
-		mux.HandleFunc("DELETE /auth/api/identities/{provider}", a.wrap(a.OAuthUnlink)) // unlink social/OIDC
-		mux.HandleFunc("POST /auth/reauth", a.wrap(a.ReAuth))                           // step-up re-auth for sensitive actions
+		mux.HandleFunc("DELETE /auth/api/identities/{provider}", a.wrap(a.OAuthUnlink))        // unlink social/OIDC
+		mux.HandleFunc("POST /auth/api/identities/{provider}/connect", a.wrap(a.OAuthConnect)) // then /auth/social/{provider}/login
+		mux.HandleFunc("POST /auth/reauth", a.wrap(a.ReAuth))                                  // step-up re-auth for sensitive actions
 	}
 	if a.TwoFactorEnabled() {
 		mux.HandleFunc("POST /auth/2fa/totp/begin", a.wrap(a.TOTPBegin))     // session-gated: start enrollment
@@ -131,7 +138,7 @@ func (a *Authenticator) Callback(c *reqCtx) {
 
 	flowTok, _ := c.Cookie(flowCookie)
 	fc, err := parseFlowMulti(a.verifySecrets(), flowTok)
-	if err != nil {
+	if err != nil || fc.Provider != "" { // a social provider's flow isn't finished at the OIDC callback
 		c.JSON(http.StatusBadRequest, H{"error": "login session expired — try again"})
 		return
 	}
@@ -262,6 +269,7 @@ func (a *Authenticator) Logout(c *reqCtx) {
 	}
 	a.clearCookie(c, sessionCookie)
 	a.clearCookie(c, csrfCookie)
+	a.clearCookie(c, stepUpCookie) // a step-up doesn't outlive the session it was made in
 	// Only do RP-initiated (IdP) logout when THIS session actually came from OIDC — i.e. it
 	// carries an id_token. In-app sessions (password / passkey / email) must not bounce
 	// through the IdP; they just return to our own login.
@@ -377,20 +385,32 @@ func randToken() string {
 
 // sanitizeNext keeps the post-login redirect to a local path (prevents open-redirect to an attacker
 // host); defaults to the dashboard root. It rejects scheme-relative targets ("//evil.com" AND
-// "/\evil.com" — browsers treat a backslash as a slash) and any target containing a control byte:
-// browsers strip ASCII whitespace such as a tab before parsing a URL, so "/\t/evil.com" would be read
-// as "//evil.com" (scheme-relative) and redirect off-site.
+// "/\evil.com" — browsers treat a backslash as a slash), a backslash anywhere, and any target
+// containing a control byte: browsers strip ASCII whitespace such as a tab before parsing a URL, so
+// "/\t/evil.com" would be read as "//evil.com" (scheme-relative) and redirect off-site.
+//
+// What it returns is what a redirect emits: http.Redirect cleans the path it is given, so a target
+// validated before that cleaning ("/./\evil.com" starts with "/.") came out as another one
+// ("/\evil.com"). The path is cleaned here first, the same way.
 func sanitizeNext(next string) string {
-	if next == "" || !strings.HasPrefix(next, "/") {
+	if next == "" || next[0] != '/' {
 		return "/"
 	}
 	for i := 0; i < len(next); i++ {
-		if next[i] < 0x20 || next[i] == 0x7f { // control byte (tab/newline/…) → reject
+		if next[i] < 0x20 || next[i] == 0x7f || next[i] == '\\' { // control byte (tab/newline/…) or backslash → reject
 			return "/"
 		}
 	}
-	if len(next) > 1 && (next[1] == '/' || next[1] == '\\') {
+	if len(next) > 1 && next[1] == '/' {
 		return "/"
 	}
-	return next
+	p, rest := next, ""
+	if i := strings.IndexAny(next, "?#"); i >= 0 {
+		p, rest = next[:i], next[i:]
+	}
+	trailing := strings.HasSuffix(p, "/")
+	if p = path.Clean(p); trailing && p != "/" {
+		p += "/"
+	}
+	return p + rest
 }

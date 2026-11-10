@@ -23,6 +23,7 @@ const (
 	audPending  = "authx:2fa-pending"
 	audStepUp   = "authx:stepup"
 	audSignup   = "authx:signup"
+	audLink     = "authx:link"
 )
 
 // SessionClaims is the signed session-cookie payload — the authenticated identity.
@@ -65,6 +66,9 @@ type flowClaims struct {
 	Nonce    string `json:"no"`
 	Verifier string `json:"ve"`
 	Next     string `json:"nx"`
+	// Provider is the social provider the flow was started with ("" for the OIDC login): a flow is
+	// finished at that provider's callback and no other.
+	Provider string `json:"pr,omitempty"`
 	jwt.RegisteredClaims
 }
 
@@ -146,6 +150,7 @@ func mintSessionWith(secret []byte, base SessionClaims, sub string, now time.Tim
 	if base.AuthTime == nil {
 		base.AuthTime = jwt.NewNumericDate(now)
 	}
+	base.Name = clampName(base.Name, maxNameLen) // whatever a directory or provider stored (see maxNameLen)
 	base.RegisteredClaims = jwt.RegisteredClaims{
 		Subject:   sub,
 		Audience:  jwt.ClaimStrings{audSession},

@@ -1,8 +1,10 @@
 package mailer
 
 import (
+	"net"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestFromEnv_Defaults(t *testing.T) {
@@ -84,5 +86,38 @@ func TestBuildMIME_StructureAndInjection(t *testing.T) {
 func TestSend_NotConfigured(t *testing.T) {
 	if err := (&Sender{}).Send("to@x.com", "s", "<p>h</p>", "t"); err == nil {
 		t.Fatal("Send on an unconfigured sender must error rather than dial")
+	}
+}
+
+// A server that accepts the connection and then says nothing doesn't hold Send forever.
+func TestSendGivesUpOnASilentServer(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			t.Cleanup(func() { c.Close() }) // held open, never answered
+		}
+	}()
+	old := sendTimeout
+	sendTimeout = 300 * time.Millisecond
+	defer func() { sendTimeout = old }()
+	host, port, _ := net.SplitHostPort(ln.Addr().String())
+	s := &Sender{host: host, port: port, user: "u", pass: "p", from: "from@x.com"}
+	done := make(chan error, 1)
+	go func() { done <- s.Send("to@x.com", "subject", "<p>hi</p>", "hi") }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("a silent server must be an error")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Send is still waiting on a silent server")
 	}
 }

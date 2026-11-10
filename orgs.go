@@ -151,6 +151,23 @@ func validOrgRole(r string) bool {
 // reserved owner/admin roles; custom roles never manage).
 func orgRoleIsManager(role string) bool { return role == OrgRoleOwner || role == OrgRoleAdmin }
 
+// mayGrantOrgRole reports whether a member with actorRole may give someone role. An owner grants any
+// role. An admin grants "admin" and "member" — and a custom role only where Config.OrgAdminMayGrant
+// says so: the app decides what its own roles open (the README gates "billing" beside the owner), so
+// an admin handing one out, to themselves or an invited address of theirs, would be an admin promoting
+// themselves.
+func (a *Authenticator) mayGrantOrgRole(actorRole, role string) bool {
+	switch {
+	case actorRole == OrgRoleOwner:
+		return true
+	case actorRole != OrgRoleAdmin || role == OrgRoleOwner:
+		return false
+	case role == OrgRoleAdmin || role == OrgRoleMember:
+		return true
+	}
+	return a.cfg.OrgAdminMayGrant != nil && a.cfg.OrgAdminMayGrant(role)
+}
+
 // defaultOrgClaims picks the active-org claims stamped on a FRESH session: the user's sole
 // membership, or none when the user belongs to zero or several orgs (the app then prompts and
 // calls POST /auth/org/switch). Deterministic and conservative — never guesses among multiple.

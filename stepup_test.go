@@ -15,7 +15,7 @@ func TestStepUpFresh(t *testing.T) {
 	sess, _ := mintSession(secret, "local:u1", "u@x.com", "U", "", "", nil, time.Now(), sessionTTL)
 
 	mintStep := func(sub string, iat time.Time) string {
-		tok, _ := signJWT(secret, stepUpClaims{jwt.RegisteredClaims{
+		tok, _ := signJWT(secret, stepUpClaims{RegisteredClaims: jwt.RegisteredClaims{
 			Subject: sub, Audience: jwt.ClaimStrings{audStepUp},
 			IssuedAt: jwt.NewNumericDate(iat), ExpiresAt: jwt.NewNumericDate(iat.Add(stepUpCookieTTL)),
 		}})

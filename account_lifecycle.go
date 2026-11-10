@@ -15,14 +15,19 @@ const accountStepUpMaxAge = 10 * time.Minute
 // verify — a password or enabled TOTP. A purely passwordless (social/OIDC-only) user has neither, so a
 // step-up gate would lock them out permanently; it is not a net protection loss for them, since their
 // session already permits setting a password (i.e. self-service takeover) without a prior factor.
+//
+// A store error counts as having one: the callers then ask for a step-up, rather than waive it for a
+// user whose factors couldn't be read.
 func (a *Authenticator) hasReauthFactor(userID string) bool {
-	if _, _, err := a.passwordHash(userID); err == nil {
+	if _, _, err := a.passwordHash(userID); err == nil || !errors.Is(err, ErrNoCredential) {
 		return true
 	}
 	if a.twoFactor != nil {
-		if info, err := a.twoFactor.TOTP(userID); err == nil && info != nil && info.Enabled {
-			return true
+		info, err := a.twoFactor.TOTP(userID)
+		if err != nil {
+			return !errors.Is(err, ErrNoCredential)
 		}
+		return info != nil && info.Enabled
 	}
 	return false
 }
@@ -43,6 +48,31 @@ func (a *Authenticator) AccountDelete(c *reqCtx) {
 	if a.hasReauthFactor(au.ID) && !a.StepUpFresh(c.Request, accountStepUpMaxAge) {
 		c.JSON(http.StatusForbidden, H{"error": "reauth_required"})
 		return
+	}
+	// The last-owner guard that leaving an org has (OrgMemberRemove) holds here too: deleting the
+	// account drops the membership, and an org with no owner has nobody who can make one.
+	if a.orgs != nil {
+		a.orgMu.Lock()
+		defer a.orgMu.Unlock()
+		memberships, oerr := a.orgs.UserOrgs(au.ID)
+		if oerr != nil {
+			c.JSON(http.StatusInternalServerError, H{"error": "could not delete your account"})
+			return
+		}
+		for _, m := range memberships {
+			if m.Role != OrgRoleOwner {
+				continue
+			}
+			sole, serr := a.soleOwner(m.Org.ID, au.ID)
+			if serr != nil {
+				c.JSON(http.StatusInternalServerError, H{"error": "could not delete your account"})
+				return
+			}
+			if sole {
+				c.JSON(http.StatusConflict, H{"error": "you are the only owner of " + m.Org.Name + " — make someone else an owner, or delete the organization, first"})
+				return
+			}
+		}
 	}
 	// Record before the delete so DeleteUser can anonymize this row too (keeps the event, drops PII).
 	a.creds.RecordAudit(au.ID, au.Email, c.ClientIP(), "account", "self_delete", true, "")
@@ -104,11 +134,15 @@ func (a *Authenticator) AccountChangeEmailRequest(c *reqCtx) {
 	// silently emailing a stranger). Redemption re-checks via SetEmail's unique constraint anyway.
 	// Taken: the same answer as a free address (no account-existence oracle); the address's owner hears
 	// of it, and the confirm step re-checks uniqueness anyway.
+	// The mail is sent off the request in both cases: sent in it, one SMTP exchange (taken) against two
+	// (free) would tell them apart by how long the answer takes.
 	if other, e := a.creds.UserByEmail(newEmail); e == nil && other != nil {
 		if a.acctLimiter == nil || a.acctLimiter.Allow("change-email-taken:"+newEmail) {
-			_ = a.sendAuthEmail(newEmail, "Someone tried to use this address", "This address already has an account",
-				"Someone signed in to another account tried to change its email to this address. It already belongs to an account, so nothing was changed.",
-				"Sign in", a.baseURL()+"/login", "If this was you, sign in to the account that uses this address.")
+			go func() {
+				_ = a.sendAuthEmail(newEmail, "Someone tried to use this address", "This address already has an account",
+					"Someone signed in to another account tried to change its email to this address. It already belongs to an account, so nothing was changed.",
+					"Sign in", a.baseURL()+"/login", "If this was you, sign in to the account that uses this address.")
+			}()
 		}
 		c.JSON(http.StatusOK, H{"ok": true, "message": "Check your new inbox to confirm the change."})
 		return
@@ -119,13 +153,16 @@ func (a *Authenticator) AccountChangeEmailRequest(c *reqCtx) {
 		return
 	}
 	link := a.baseURL() + "/auth/email/change?token=" + raw
-	_ = a.sendAuthEmail(newEmail, "Confirm your new email", "Confirm your new email",
-		"Confirm this address to make it your new sign-in email. This link is valid for 1 hour.",
-		"Confirm email", link, "If you didn't request this, you can ignore this email.")
-	// Security-awareness notice to the OLD address (do not block on it).
-	_ = a.sendAuthEmail(au.Email, "Email change requested", "Email change requested",
-		"A change of your account email to "+newEmail+" was requested. If this wasn't you, sign in and secure your account.",
-		"Review account", a.baseURL()+"/login", "")
+	oldEmail := au.Email
+	go func() {
+		_ = a.sendAuthEmail(newEmail, "Confirm your new email", "Confirm your new email",
+			"Confirm this address to make it your new sign-in email. Open the link in a browser where you are signed in. It is valid for 1 hour.",
+			"Confirm email", link, "If you didn't request this, you can ignore this email.")
+		// Security-awareness notice to the OLD address.
+		_ = a.sendAuthEmail(oldEmail, "Email change requested", "Email change requested",
+			"A change of your account email to "+newEmail+" was requested. If this wasn't you, reset your password: that also cancels the change.",
+			"Review account", a.baseURL()+"/login", "")
+	}()
 	a.creds.RecordAudit(au.ID, au.Email, c.ClientIP(), "account", "change_email_requested", true, newEmail)
 	c.JSON(http.StatusOK, H{"ok": true, "message": "Check your new inbox to confirm the change."})
 }
@@ -141,8 +178,28 @@ func (a *Authenticator) EmailChangeConfirm(c *reqCtx) {
 		fail("missing token")
 		return
 	}
-	claim, err := a.creds.ConsumeToken(purposeChangeEmail, hashToken(token))
+	claim, err := a.creds.PeekToken(purposeChangeEmail, hashToken(token))
 	if err != nil {
+		fail("this link is invalid or has expired")
+		return
+	}
+	// The link proves the new mailbox, not that the account still wants the change: it is confirmed
+	// in a browser signed in to the account. Someone who asked for the change with a stolen password
+	// or session holds the link, and after the account's owner resets the password or signs
+	// everything out, no session to open it with. Not signed in: sign in and come back (the token
+	// isn't spent).
+	signedIn := false
+	if sc := a.sessionOf(c); sc != nil && sc.ImpersonatedBy == "" {
+		if u, uerr := a.creds.UserBySub(sc.Subject); uerr == nil {
+			signedIn = u.ID == claim.UserID
+		}
+	}
+	if !signedIn {
+		c.Redirect(http.StatusFound, a.baseURL()+"/login?message="+url.QueryEscape("Sign in to confirm your new email address.")+
+			"&next="+url.QueryEscape("/auth/email/change?token="+token))
+		return
+	}
+	if _, err := a.creds.ConsumeToken(purposeChangeEmail, hashToken(token)); err != nil {
 		fail("this link is invalid or has expired")
 		return
 	}
@@ -156,4 +213,13 @@ func (a *Authenticator) EmailChangeConfirm(c *reqCtx) {
 	}
 	a.creds.RecordAudit(claim.UserID, claim.Email, c.ClientIP(), "account", "email_changed", true, "")
 	c.Redirect(http.StatusFound, a.baseURL()+"/login?message="+url.QueryEscape("Your email has been updated — please sign in."))
+}
+
+// cancelPendingEmailChange drops the user's unconfirmed email-change links (when the store can: see
+// TokenRevoker). Called wherever an account is taken back — a password reset or change, signing out
+// its other sessions — since whoever it is taken back from may have a change of address pending.
+func (a *Authenticator) cancelPendingEmailChange(userID string) {
+	if tr, ok := a.creds.(TokenRevoker); ok && userID != "" {
+		_ = tr.DeleteTokens(purposeChangeEmail, userID)
+	}
 }

@@ -272,6 +272,10 @@ func (a *Authenticator) OrgMemberSetRole(c *reqCtx) {
 		c.JSON(http.StatusForbidden, H{"error": "only an owner may grant or change the owner role"})
 		return
 	}
+	if newRole != targetRole && !a.mayGrantOrgRole(actorRole, newRole) {
+		c.JSON(http.StatusForbidden, H{"error": "only an owner may grant this role"})
+		return
+	}
 	if targetRole == OrgRoleOwner && newRole != OrgRoleOwner {
 		sole, serr := a.soleOwner(sc.Org, uid)
 		if serr != nil {
@@ -392,6 +396,10 @@ func (a *Authenticator) OrgInviteCreate(c *reqCtx) {
 	}
 	if role == OrgRoleOwner && actorRole != OrgRoleOwner {
 		c.JSON(http.StatusForbidden, H{"error": "only an owner may invite an owner"})
+		return
+	}
+	if !a.mayGrantOrgRole(actorRole, role) {
+		c.JSON(http.StatusForbidden, H{"error": "only an owner may invite with this role"})
 		return
 	}
 	// Modest per-inviter throttle (when the local limiters are wired) so a compromised org admin
@@ -542,7 +550,7 @@ func (a *Authenticator) OrgInviteAccept(c *reqCtx) {
 		return
 	}
 	// Redeeming the emailed token proved control of the account's address.
-	_ = a.creds.SetEmailVerified(u.ID, true)
+	_ = a.claimMailbox(c, u, false) // the invite proves the mailbox, as a sign-in link does (and drops an unproven password)
 	a.orgAudit(c, u.ID, "org_invite_accepted", org.ID+":"+finalRole)
 	// Land the user IN the org they just joined.
 	_ = a.remintWithOrg(c, sc, org.ID, finalRole)
@@ -560,9 +568,12 @@ func (a *Authenticator) inviterCanGrant(orgID string, inv *OrgInvite) bool {
 	if err != nil {
 		return false
 	}
-	role, err := a.orgs.OrgRole(orgID, inviter.ID)
-	if err != nil || !orgRoleIsManager(role) {
+	if blocked, _ := inviter.loginBlocked(); blocked { // a banned or disabled manager grants nothing
 		return false
 	}
-	return inv.Role != OrgRoleOwner || role == OrgRoleOwner
+	role, err := a.orgs.OrgRole(orgID, inviter.ID)
+	if err != nil {
+		return false
+	}
+	return a.mayGrantOrgRole(role, inv.Role)
 }

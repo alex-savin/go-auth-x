@@ -169,7 +169,7 @@ func New(db *gorm.DB) (*Store, error) {
 	return s, nil
 }
 
-func normalizeEmail(e string) string { return strings.ToLower(strings.TrimSpace(e)) }
+func normalizeEmail(e string) string { return authx.NormalizeEmail(e) }
 
 func newPrincipalID() string {
 	b := make([]byte, 16)
@@ -396,6 +396,66 @@ func (s *Store) SetPasswordHash(userID, hash, algo string) error {
 		Columns:   []clause.Column{{Name: "user_id"}},
 		DoUpdates: clause.AssignmentColumns([]string{"hash", "algo", "updated_at"}),
 	}).Create(&PasswordCredential{UserID: n, Hash: hash, Algo: algo, CreatedAt: now, UpdatedAt: now}).Error
+}
+
+var _ authx.SignupStore = (*Store)(nil)
+var _ authx.TokenRevoker = (*Store)(nil)
+
+// DeleteTokens removes a user's unredeemed tokens of one purpose (authx.TokenRevoker).
+func (s *Store) DeleteTokens(purpose, userID string) error {
+	n, ok := parseID(userID)
+	if !ok {
+		return nil
+	}
+	return s.db.Where("purpose = ? AND user_id = ? AND consumed_at IS NULL", purpose, n).Delete(&AuthToken{}).Error
+}
+
+// SetPasswordHashIfUnverified sets the password of an account whose email is not verified, and
+// reports false (writing nothing) for a verified or missing one. The check is a write to the user's
+// row, so it and VerifyEmailKeepingPassword take turns: a signup's password lands before the mailbox
+// is proven (and is dropped by the proof) or not at all.
+func (s *Store) SetPasswordHashIfUnverified(userID, hash, algo string) (bool, error) {
+	n, ok := parseID(userID)
+	if !ok || hash == "" {
+		return false, nil
+	}
+	set := false
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		now := time.Now()
+		res := tx.Model(&User{}).Where("id = ? AND email_verified = ?", n, false).Update("updated_at", now)
+		if res.Error != nil || res.RowsAffected == 0 {
+			return res.Error
+		}
+		set = true
+		return tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "user_id"}},
+			DoUpdates: clause.AssignmentColumns([]string{"hash", "algo", "updated_at"}),
+		}).Create(&PasswordCredential{UserID: n, Hash: hash, Algo: algo, CreatedAt: now, UpdatedAt: now}).Error
+	})
+	return set && err == nil, err
+}
+
+// VerifyEmailKeepingPassword marks the email verified and, in the same transaction, removes the
+// account's password unless its stored hash is keepHash ("" keeps none).
+func (s *Store) VerifyEmailKeepingPassword(userID, keepHash string) error {
+	n, ok := parseID(userID)
+	if !ok {
+		return authx.ErrNoUser
+	}
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		res := tx.Model(&User{}).Where("id = ?", n).Updates(map[string]any{"email_verified": true, "updated_at": time.Now()})
+		if res.Error != nil {
+			return res.Error
+		}
+		if res.RowsAffected == 0 {
+			return authx.ErrNoUser
+		}
+		drop := tx.Where("user_id = ?", n)
+		if keepHash != "" {
+			drop = drop.Where("hash <> ?", keepHash)
+		}
+		return drop.Delete(&PasswordCredential{}).Error
+	})
 }
 
 func (s *Store) UserByOAuth(provider, subject string) (*authx.AuthUser, error) {
@@ -690,6 +750,13 @@ func (a *authorizer) Authorize(_ context.Context, id authx.Identity) (string, er
 // hand its credentials to whoever logs in next — account takeover. It returns ErrEmailConflict
 // instead. `emailVerified` asserts the incoming login proved the address (OIDC/social/redeemed).
 func (s *Store) UpsertUserOnLogin(sub, email, name string, emailVerified bool) (*authx.AuthUser, error) {
+	return s.upsertUser(sub, email, name, emailVerified, false)
+}
+
+// upsertUser is UpsertUserOnLogin, and UpsertExternalUser when provisioned: a provisioning source
+// (SCIM, LDAP) that moves an account to another address hands it to whoever holds that mailbox, so
+// nothing that signs in comes along (resetSignIn).
+func (s *Store) upsertUser(sub, email, name string, emailVerified, provisioned bool) (*authx.AuthUser, error) {
 	email = normalizeEmail(email)
 	var u User
 	err := s.db.Where("sub = ?", sub).First(&u).Error
@@ -743,6 +810,14 @@ func (s *Store) UpsertUserOnLogin(sub, email, name string, emailVerified bool) (
 			// so a crash between the two can't leave the email owned by nobody (and thus unusable).
 			u = User{Sub: sub, Email: email, Name: name, EmailVerified: emailVerified, CreatedAt: time.Now(), LastLoginAt: time.Now()}
 			if err := s.db.Transaction(func(tx *gorm.DB) error {
+				// As DeleteUser does: an unverified account can still have sessions (signed in before a
+				// provisioning source moved it here) and OAuth grants; they don't outlive it.
+				if derr := revokeUserSessions(tx, existing.ID); derr != nil {
+					return derr
+				}
+				if derr := deleteOAuthSubject(tx, existing.Sub); derr != nil {
+					return derr
+				}
 				if derr := cascadeDeletes(tx, existing.ID); derr != nil {
 					return derr
 				}
@@ -765,9 +840,11 @@ func (s *Store) UpsertUserOnLogin(sub, email, name string, emailVerified bool) (
 	// (parity with the in-memory store), not a raw driver unique-constraint error — the unique index is
 	// only the fail-closed backstop.
 	upd := map[string]any{"name": name, "last_login_at": time.Now()}
+	moved := false
 	switch {
 	case email == "": // an identity that asserts no address leaves the stored one alone
 	case email != normalizeEmail(u.Email):
+		moved = provisioned
 		var other User
 		if e2 := s.db.Where("email = ? AND id <> ?", email, u.ID).First(&other).Error; e2 == nil {
 			return nil, authx.ErrEmailConflict
@@ -780,15 +857,39 @@ func (s *Store) UpsertUserOnLogin(sub, email, name string, emailVerified bool) (
 	case emailVerified:
 		upd["email_verified"] = true
 	}
-	// Only the columns this login sets (see the rebind above): no stale write-back, no re-insert.
-	res := s.db.Model(&User{}).Where("id = ? AND sub = ?", u.ID, sub).Updates(upd)
-	if res.Error != nil {
-		return nil, res.Error
-	}
-	if res.RowsAffected == 0 {
-		return nil, authx.ErrNoUser
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		if moved {
+			if err := resetSignIn(tx, u.ID, sub); err != nil {
+				return err
+			}
+		}
+		// Only the columns this login sets (see the rebind above): no stale write-back, no re-insert.
+		res := tx.Model(&User{}).Where("id = ? AND sub = ?", u.ID, sub).Updates(upd)
+		if res.Error == nil && res.RowsAffected == 0 {
+			return authx.ErrNoUser
+		}
+		return res.Error
+	}); err != nil {
+		return nil, err
 	}
 	return s.userRow(u.ID)
+}
+
+// resetSignIn removes everything that signs in to user id (subject sub) and ends what is signed in:
+// the password, passkeys, linked identities, second factor, pending tokens, sessions, and the OAuth
+// provider's grants. The account itself — its memberships, its id — stays. For an account a
+// provisioning source moved to another address: whoever holds the new mailbox proves it and starts
+// clean, and whoever held the account before keeps no way back in.
+func resetSignIn(tx *gorm.DB, id uint, sub string) error {
+	for _, m := range []any{&PasswordCredential{}, &WebauthnCredential{}, &OAuthIdentity{}, &AuthToken{}, &TOTPCredential{}, &RecoveryCode{}} {
+		if err := tx.Where("user_id = ?", id).Delete(m).Error; err != nil {
+			return err
+		}
+	}
+	if err := revokeUserSessions(tx, id); err != nil {
+		return err
+	}
+	return deleteOAuthSubject(tx, sub)
 }
 
 // moveSubject re-keys a user's sessions and OAuth provider records from an old subject to the new
@@ -842,8 +943,7 @@ func (s *Store) userRow(id uint) (*authx.AuthUser, error) {
 func cascadeDeletes(tx *gorm.DB, id uint) error {
 	// NOTE: Session rows are intentionally NOT deleted here. Deleting them would make IsRevoked (an
 	// absent SID reads as "not revoked") silently re-admit a hard-deleted user on their other devices.
-	// DeleteUser tombstones the sessions as revoked instead; reclaim targets (unverified squatters) have
-	// no sessions, so their omission here is harmless.
+	// DeleteUser and the squatter reclaim tombstone the sessions as revoked instead, before calling this.
 	for _, m := range []any{&PasswordCredential{}, &WebauthnCredential{}, &OAuthIdentity{}, &AuthToken{}, &GroupMembership{}, &OrgMembership{}, &TOTPCredential{}, &RecoveryCode{}} {
 		if err := tx.Where("user_id = ?", id).Delete(m).Error; err != nil {
 			return err

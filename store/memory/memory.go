@@ -140,7 +140,7 @@ func New() *Store {
 	}
 }
 
-func norm(e string) string { return strings.ToLower(strings.TrimSpace(e)) }
+func norm(e string) string { return authx.NormalizeEmail(e) }
 
 func randID() string {
 	b := make([]byte, 16)
@@ -373,6 +373,59 @@ func (s *Store) SetPasswordHash(userID, hash, algo string) error {
 		return nil
 	}
 	s.passwords[n] = struct{ hash, algo string }{hash, algo}
+	return nil
+}
+
+var _ authx.SignupStore = (*Store)(nil)
+var _ authx.TokenRevoker = (*Store)(nil)
+
+// DeleteTokens removes a user's unredeemed tokens of one purpose (authx.TokenRevoker).
+func (s *Store) DeleteTokens(purpose, userID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n, ok := parseID(userID)
+	if !ok {
+		return nil
+	}
+	kept := s.tokens[:0]
+	for _, t := range s.tokens {
+		if t.purpose != purpose || t.userID != n || t.consumedAt != nil {
+			kept = append(kept, t)
+		}
+	}
+	s.tokens = kept
+	return nil
+}
+
+// SetPasswordHashIfUnverified sets the password of an account whose email is not verified, and
+// reports false (writing nothing) for a verified or missing one — one step under the store's lock.
+func (s *Store) SetPasswordHashIfUnverified(userID, hash, algo string) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n, ok := parseID(userID)
+	u := s.users[n]
+	if !ok || hash == "" || u == nil || u.emailVerified {
+		return false, nil
+	}
+	s.passwords[n] = struct{ hash, algo string }{hash, algo}
+	return true, nil
+}
+
+// VerifyEmailKeepingPassword marks the email verified and, in the same step, removes the account's
+// password unless its stored hash is keepHash ("" keeps none).
+func (s *Store) VerifyEmailKeepingPassword(userID, keepHash string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	n, ok := parseID(userID)
+	u := s.users[n]
+	if !ok || u == nil {
+		return authx.ErrNoUser
+	}
+	u.emailVerified = true
+	u.updatedAt = time.Now()
+	if pw, has := s.passwords[n]; has && (keepHash == "" || pw.hash != keepHash) {
+		delete(s.passwords, n)
+	}
 	return nil
 }
 
@@ -622,6 +675,13 @@ func (a *authorizer) Authorize(_ context.Context, id authx.Identity) (string, er
 // email row only if it's a bootstrap placeholder or already verified; an unverified, non-bootstrap
 // squatter yields ErrEmailConflict (no takeover).
 func (s *Store) UpsertUserOnLogin(sub, email, name string, emailVerified bool) (*authx.AuthUser, error) {
+	return s.upsertUser(sub, email, name, emailVerified, false)
+}
+
+// upsertUser is UpsertUserOnLogin, and UpsertExternalUser when provisioned: a provisioning source
+// (SCIM, LDAP) that moves an account to another address hands it to whoever holds that mailbox, so
+// nothing that signs in comes along (resetSignInLocked). (Mirrors gormstore.)
+func (s *Store) upsertUser(sub, email, name string, emailVerified, provisioned bool) (*authx.AuthUser, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	email = norm(email)
@@ -633,6 +693,9 @@ func (s *Store) UpsertUserOnLogin(sub, email, name string, emailVerified bool) (
 			// to move this row onto an email another row already owns.
 			if other := s.findByEmail(email); other != nil && other.id != u.id {
 				return nil, authx.ErrEmailConflict
+			}
+			if provisioned {
+				s.resetSignInLocked(u)
 			}
 			// A new address is exactly as verified as this assertion proves — verification of the
 			// old one doesn't carry over.
@@ -668,12 +731,42 @@ func (s *Store) UpsertUserOnLogin(sub, email, name string, emailVerified bool) (
 		if !emailVerified {
 			return nil, authx.ErrEmailConflict
 		}
+		s.deleteOAuthSubjectLocked(existing.sub) // as DeleteUser does: its grants don't outlive it
 		s.deleteUserCascadeLocked(existing.id)
 	}
 	s.seq++
 	u := &user{id: s.seq, sub: sub, email: email, name: name, emailVerified: emailVerified, createdAt: time.Now(), updatedAt: time.Now()}
 	s.users[u.id] = u
 	return view(u), nil
+}
+
+// resetSignInLocked removes everything that signs in to u and ends what is signed in: the password,
+// passkeys, linked identities, second factor, pending tokens, sessions, and the OAuth provider's
+// grants. The account itself — its memberships, its id — stays. For an account a provisioning source
+// moved to another address (see upsertUser). Caller holds s.mu.
+func (s *Store) resetSignInLocked(u *user) {
+	s.revokeUserSessionsLocked(u.id)
+	s.deleteOAuthSubjectLocked(u.sub)
+	delete(s.passwords, u.id)
+	delete(s.totp, u.id)
+	delete(s.recovery, u.id)
+	for pkid, pk := range s.passkeys {
+		if pk.userID == u.id {
+			delete(s.passkeys, pkid)
+		}
+	}
+	for k, uid := range s.oauth {
+		if uid == u.id {
+			delete(s.oauth, k)
+		}
+	}
+	kept := s.tokens[:0]
+	for _, t := range s.tokens {
+		if t.userID != u.id {
+			kept = append(kept, t)
+		}
+	}
+	s.tokens = kept
 }
 
 // deleteUserCascadeLocked removes a user + everything keyed to it. Caller holds s.mu.

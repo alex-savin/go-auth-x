@@ -46,7 +46,7 @@ var csrfExempt = map[string]bool{
 // for both issueCSRF (login) and ensureCSRFHTTP (the gate).
 func (a *Authenticator) writeCSRFCookie(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
-		Name: csrfCookie, Value: randToken(), MaxAge: int(rememberTTL.Seconds()), Path: "/",
+		Name: a.cookieName(csrfCookie), Value: randToken(), MaxAge: int(rememberTTL.Seconds()), Path: "/",
 		Secure: a.cookieSecureHTTP(r), HttpOnly: false, SameSite: http.SameSiteLaxMode,
 	})
 }

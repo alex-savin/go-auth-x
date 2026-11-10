@@ -43,6 +43,9 @@ type APIKeyInfo struct {
 
 // KeyHasScope reports whether an API key may use a given scope. Least privilege: an EMPTY Scopes
 // list grants NOTHING. "*" grants everything; otherwise the scope must be listed explicitly.
+//
+// Scopes the library itself reads: "admin" (the admin API), "scim" (a SCIM mount, by
+// ValidateAPIKeyScope), ScopeApp (the app's own gated routes), and "*" (all of them).
 func KeyHasScope(info *APIKeyInfo, scope string) bool {
 	if info == nil {
 		return false
@@ -55,6 +58,11 @@ func KeyHasScope(info *APIKeyInfo, scope string) bool {
 	return false
 }
 
+// ScopeApp is the scope that lets a global API key through GateHTTP and RequireGroupsHTTP, onto the
+// app's own gated routes. A key without it (or "*") is no principal there — a key minted for the
+// admin API or for a SCIM mount doesn't also open the app.
+const ScopeApp = "app"
+
 // DirectoryStore is the OPTIONAL persistence for groups, group membership, API keys, and admin
 // user management. Wire it with SetDirectoryStore to enable groups, per-group access control
 // (RequireGroups), API-key auth, and the admin REST API. It is intentionally separate from
@@ -65,6 +73,8 @@ type DirectoryStore interface {
 	Groups() ([]Group, error)
 	GroupByName(name string) (*Group, error) // ErrNoGroup if absent
 	DeleteGroup(id string) error
+	// AddUserToGroup adds an EXISTING user to an EXISTING group. An id that names neither must not
+	// leave a membership behind: the next user created with that id would inherit the group.
 	AddUserToGroup(userID, groupID string) error
 	RemoveUserFromGroup(userID, groupID string) error
 	UserGroups(userID string) ([]Group, error)
@@ -81,6 +91,13 @@ type DirectoryStore interface {
 
 	// UpsertExternalUser provisions/updates a user from an external directory (LDAP/SCIM) keyed by
 	// an external Sub (e.g. "ldap:<uid>" / "scim:<id>"). Applies the same safe email-linking rule.
+	//
+	// When it moves an EXISTING account (found by its Sub) to a different email, the account goes to
+	// whoever holds the new mailbox, so nothing that signs in may come along: the store removes the
+	// account's password, passkeys, linked identities, second factor and pending tokens, ends its
+	// sessions (when it tracks them) and drops its OAuth-provider grants, in the same write. Its id
+	// and memberships stay. Otherwise a session or passkey from before the move would sign in to an
+	// account that now carries someone else's — say the owner's — address. Both reference stores do.
 	UpsertExternalUser(sub, email, name string, emailVerified bool) (*AuthUser, error)
 
 	// API keys (sha256-at-rest). APIKeyByHash returns ErrNoCredential if absent and does NOT
@@ -117,7 +134,8 @@ func AddGroupMembers(dir DirectoryStore, userIDs []string, groupID string) error
 	}
 	var errs []error
 	for _, uid := range userIDs {
-		if err := dir.AddUserToGroup(uid, groupID); err != nil {
+		// An id that names no user is skipped, as the batch form skips it — not an error.
+		if err := dir.AddUserToGroup(uid, groupID); err != nil && !errors.Is(err, ErrNoUser) {
 			errs = append(errs, err)
 		}
 	}
