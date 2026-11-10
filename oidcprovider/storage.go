@@ -346,17 +346,26 @@ func (s *storage) GetRefreshTokenInfo(_ context.Context, clientID, token string)
 
 // RevokeToken revokes a refresh token (ending its grant) or an access token (that token alone).
 // An unknown or foreign token is not an error (RFC 7009).
+//
+// zitadel resolves the caller's token first — a refresh token through GetRefreshTokenInfo, an access
+// token by decrypting it — and both give the token's user. A value that resolved as neither arrives
+// here as the caller sent it, with no user: it is not a bearer value, and nothing is revoked for it.
+// Otherwise the store's own keys ("rt:<hash>", an access token's row id — what a copy of the
+// database holds) would revoke, which stored values must never do.
 func (s *storage) RevokeToken(_ context.Context, tokenOrID, userID, clientID string) *oidc.Error {
 	userID = unescapeSubject(userID)
+	if userID == "" {
+		return nil
+	}
 	if h, ok := strings.CutPrefix(tokenOrID, "rt:"); ok {
 		t, err := s.st().OAuthRefreshToken(h)
-		if err == nil && t.ClientID == clientID {
+		if err == nil && t.ClientID == clientID && t.Subject == userID {
 			s.revokeGrant(t.GrantID, "revoked by the client")
 		}
 		return nil
 	}
 	t, err := s.st().OAuthAccessToken(tokenOrID)
-	if err != nil || t.ClientID != clientID || (userID != "" && t.Subject != userID) {
+	if err != nil || t.ClientID != clientID || t.Subject != userID {
 		return nil
 	}
 	if err := s.st().DeleteOAuthAccessToken(t.ID); err != nil {
@@ -367,10 +376,17 @@ func (s *storage) RevokeToken(_ context.Context, tokenOrID, userID, clientID str
 
 // --- clients ---
 
+// GetClientByClientID never returns why a client couldn't be found: zitadel prints the error to the
+// caller on some paths, and for a metadata-document client it says what a hostname the caller chose
+// resolves to ("db.internal resolves to 10.0.0.5, which is not public") — a map of the internal
+// network for anyone who can reach the token endpoint. The reason is logged instead.
 func (s *storage) GetClientByClientID(ctx context.Context, id string) (op.Client, error) {
 	c, err := s.p.client(ctx, id)
 	if err != nil {
-		return nil, err
+		if !errors.Is(err, authx.ErrOAuthNotFound) || errors.Unwrap(err) != nil {
+			s.p.cfg.Logger.Debug("oidcprovider: client lookup failed", "err", err)
+		}
+		return nil, oidc.ErrInvalidClient()
 	}
 	return &client{c: c, p: s.p}, nil
 }

@@ -16,6 +16,20 @@ import (
 	authx "github.com/alex-savin/go-auth-x"
 )
 
+// Bounds on an authorization request (see authorize). The parameters are far above what a client
+// sends: an S256 challenge is 43 characters, a state rarely more than a few hundred.
+const (
+	maxAuthorizeBody     = 64 << 10
+	authorizeRequests    = 120 // per address, in each authorizeRequestsPer
+	authorizeRequestsPer = 10 * time.Minute
+)
+
+var authorizeParamLimits = map[string]int{
+	"state": 2048, "nonce": 512, "code_challenge": 128, "code_challenge_method": 16, "redirect_uri": 2048,
+	"scope": 2048, "client_id": 2048, "resource": 2048, "response_type": 64, "response_mode": 64, "prompt": 64,
+	"max_age": 32,
+}
+
 // Errors of the consent and verification API.
 var (
 	// ErrNoRequest: the authorization request is unknown, expired, or someone else's.
@@ -26,9 +40,29 @@ var (
 
 // authorize checks the resource indicators and fills in default scopes, then hands the request
 // to zitadel, which validates the client, redirect and PKCE and sends the browser to login.
+//
+// The request is stored until the user decides, by anyone who knows a client id — so it is bounded
+// first: its size (a megabyte of state would be kept whole for the request's lifetime) and how many
+// one address may start.
 func (p *Provider) authorize(w http.ResponseWriter, r *http.Request) {
+	if r.Body != nil {
+		r.Body = http.MaxBytesReader(w, r.Body, maxAuthorizeBody)
+	}
 	if err := r.ParseForm(); err != nil {
 		http.Error(w, "bad request", http.StatusBadRequest)
+		return
+	}
+	for name, limit := range authorizeParamLimits {
+		for _, v := range r.Form[name] {
+			if len(v) > limit {
+				writeErr(w, http.StatusBadRequest, "invalid_request", name+" is too long")
+				return
+			}
+		}
+	}
+	if !p.authz.allow(authx.RateLimitKey(p.cfg.Auth.ClientIP(r)), time.Now()) {
+		w.Header().Set("Retry-After", "60")
+		writeErr(w, http.StatusTooManyRequests, "temporarily_unavailable", "too many authorization requests from this address")
 		return
 	}
 	res, ok := p.resources(r.Form["resource"])

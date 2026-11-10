@@ -731,6 +731,7 @@ func (s *Store) upsertUser(sub, email, name string, emailVerified, provisioned b
 		if !emailVerified {
 			return nil, authx.ErrEmailConflict
 		}
+		s.deleteOAuthSubjectLocked(existing.sub) // as DeleteUser does: its grants don't outlive it
 		s.deleteUserCascadeLocked(existing.id)
 	}
 	s.seq++

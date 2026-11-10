@@ -173,18 +173,23 @@ func (p *Provider) redirectOK(raw string) bool {
 	return strings.Contains(u.Scheme, ".")
 }
 
+// httpsOrEmpty keeps a client's self-declared home page or logo only when it is a plain https URL.
+// It ends up in the app's consent page, in an href or src: one carrying markup characters is dropped
+// rather than trusted to be escaped there.
 func httpsOrEmpty(raw string) string {
-	u, err := url.Parse(strings.TrimSpace(raw))
-	if err != nil || u.Scheme != "https" || u.Host == "" || len(raw) > 500 {
+	raw = strings.TrimSpace(raw)
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.Host == "" || len(raw) > 500 || strings.ContainsAny(raw, "\"'<>`\\ \t\r\n") {
 		return ""
 	}
 	return u.String()
 }
 
-// cleanName keeps a client's self-chosen name printable and short (it is shown to the user).
+// cleanName keeps a client's self-chosen name printable and short (it is shown to the user), and
+// free of markup characters: the consent page should escape it, and gets nothing to escape.
 func cleanName(s string) string {
 	s = strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || strings.ContainsRune("<>\"`", r) {
 			return -1
 		}
 		return r
@@ -197,7 +202,9 @@ func cleanName(s string) string {
 
 // discovery serves the metadata at /.well-known/openid-configuration and RFC 8414's
 // /.well-known/oauth-authorization-server: zitadel's document, plus the registration endpoint,
-// client metadata documents, public clients and the response iss parameter.
+// client metadata documents and public clients — and without what this provider doesn't do: the
+// device, JWT-profile and private_key_jwt bits, and RP-initiated logout (TerminateSession ends
+// nothing, and no post-logout redirect is registered, so the endpoint would only 404).
 func (p *Provider) discovery(w http.ResponseWriter, r *http.Request) {
 	rec := httptest.NewRecorder()
 	r2 := r.Clone(r.Context())
@@ -217,7 +224,19 @@ func (p *Provider) discovery(w http.ResponseWriter, r *http.Request) {
 	doc["code_challenge_methods_supported"] = []string{string(oidc.CodeChallengeMethodS256)}
 	doc["response_types_supported"] = []string{string(oidc.ResponseTypeCode)}
 	doc["grant_types_supported"] = []string{string(oidc.GrantTypeCode), string(oidc.GrantTypeRefreshToken)}
-	delete(doc, "device_authorization_endpoint")
+	doc["token_endpoint_auth_methods_supported"] = []string{string(oidc.AuthMethodNone), string(oidc.AuthMethodBasic), string(oidc.AuthMethodPost)}
+	for _, k := range []string{
+		"device_authorization_endpoint", "end_session_endpoint", "request_object_signing_alg_values_supported",
+		"token_endpoint_auth_signing_alg_values_supported", "revocation_endpoint_auth_signing_alg_values_supported",
+		"introspection_endpoint_auth_signing_alg_values_supported", "claims_supported",
+	} {
+		delete(doc, k)
+	}
+	for _, k := range []string{"revocation_endpoint_auth_methods_supported", "introspection_endpoint_auth_methods_supported"} {
+		if _, ok := doc[k]; ok {
+			doc[k] = doc["token_endpoint_auth_methods_supported"]
+		}
+	}
 	w.Header().Set("Access-Control-Allow-Origin", "*") // browser-based clients read it cross-origin
 	writeJSON(w, http.StatusOK, doc)
 }

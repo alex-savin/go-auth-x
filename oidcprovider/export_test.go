@@ -26,3 +26,6 @@ func SigningKeyID(p *Provider) string {
 func UseTestMetadataServer(p *Provider, roots *x509.CertPool) {
 	p.cimd = newMetadataFetcher(p, roots, true)
 }
+
+// HashForTest is how the provider keys a refresh token in the store.
+func HashForTest(s string) string { return hash(s) }

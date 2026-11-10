@@ -113,6 +113,22 @@ Fixes from a second review, of v0.13.0. Each has a regression test.
   silent 200, and `members[value ne "1"]` no longer removes user 1; the SCIM mount refuses an empty
   or non-Bearer token before its validator sees it; LDAP DNs are normalized without unescaping
   (`cn=a\,ou\=b` is not `cn=a,ou=b`).
+- **`oidcprovider` told callers why a client lookup failed** — on the token endpoint a
+  metadata-document `client_id` such as `https://db.internal/x` was answered with "db.internal
+  resolves to 10.0.0.5, which is not public": an oracle for internal hostnames. A failed lookup is
+  now a bare `invalid_client`; the reason is logged.
+- **`oidcprovider` stored unbounded authorization requests** — anyone who knew a client id could
+  have `/authorize` keep megabytes of `state` per request, unthrottled, until an hourly clean-up.
+  Parameters are capped, requests are limited per address, and unfinished ones are removed within
+  minutes of expiring.
+- **Lower severity (`oidcprovider`)** — `/revoke` no longer acts on the store's own keys (a refresh
+  token's hash or an access token's row id, what a copy of the database holds, revoked grants); a
+  signing key stored in the clear is ignored unless `AcceptPlaintextKeys` asks for it (one written
+  row planted a signing key); `ReplaceKeys` drops retired keys at once after a leak (`RotateKeys`
+  keeps them trusted for `KeyGrace`); a client's self-declared name and links are stored without
+  markup characters; the metadata no longer advertises RP-initiated logout or client assertions the
+  provider doesn't do. Reference stores: reclaiming an unverified account ends its sessions
+  (gormstore) and removes its OAuth records (both), as deleting it does.
 
 ### Behavior changes
 
@@ -159,6 +175,13 @@ Fixes from a second review, of v0.13.0. Each has a regression test.
 - ldapsync removes memberships LDAP no longer lists (synced `ldap:` users only; not when the user or
   group search comes back empty) and skips a uid that several entries share. `Result.Removed`
   counts the removals.
+- `oidcprovider`: `/authorize` answers `400` for oversized parameters (`state` over 2048 bytes,
+  `nonce` over 512, …) and `429` past 120 requests per address in 10 minutes; a failed client lookup
+  is always `invalid_client`; `/revoke` with something that isn't a bearer value revokes nothing;
+  `end_session_endpoint`, `claims_supported` and the client-assertion algorithms are gone from the
+  metadata.
+- `oidcprovider`: a signing key stored unsealed (a database last used before v0.11) is ignored and
+  replaced unless `Config.AcceptPlaintextKeys` is set for the first start.
 
 ### Added
 
@@ -175,6 +198,17 @@ Fixes from a second review, of v0.13.0. Each has a regression test.
   state-changing admin API call.
 - `ldapsync.Config`: `KeepStaleMemberships`, `OwnGroupsOnly` (leave same-named groups the sync
   didn't create alone) and `MaxDeprovision` (cap on users one run may disable).
+- `oidcprovider`: `Provider.ReplaceKeys`, `Config.AcceptPlaintextKeys`.
+
+### Known limitations
+
+- `oidcprovider`: presenting an already-used authorization code or refresh token ends its grant
+  without client authentication (RFC 6749 §4.1.2, OAuth Security BCP): someone who finds a spent
+  code in a log can't get tokens, but can end that connection.
+- `oidcprovider`: a user can still be led to approve an authorization request someone else started;
+  the code then goes only to the client's registered redirect, in the user's own browser.
+- Without a `SessionStore`, sessions are stateless: logout, a password reset, a ban and deleting the
+  account don't end a cookie someone already holds.
 
 ## [0.13.0] — 2026-11-09
 

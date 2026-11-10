@@ -234,7 +234,9 @@ func TestRefreshKeepsGrantedScopes(t *testing.T) {
 // sealed in place by the upkeep; a key another CryptoKey sealed is ignored, then deleted once it
 // would have expired anyway.
 func TestSigningKeysSealed(t *testing.T) {
-	h := setup(t)
+	// AcceptPlaintextKeys: the upgrade from a version that stored keys unsealed (see
+	// TestPlantedPlaintextSigningKeyIsIgnored for the default).
+	h := setup(t, func(c *oidcprovider.Config) { c.AcceptPlaintextKeys = true })
 	sealed := func(id string) bool {
 		t.Helper()
 		keys, err := h.store.OAuthSigningKeys()

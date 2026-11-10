@@ -810,6 +810,14 @@ func (s *Store) upsertUser(sub, email, name string, emailVerified, provisioned b
 			// so a crash between the two can't leave the email owned by nobody (and thus unusable).
 			u = User{Sub: sub, Email: email, Name: name, EmailVerified: emailVerified, CreatedAt: time.Now(), LastLoginAt: time.Now()}
 			if err := s.db.Transaction(func(tx *gorm.DB) error {
+				// As DeleteUser does: an unverified account can still have sessions (signed in before a
+				// provisioning source moved it here) and OAuth grants; they don't outlive it.
+				if derr := revokeUserSessions(tx, existing.ID); derr != nil {
+					return derr
+				}
+				if derr := deleteOAuthSubject(tx, existing.Sub); derr != nil {
+					return derr
+				}
 				if derr := cascadeDeletes(tx, existing.ID); derr != nil {
 					return derr
 				}
@@ -935,8 +943,7 @@ func (s *Store) userRow(id uint) (*authx.AuthUser, error) {
 func cascadeDeletes(tx *gorm.DB, id uint) error {
 	// NOTE: Session rows are intentionally NOT deleted here. Deleting them would make IsRevoked (an
 	// absent SID reads as "not revoked") silently re-admit a hard-deleted user on their other devices.
-	// DeleteUser tombstones the sessions as revoked instead; reclaim targets (unverified squatters) have
-	// no sessions, so their omission here is harmless.
+	// DeleteUser and the squatter reclaim tombstone the sessions as revoked instead, before calling this.
 	for _, m := range []any{&PasswordCredential{}, &WebauthnCredential{}, &OAuthIdentity{}, &AuthToken{}, &GroupMembership{}, &OrgMembership{}, &TOTPCredential{}, &RecoveryCode{}} {
 		if err := tx.Where("user_id = ?", id).Delete(m).Error; err != nil {
 			return err

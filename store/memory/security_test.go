@@ -239,3 +239,25 @@ func TestSignupStoreWritesAreConditional(t *testing.T) {
 		t.Fatal("no password row may be left for a user that doesn't exist")
 	}
 }
+
+// Reclaiming an unverified account for a verified login ends that account's sessions and removes its
+// OAuth records, as deleting it does: it can have both, signed in before a provisioning source moved
+// it onto the address.
+func TestReclaimEndsTheOldAccountsSessionsAndGrants(t *testing.T) {
+	s := New()
+	old, _ := s.UpsertUserOnLogin("scim:old", "taken@x.com", "Old", false) // unverified, not a bootstrap row
+	_ = s.RecordSession(authx.SessionRecord{SID: "sid-old", Subject: "scim:old", UserID: old.ID, CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)})
+	if err := s.CreateOAuthGrant(&authx.OAuthGrant{ID: "grant-old", ClientID: "c", Subject: "scim:old", CreatedAt: time.Now()}); err != nil {
+		t.Fatal(err)
+	}
+	nu, err := s.UpsertUserOnLogin("oidc:new", "taken@x.com", "New", true)
+	if err != nil || nu.ID == old.ID {
+		t.Fatalf("a verified login reclaims the address with a new account: %+v, %v", nu, err)
+	}
+	if revoked, _ := s.IsRevoked("sid-old"); !revoked {
+		t.Fatal("the reclaimed account's session is still live")
+	}
+	if _, err := s.OAuthGrant("grant-old"); err == nil {
+		t.Fatal("the reclaimed account's OAuth grant was left behind")
+	}
+}
