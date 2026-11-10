@@ -117,6 +117,44 @@ func (a *Authenticator) claimMailbox(c *reqCtx, u *AuthUser, keepBoundPassword b
 	return a.creds.SetEmailVerified(u.ID, true)
 }
 
+// takeOver hands an unverified account to whoever just proved its mailbox some other way than a
+// link (a provider's verified email): the address is marked verified, and nothing that signs in is
+// kept — the password (a signup's, by anyone), and, though an unverified account shouldn't have any,
+// its passkeys, linked sign-ins, second factor and sessions.
+func (a *Authenticator) takeOver(u *AuthUser) error {
+	if a.sessions != nil {
+		_ = a.sessions.RevokeAllForUser(u.Sub)
+	}
+	if pks, err := a.creds.Passkeys(u.ID); err == nil {
+		for _, pk := range pks {
+			if err := a.creds.RemovePasskey(u.ID, pk.ID); err != nil {
+				return err
+			}
+		}
+	}
+	if ids, err := a.creds.OAuthIdentities(u.ID); err == nil {
+		for _, p := range ids {
+			if err := a.creds.UnlinkOAuth(u.ID, p); err != nil {
+				return err
+			}
+		}
+	}
+	if a.twoFactor != nil {
+		if err := a.twoFactor.DisableTOTP(u.ID); err != nil {
+			return err
+		}
+	}
+	if ss, ok := a.creds.(SignupStore); ok {
+		return ss.VerifyEmailKeepingPassword(u.ID, "")
+	}
+	a.signupMu.Lock()
+	defer a.signupMu.Unlock()
+	if err := a.creds.SetPasswordHash(u.ID, "", ""); err != nil {
+		return err
+	}
+	return a.creds.SetEmailVerified(u.ID, true)
+}
+
 // setSignupPassword sets a signup's password on an account that is still unverified, and reports
 // false — writing nothing — when the account has been verified since the signup read it: hashing
 // takes long enough for the address's owner to prove the mailbox in between, and a password written

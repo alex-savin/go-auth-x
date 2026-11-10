@@ -12,9 +12,14 @@ import (
 
 // isMultiTenantMicrosoft reports whether the tenant is one of Entra's multi-tenant meta-endpoints, which
 // accept id_tokens from any tenant and therefore cannot vouch for the token's email (nOAuth).
+// microsoftConsumerTenant is the tenant id of personal Microsoft accounts: "consumers" under its
+// other name. Pinned to it, the tenant is still everyone with a Microsoft account, not one
+// organization that owns its users' addresses.
+const microsoftConsumerTenant = "9188040d-6c67-4c5b-b112-36a304b66dad"
+
 func isMultiTenantMicrosoft(tenant string) bool {
 	switch strings.ToLower(strings.TrimSpace(tenant)) {
-	case "", "common", "organizations", "consumers":
+	case "", "common", "organizations", "consumers", microsoftConsumerTenant:
 		return true
 	}
 	return false

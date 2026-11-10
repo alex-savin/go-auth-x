@@ -610,7 +610,7 @@ func (s *Server) putUser(w http.ResponseWriter, r *http.Request) {
 }
 
 // normEmail compares addresses as the stores key them: trimmed, lower-cased.
-func normEmail(e string) string { return strings.ToLower(strings.TrimSpace(e)) }
+func normEmail(e string) string { return authx.NormalizeEmail(e) }
 
 func (s *Server) deleteUser(w http.ResponseWriter, r *http.Request) {
 	id := pathID(r)

@@ -139,6 +139,25 @@ Fixes from a second review, of v0.13.0. Each has a regression test.
   (opt-in), which a sibling subdomain can't plant; the change-of-address request mails off the
   request path (its duration told a taken address from a free one); the SMTP sender has a deadline;
   logout clears the step-up cookie; the default trusted proxies include the IPv6 private range.
+- **A social sign-in replaced provisioned accounts** — a provider-verified email that matched an
+  unverified account an org's SCIM (or SCIM, or LDAP) had provisioned deleted it like a signup
+  squatter's and made a new one: the person lost their org and group memberships, and the IdP could
+  no longer update or deprovision them. Such an account is now kept — verified, linked, with nothing
+  that signs in carried over. A self-signup's unverified row is still replaced.
+- **A disconnected provider reconnected itself** — the "disconnected" record was spent by the first
+  reconnect and could not be made again, so after a second disconnect the provider linked back by
+  email; and reconnecting was any visit to the provider's login in a signed-in browser, which any
+  page can cause. The record now stays, and reconnecting takes
+  `POST /auth/api/identities/{provider}/connect` (session + CSRF) first.
+- **Lower severity** — emails are keyed without folding a non-ASCII letter into an ASCII one
+  (`vİctim@x.com` was `victim@x.com`; `authx.NormalizeEmail`, used by both stores); Microsoft's
+  consumer tenant given by its id is treated as the multi-tenant endpoint it is; a login flow is
+  finished only at the provider it was started with; a WebAuthn challenge is single-use (a captured
+  finish request replayed within five minutes signed in again); a banned or disabled user's cookie
+  drives no account endpoint even without a `SessionStore`; a TOTP code checked by `/auth/reauth`
+  draws on the same attempt budget as `/auth/2fa/verify`; recovery codes are stored before TOTP is
+  switched on; an org invite's mailbox proof drops an unproven password like a sign-in link's; API
+  key groups and scopes can't contain a comma or whitespace.
 
 ### Behavior changes
 
@@ -195,6 +214,16 @@ Fixes from a second review, of v0.13.0. Each has a regression test.
 - The owner's password login answers `429` after 30 failed attempts in 15 minutes when a mailer is
   configured.
 - The default `TRUSTED_PROXIES` also trusts `fc00::/7`.
+- Reconnecting a provider the user disconnected: `POST /auth/api/identities/{provider}/connect`,
+  then send the browser to the `next` it returns. Visiting the provider's login while signed in no
+  longer reconnects it (`409`).
+- A social sign-in on a provider-verified email that matches an unverified SCIM- or LDAP-provisioned
+  account signs in to that account (it used to be replaced by a new one).
+- `MICROSOFT_TENANT=9188040d-6c67-4c5b-b112-36a304b66dad` (personal accounts) is refused like
+  `consumers`.
+- Email addresses with a letter that Unicode lower-cases to ASCII (`İ`, the Kelvin sign) are no
+  longer the same account as their ASCII look-alike. Custom stores should key emails with
+  `authx.NormalizeEmail`.
 
 ### Added
 
@@ -215,6 +244,7 @@ Fixes from a second review, of v0.13.0. Each has a regression test.
 - `POST /auth/logout`; `Config.DisableGetLogout` (`LOGOUT_POST_ONLY`).
 - `Config.HostCookies` (`COOKIE_HOST_PREFIX`): `__Host-` cookie names, needs an https `APP_URL`;
   `Authenticator.CSRFCookieName()` and `csrfCookie` in `GET /auth/config`.
+- `POST /auth/api/identities/{provider}/connect`; `authx.NormalizeEmail`.
 
 ### Known limitations
 

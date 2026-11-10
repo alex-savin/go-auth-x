@@ -3,6 +3,7 @@ package authx
 import (
 	"errors"
 	"net/http"
+	"slices"
 	"strings"
 	"time"
 )
@@ -543,6 +544,13 @@ func (a *Authenticator) adminCreateKey(c *reqCtx) {
 	if err := c.ShouldBindJSON(&body); err != nil || strings.TrimSpace(body.Name) == "" {
 		c.JSON(http.StatusBadRequest, H{"error": "name required"})
 		return
+	}
+	// A store may keep these as comma-separated lists (gormstore does): "x,*" would come back as two.
+	for _, v := range append(slices.Clone(body.Groups), body.Scopes...) {
+		if strings.ContainsAny(v, ", \t\r\n") || v == "" {
+			c.JSON(http.StatusBadRequest, H{"error": "a group or scope can't be empty or contain a comma or whitespace"})
+			return
+		}
 	}
 	var expires *time.Time
 	if body.ExpiresAt != nil && *body.ExpiresAt != "" {

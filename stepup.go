@@ -105,6 +105,12 @@ func (a *Authenticator) ReAuth(c *reqCtx) {
 	}
 	var body struct{ Password, Code string }
 	_ = c.ShouldBindJSON(&body)
+	// A code checked here is the code /auth/2fa/verify checks: one budget for both, so a session
+	// doesn't get a second set of guesses at it.
+	if body.Code != "" && a.acctLimiter != nil && !a.acctLimiter.Allow("2fa:"+au.Sub) {
+		c.tooMany("too many attempts — wait and try again")
+		return
+	}
 
 	// A code, when sent, is what is checked: it is the stronger proof, and the step-up records which
 	// factor made it (adding a sign-in method to a TOTP account takes the code — factorChangeAllowed).

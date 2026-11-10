@@ -14,7 +14,10 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 )
 
-const wauthnFlowCookie = "sweep_wauthn_flow"
+const (
+	wauthnFlowCookie = "sweep_wauthn_flow"
+	wauthnFlowTTL    = 5 * time.Minute // a ceremony's lifetime: its cookie's, and its spent challenge's record
+)
 
 // enableWebauthn builds the WebAuthn relying-party instance from the app origin. rpID is the
 // app host (e.g. trader.savin.nyc) — same-origin, so passkeys are enrolled and asserted in
@@ -129,7 +132,7 @@ func (a *Authenticator) setWauthnFlow(c *reqCtx, sd *webauthn.SessionData) error
 	}
 	tok, err := signJWT(a.cfg.SessionSecret, webauthnFlowClaims{
 		Session:          raw,
-		RegisteredClaims: jwt.RegisteredClaims{Audience: jwt.ClaimStrings{audWebauthn}, ExpiresAt: jwt.NewNumericDate(time.Now().Add(5 * time.Minute))},
+		RegisteredClaims: jwt.RegisteredClaims{Audience: jwt.ClaimStrings{audWebauthn}, ExpiresAt: jwt.NewNumericDate(time.Now().Add(wauthnFlowTTL))},
 	})
 	if err != nil {
 		return err
@@ -162,7 +165,31 @@ func (a *Authenticator) currentAuthUser(c *reqCtx) (*AuthUser, error) {
 	if a.sessionRevoked(sc) {
 		return nil, errors.New("session revoked")
 	}
-	return a.creds.UserBySub(sc.Subject)
+	u, err := a.creds.UserBySub(sc.Subject)
+	if err != nil {
+		return nil, err
+	}
+	// Without a SessionStore a ban or disable doesn't end the cookie: it must still not act.
+	if blocked, msg := u.loginBlocked(); blocked {
+		return nil, loginBlockedError{msg}
+	}
+	return u, nil
+}
+
+// spendChallenge records a WebAuthn ceremony's challenge as used, and reports false when it already
+// was. The ceremony's state rides in a signed cookie, which clearing only removes from the honest
+// browser: a captured finish request (its body and that cookie) replayed within the cookie's
+// lifetime would otherwise sign in again — the signature counter doesn't catch it for synced
+// passkeys, which report 0.
+func (a *Authenticator) spendChallenge(sd *webauthn.SessionData) bool {
+	if sd.Challenge == "" {
+		return false
+	}
+	h := hashToken("webauthn-challenge|" + sd.Challenge)
+	if _, err := a.creds.PeekToken(purposeWebauthnChallenge, h); err == nil {
+		return false
+	}
+	return a.creds.CreateToken(purposeWebauthnChallenge, "", "", h, time.Now().Add(wauthnFlowTTL)) == nil
 }
 
 // --- ceremonies ---
@@ -234,7 +261,7 @@ func (a *Authenticator) WebauthnRegisterFinish(c *reqCtx) {
 		return
 	}
 	sd, err := a.getWauthnFlow(c)
-	if err != nil {
+	if err != nil || !a.spendChallenge(sd) {
 		c.JSON(http.StatusBadRequest, H{"error": "enrolment expired — try again"})
 		return
 	}
@@ -291,7 +318,7 @@ func (a *Authenticator) WebauthnLoginFinish(c *reqCtx) {
 		return
 	}
 	sd, err := a.getWauthnFlow(c)
-	if err != nil {
+	if err != nil || !a.spendChallenge(sd) {
 		c.JSON(http.StatusBadRequest, H{"error": "sign-in expired — try again"})
 		return
 	}

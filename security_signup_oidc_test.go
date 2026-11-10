@@ -234,13 +234,34 @@ func TestUnlinkedProviderStaysDisconnected(t *testing.T) {
 	if w := idp.socialSignIn(t, newClient(t, a), "gitlab", gl); w.Code != http.StatusConflict {
 		t.Fatalf("the disconnected provider signing in = %d, want 409", w.Code)
 	}
-	// Reconnecting from a signed-in session works, and then it signs in again.
-	if w := idp.socialSignIn(t, c, "gitlab", gl); w.Code != http.StatusFound {
-		t.Fatalf("reconnecting while signed in = %d %s", w.Code, w.Body.String())
+	// Being signed in is not asking to reconnect: any page can send a signed-in browser to the
+	// provider's login.
+	if w := idp.socialSignIn(t, c, "gitlab", gl); w.Code != http.StatusConflict {
+		t.Fatalf("the provider's login in a signed-in browser, unasked = %d, want 409", w.Code)
 	}
+	// Reconnecting is the user's explicit, CSRF-checked request; then it signs in again.
+	reconnect := func() {
+		t.Helper()
+		if w := c.do("POST", "/auth/api/identities/gitlab/connect", nil); w.Code != http.StatusOK || decode(t, w)["next"] != "/auth/social/gitlab/login" {
+			t.Fatalf("connect = %d %s", w.Code, w.Body.String())
+		}
+		if w := idp.socialSignIn(t, c, "gitlab", gl); w.Code != http.StatusFound {
+			t.Fatalf("reconnecting = %d %s", w.Code, w.Body.String())
+		}
+	}
+	reconnect()
 	if w := idp.socialSignIn(t, newClient(t, a), "gitlab", gl); w.Code != http.StatusFound {
 		t.Fatalf("after reconnecting, gitlab sign-in = %d", w.Code)
 	}
+	// Disconnected a second time, it stays disconnected again (the record of the first disconnect
+	// used to be spent by the reconnect, and could not be made again).
+	if w := c.do("DELETE", "/auth/api/identities/gitlab", nil); w.Code != http.StatusOK {
+		t.Fatalf("second unlink = %d %s", w.Code, w.Body.String())
+	}
+	if w := idp.socialSignIn(t, newClient(t, a), "gitlab", gl); w.Code != http.StatusConflict {
+		t.Fatalf("after a second disconnect the provider signs in again: %d", w.Code)
+	}
+	reconnect()
 }
 
 // midSignupStore runs then() once, right after a read of a user by email: the moment a signup has

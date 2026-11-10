@@ -550,7 +550,7 @@ func (a *Authenticator) OrgInviteAccept(c *reqCtx) {
 		return
 	}
 	// Redeeming the emailed token proved control of the account's address.
-	_ = a.creds.SetEmailVerified(u.ID, true)
+	_ = a.claimMailbox(c, u, false) // the invite proves the mailbox, as a sign-in link does (and drops an unproven password)
 	a.orgAudit(c, u.ID, "org_invite_accepted", org.ID+":"+finalRole)
 	// Land the user IN the org they just joined.
 	_ = a.remintWithOrg(c, sc, org.ID, finalRole)

@@ -73,7 +73,7 @@ func (a *Authenticator) TwoFactorWebauthnFinish(c *reqCtx) {
 		return
 	}
 	sd, err := a.getWauthnFlow(c)
-	if err != nil {
+	if err != nil || !a.spendChallenge(sd) {
 		c.JSON(http.StatusBadRequest, H{"error": "verification expired — try again"})
 		return
 	}

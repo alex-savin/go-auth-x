@@ -109,3 +109,16 @@ func TestHMACSHA256Hex(t *testing.T) {
 		t.Fatalf("hmac = %s, want %s", got, want)
 	}
 }
+
+// The personal-accounts tenant is "consumers" whether named or given by its id: not one organization
+// that owns its users' addresses.
+func TestMicrosoftConsumerTenantIDIsMultiTenant(t *testing.T) {
+	for _, tenant := range []string{"", "common", "consumers", "9188040d-6c67-4c5b-b112-36a304b66dad", "9188040D-6C67-4C5B-B112-36A304B66DAD"} {
+		if !isMultiTenantMicrosoft(tenant) {
+			t.Errorf("tenant %q must count as multi-tenant", tenant)
+		}
+	}
+	if isMultiTenantMicrosoft("contoso.onmicrosoft.com") || isMultiTenantMicrosoft("72f988bf-86f1-41af-91ab-2d7cd011db47") {
+		t.Error("a single organization's tenant is not multi-tenant")
+	}
+}

@@ -124,7 +124,8 @@ func (a *Authenticator) TOTPConfirm(c *reqCtx) {
 		return
 	}
 	codes, hashes, gerr := newRecoveryCodes(recoveryCodeCount)
-	if gerr != nil || a.twoFactor.EnableTOTP(au.ID) != nil || a.twoFactor.ReplaceRecoveryCodes(au.ID, hashes) != nil {
+	// Codes first: failing between the two must not leave TOTP on with no recovery codes.
+	if gerr != nil || a.twoFactor.ReplaceRecoveryCodes(au.ID, hashes) != nil || a.twoFactor.EnableTOTP(au.ID) != nil {
 		c.JSON(http.StatusInternalServerError, H{"error": "could not enable 2fa"})
 		return
 	}

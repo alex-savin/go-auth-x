@@ -5,6 +5,7 @@ import (
 	"html"
 	"net/url"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -29,9 +30,23 @@ func (a *Authenticator) brandName() string {
 }
 
 // normEmail normalizes an email for storage/comparison.
-func normEmail(e string) string { return strings.ToLower(strings.TrimSpace(e)) }
+func normEmail(e string) string { return NormalizeEmail(e) }
 
-// validEmail is a light syntactic check (exactly one @, non-empty local + domain, no spaces).
+// NormalizeEmail is how an email address is keyed, here and in the reference stores: trimmed and
+// lower-cased — except that a letter outside ASCII is never turned into an ASCII one. Unicode's
+// lower-casing maps "İ" (U+0130) to "i" and the Kelvin sign "K" (U+212A) to "k": folded that way,
+// "vİctim@x.com" — a different mailbox, which a provider can verify for whoever registered it —
+// would be keyed as "victim@x.com" and linked to that account. Such letters are kept as they are, so
+// the two addresses stay two. A custom store should key emails with this function too.
+func NormalizeEmail(e string) string {
+	return strings.Map(func(r rune) rune {
+		if l := unicode.ToLower(r); r < 0x80 || l >= 0x80 {
+			return l
+		}
+		return r
+	}, strings.TrimSpace(e))
+}
+
 // maxNameLen caps a display name (in characters). A name rides in the session cookie: an unbounded
 // one — anyone can sign up with a name of their choosing for an address not theirs — would push every
 // later session cookie of the account past what browsers keep, and its owner could never sign in.
@@ -46,6 +61,7 @@ func clampName(s string, maxLen int) string {
 	return s
 }
 
+// validEmail is a light syntactic check (exactly one @, non-empty local + domain, no spaces).
 func validEmail(e string) bool {
 	if len(e) == 0 || len(e) > 254 || strings.ContainsAny(e, " \t\r\n") {
 		return false

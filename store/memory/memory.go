@@ -140,7 +140,7 @@ func New() *Store {
 	}
 }
 
-func norm(e string) string { return strings.ToLower(strings.TrimSpace(e)) }
+func norm(e string) string { return authx.NormalizeEmail(e) }
 
 func randID() string {
 	b := make([]byte, 16)

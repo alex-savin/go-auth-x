@@ -377,3 +377,20 @@ func TestReclaimEndsTheOldAccountsSessionsAndGrants(t *testing.T) {
 		t.Fatal("the reclaimed account's OAuth grant was left behind")
 	}
 }
+
+// Emails are keyed without folding a non-ASCII letter into an ASCII one (authx.NormalizeEmail):
+// "vİctim@x.com" is not "victim@x.com".
+func TestEmailKeysDontFoldUnicodeIntoASCII(t *testing.T) {
+	s := newStore(t)
+	u, _ := s.CreateLocalUser("victim@x.com", "Real")
+	if got, err := s.UserByEmail("vİctim@x.com"); err == nil && got.ID == u.ID {
+		t.Fatal("the account is found under a look-alike address")
+	}
+	other, err := s.CreateLocalUser("vİctim@x.com", "Other")
+	if err != nil || other.ID == u.ID {
+		t.Fatalf("the look-alike is its own address: %+v, %v", other, err)
+	}
+	if got, _ := s.UserByEmail("VICTIM@X.COM"); got == nil || got.ID != u.ID {
+		t.Fatal("ASCII case still folds")
+	}
+}

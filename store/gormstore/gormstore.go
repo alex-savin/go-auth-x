@@ -169,7 +169,7 @@ func New(db *gorm.DB) (*Store, error) {
 	return s, nil
 }
 
-func normalizeEmail(e string) string { return strings.ToLower(strings.TrimSpace(e)) }
+func normalizeEmail(e string) string { return authx.NormalizeEmail(e) }
 
 func newPrincipalID() string {
 	b := make([]byte, 16)

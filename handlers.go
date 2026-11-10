@@ -63,8 +63,9 @@ func (a *Authenticator) routes(mux *http.ServeMux) {
 		mux.HandleFunc("DELETE /auth/api/account", a.wrap(a.AccountDelete))                 // self-service delete
 		mux.HandleFunc("DELETE /auth/api/passkeys/{id}", a.wrap(a.PasskeyRemove))
 		mux.HandleFunc("POST /auth/api/passkeys/{id}", a.wrap(a.PasskeyRename))
-		mux.HandleFunc("DELETE /auth/api/identities/{provider}", a.wrap(a.OAuthUnlink)) // unlink social/OIDC
-		mux.HandleFunc("POST /auth/reauth", a.wrap(a.ReAuth))                           // step-up re-auth for sensitive actions
+		mux.HandleFunc("DELETE /auth/api/identities/{provider}", a.wrap(a.OAuthUnlink))        // unlink social/OIDC
+		mux.HandleFunc("POST /auth/api/identities/{provider}/connect", a.wrap(a.OAuthConnect)) // then /auth/social/{provider}/login
+		mux.HandleFunc("POST /auth/reauth", a.wrap(a.ReAuth))                                  // step-up re-auth for sensitive actions
 	}
 	if a.TwoFactorEnabled() {
 		mux.HandleFunc("POST /auth/2fa/totp/begin", a.wrap(a.TOTPBegin))     // session-gated: start enrollment
@@ -137,7 +138,7 @@ func (a *Authenticator) Callback(c *reqCtx) {
 
 	flowTok, _ := c.Cookie(flowCookie)
 	fc, err := parseFlowMulti(a.verifySecrets(), flowTok)
-	if err != nil {
+	if err != nil || fc.Provider != "" { // a social provider's flow isn't finished at the OIDC callback
 		c.JSON(http.StatusBadRequest, H{"error": "login session expired — try again"})
 		return
 	}
