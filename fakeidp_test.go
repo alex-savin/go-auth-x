@@ -6,6 +6,7 @@ import (
 	"crypto/rsa"
 	"encoding/base64"
 	"encoding/json"
+	"maps"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
@@ -56,9 +57,7 @@ func newFakeIdP(t *testing.T) *fakeIdP {
 	mux.HandleFunc("/token", func(w http.ResponseWriter, _ *http.Request) {
 		p.mu.Lock()
 		claims := jwt.MapClaims{}
-		for k, v := range p.next {
-			claims[k] = v
-		}
+		maps.Copy(claims, p.next)
 		p.mu.Unlock()
 		claims["iss"], claims["aud"] = iss, "app-client"
 		claims["iat"], claims["exp"] = time.Now().Unix(), time.Now().Add(time.Hour).Unix()
@@ -107,9 +106,7 @@ func (p *fakeIdP) oidcSignIn(t *testing.T, c *client, claims jwt.MapClaims) *htt
 	q := loc.Query()
 	p.mu.Lock()
 	p.next = jwt.MapClaims{"nonce": q.Get("nonce")}
-	for k, v := range claims {
-		p.next[k] = v
-	}
+	maps.Copy(p.next, claims)
 	p.mu.Unlock()
 	return c.do("GET", "/auth/callback?code=c&state="+url.QueryEscape(q.Get("state")), nil)
 }

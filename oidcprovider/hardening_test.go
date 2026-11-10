@@ -121,9 +121,7 @@ func TestCodeExchangedOnceAcrossReplicas(t *testing.T) {
 		if i%2 == 1 {
 			base = srv2.URL
 		}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-release
 			res, err := http.PostForm(base+"/oauth/token", form)
 			if err != nil {
@@ -138,7 +136,7 @@ func TestCodeExchangedOnceAcrossReplicas(t *testing.T) {
 				wins = append(wins, tok["access_token"].(string))
 				mu.Unlock()
 			}
-		}()
+		})
 	}
 	close(release)
 	wg.Wait()

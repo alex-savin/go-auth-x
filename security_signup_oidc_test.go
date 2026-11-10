@@ -5,6 +5,7 @@ package authx_test
 
 import (
 	"context"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -197,9 +198,7 @@ func (p *fakeIdP) socialSignIn(t *testing.T, c *client, name string, claims jwt.
 	q := loc.Query()
 	p.mu.Lock()
 	p.next = jwt.MapClaims{"nonce": q.Get("nonce")}
-	for k, v := range claims {
-		p.next[k] = v
-	}
+	maps.Copy(p.next, claims)
 	p.mu.Unlock()
 	return c.do("GET", "/auth/social/"+name+"/callback?code=c&state="+url.QueryEscape(q.Get("state")), nil)
 }

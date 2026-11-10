@@ -34,7 +34,7 @@ func TestEmailOTP_AttemptCap(t *testing.T) {
 	if err := s.CreateEmailOTP("email_otp", "a@x.com", good, time.Now().Add(time.Minute), 3); err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if _, err := s.VerifyEmailOTP("email_otp", "a@x.com", bad); err != authx.ErrTokenInvalid {
 			t.Fatalf("wrong code attempt %d must fail", i+1)
 		}

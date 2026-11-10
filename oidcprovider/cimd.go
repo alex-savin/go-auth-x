@@ -219,7 +219,7 @@ func isMetadataURL(id string) bool {
 	if u.Path == "" || u.Path == "/" {
 		return false
 	}
-	for _, seg := range strings.Split(u.Path, "/") {
+	for seg := range strings.SplitSeq(u.Path, "/") {
 		if seg == "." || seg == ".." {
 			return false
 		}
@@ -418,7 +418,7 @@ func (p *Provider) metadataToClient(rawURL string, doc *metadataDoc) (*authx.OAu
 // [metadataMinAge, metadataMaxAge] (no-store and no-cache get the minimum), else metadataDefAge.
 func cacheAge(cc string) time.Duration {
 	age := metadataDefAge
-	for _, d := range strings.Split(cc, ",") {
+	for d := range strings.SplitSeq(cc, ",") {
 		k, v, _ := strings.Cut(strings.TrimSpace(d), "=")
 		switch strings.ToLower(k) {
 		case "no-store", "no-cache":

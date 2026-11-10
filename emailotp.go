@@ -29,7 +29,7 @@ func otpHash(email, code string) []byte {
 func newNumericCode(digits int) (string, error) {
 	max := big.NewInt(1)
 	ten := big.NewInt(10)
-	for i := 0; i < digits; i++ {
+	for range digits {
 		max.Mul(max, ten)
 	}
 	n, err := rand.Int(rand.Reader, max)

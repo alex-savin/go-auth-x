@@ -232,11 +232,9 @@ func TestMetadataFetchShared(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for range 5 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			_, _ = f.get(context.Background(), srv.URL+"/c.json")
-		}()
+		})
 	}
 	for hits.Load() == 0 {
 		time.Sleep(5 * time.Millisecond)

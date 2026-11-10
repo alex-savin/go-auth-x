@@ -80,7 +80,7 @@ func (a *Authenticator) userHasTOTP(userID string) (bool, error) {
 // newRecoveryCodes returns n single-use codes (plaintext, shown to the user ONCE) plus their sha256
 // hashes for storage.
 func newRecoveryCodes(n int) (codes []string, hashes [][]byte, err error) {
-	for i := 0; i < n; i++ {
+	for range n {
 		buf := make([]byte, 10) // 20 hex chars = 80 bits — not brute-forceable even under lax throttling
 		if _, err = rand.Read(buf); err != nil {
 			return nil, nil, err
@@ -121,12 +121,10 @@ func (a *Authenticator) mintPending(id Identity, dirGroups bool, role string, re
 	now := time.Now()
 	return signJWT(a.cfg.SessionSecret, pendingClaims{
 		Email: id.Email, Name: id.Name, Groups: id.Groups, DirGroups: dirGroups, Role: role, Remember: remember, FirstFactorCred: firstFactorCred,
-		RegisteredClaims: jwt.RegisteredClaims{
-			Subject:   id.Subject,
-			Audience:  jwt.ClaimStrings{audPending},
-			IssuedAt:  jwt.NewNumericDate(now),
-			ExpiresAt: jwt.NewNumericDate(now.Add(twoFactorPendingTTL)),
-		},
+		Subject:   id.Subject,
+		Audience:  jwt.ClaimStrings{audPending},
+		IssuedAt:  jwt.NewNumericDate(now),
+		ExpiresAt: jwt.NewNumericDate(now.Add(twoFactorPendingTTL)),
 	})
 }
 

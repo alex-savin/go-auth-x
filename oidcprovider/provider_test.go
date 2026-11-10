@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
 	"net/http/cookiejar"
 	"net/http/httptest"
@@ -161,9 +162,7 @@ func (h *harness) authorize(clientID string, extra url.Values) string {
 	_, ch := pkce()
 	q := url.Values{"response_type": {"code"}, "client_id": {clientID}, "redirect_uri": {redirect}, "state": {"st8"},
 		"code_challenge": {ch}, "code_challenge_method": {"S256"}, "resource": {h.srv.URL + "/mcp"}}
-	for k, v := range extra {
-		q[k] = v
-	}
+	maps.Copy(q, extra)
 	res := h.get(h.web, "/oauth/authorize?"+q.Encode())
 	loc := res.Header.Get("Location")
 	if res.StatusCode != 302 || !strings.Contains(loc, "/oauth/login?id=") {

@@ -131,7 +131,7 @@ func TestOwnerPasswordLoginHasAThreshold(t *testing.T) {
 	a, s, _ := newTestAuth(t) // has a mailer: the owner can still sign in by link
 	seedUser(t, s, "owner@example.com", "owner-password-1", true)
 	throttled := 0
-	for i := 0; i < 40; i++ {
+	for i := range 40 {
 		c := newClient(t, a)
 		c.remote = "203.0.113." + string(rune('0'+i%10)) + string(rune('0'+i/10)) // many addresses: the per-IP limit doesn't apply
 		if c.loginCode("owner@example.com", "wrong-password-guess") == http.StatusTooManyRequests {
@@ -153,7 +153,7 @@ func TestOwnerPasswordLoginHasAThreshold(t *testing.T) {
 	bare.SetAuthorizer(store.Authorizer())
 	bare.SetLocalEnabled(true)
 	seedUser(t, store, "owner@example.com", "owner-password-1", true)
-	for i := 0; i < 40; i++ {
+	for i := range 40 {
 		c := newClient(t, bare)
 		c.remote = "203.0.113." + string(rune('0'+i%10)) + string(rune('0'+i/10))
 		if code := c.loginCode("owner@example.com", "wrong-password-guess"); code == http.StatusTooManyRequests {

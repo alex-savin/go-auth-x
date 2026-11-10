@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -103,8 +104,8 @@ func (a *Authenticator) clientIP(r *http.Request) string {
 	for _, v := range r.Header.Values("X-Forwarded-For") {
 		parts = append(parts, strings.Split(v, ",")...)
 	}
-	for i := len(parts) - 1; i >= 0; i-- {
-		ip, ok := forwardedIP(parts[i])
+	for _, part := range slices.Backward(parts) {
+		ip, ok := forwardedIP(part)
 		if !ok {
 			// Not an address (garbage, or a format we don't know): the hops beyond it can't be
 			// trusted, and a string the client chose must not become its rate-limit key.
@@ -160,10 +161,8 @@ func trustedProxy(ip string) bool {
 		return false
 	}
 	trustedProxyOnce.Do(loadTrustedProxies)
-	for _, exact := range trustedProxyExact {
-		if parsed.Equal(exact) {
-			return true
-		}
+	if slices.ContainsFunc(trustedProxyExact, parsed.Equal) {
+		return true
 	}
 	for _, n := range trustedProxyNets {
 		if n.Contains(parsed) {

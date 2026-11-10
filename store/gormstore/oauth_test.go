@@ -415,7 +415,7 @@ func testOAuthStore(t *testing.T, newStore func(t *testing.T) authx.OAuthStore) 
 		errs := make([]error, n)
 		var wg sync.WaitGroup
 		start := make(chan struct{})
-		for i := 0; i < n; i++ {
+		for i := range n {
 			wg.Add(1)
 			go func(i int) {
 				defer wg.Done()

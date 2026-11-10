@@ -71,10 +71,9 @@ func signupHashID(hash string) string {
 
 func (a *Authenticator) setSignupBinding(c *reqCtx, userID, hash string) {
 	now := time.Now()
-	tok, err := signJWT(a.cfg.SessionSecret, signupClaims{PasswordHash: signupHashID(hash), RegisteredClaims: jwt.RegisteredClaims{
+	tok, err := signJWT(a.cfg.SessionSecret, signupClaims{PasswordHash: signupHashID(hash),
 		Subject: userID, Audience: jwt.ClaimStrings{audSignup},
-		IssuedAt: jwt.NewNumericDate(now), ExpiresAt: jwt.NewNumericDate(now.Add(ttlVerifyEmail)),
-	}})
+		IssuedAt: jwt.NewNumericDate(now), ExpiresAt: jwt.NewNumericDate(now.Add(ttlVerifyEmail))})
 	if err == nil {
 		a.setCookie(c, signupCookie, tok, int(ttlVerifyEmail/time.Second))
 	}

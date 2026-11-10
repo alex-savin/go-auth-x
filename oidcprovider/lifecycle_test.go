@@ -3,6 +3,7 @@ package oidcprovider_test
 import (
 	"context"
 	"encoding/json"
+	"maps"
 	"net/url"
 	"strings"
 	"testing"
@@ -20,9 +21,7 @@ func (h *harness) loginStep(clientID string, extra url.Values) string {
 	_, ch := pkce()
 	q := url.Values{"response_type": {"code"}, "client_id": {clientID}, "redirect_uri": {redirect}, "state": {"st8"},
 		"code_challenge": {ch}, "code_challenge_method": {"S256"}}
-	for k, v := range extra {
-		q[k] = v
-	}
+	maps.Copy(q, extra)
 	res := h.get(h.web, "/oauth/authorize?"+q.Encode())
 	if loc := res.Header.Get("Location"); res.StatusCode != 302 || !strings.Contains(loc, "/oauth/login?id=") {
 		h.t.Fatalf("authorize = %d %q", res.StatusCode, loc)

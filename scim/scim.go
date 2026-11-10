@@ -296,10 +296,7 @@ func paginate[T any](all []T, startIndex, count int) ([]T, int) {
 	if startIndex < 1 {
 		startIndex = 1
 	}
-	lo := startIndex - 1
-	if lo > len(all) {
-		lo = len(all)
-	}
+	lo := min(startIndex-1, len(all))
 	rest := all[lo:]
 	if count < 0 || count > len(rest) {
 		return rest, startIndex

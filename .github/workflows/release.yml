@@ -29,12 +29,21 @@ jobs:
         with:
           go-version-file: go.mod
 
-      # What ci.yml and security.yml hold a change to, a tag is held to as well.
-      - name: Vet, test and check for known vulnerabilities
+      # What ci.yml and security.yml hold a change to, a tag is held to as well: vet and the tests on the
+      # oldest Go go.mod allows, govulncheck (below) on the current release, as security.yml runs it.
+      - name: Vet and test
         run: |
           go vet ./...
           go test -race ./...
-          go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
+
+      # govulncheck reports the standard library of the Go it runs on, and the go.mod minimum (an exact
+      # x.y.0) carries every advisory fixed in a later patch release — it would refuse every tag.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+        with:
+          go-version: stable
+
+      - name: Known vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
       - name: Release notes from CHANGELOG.md
         run: |

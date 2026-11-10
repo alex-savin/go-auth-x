@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"net/http"
 	"net/url"
 	"slices"
@@ -329,9 +330,7 @@ func (p *Provider) errorURL(req *authx.OAuthAuthRequest, code, desc string) (str
 		u.Fragment = v.Encode()
 	} else {
 		q := u.Query()
-		for k, vs := range v {
-			q[k] = vs
-		}
+		maps.Copy(q, v)
 		u.RawQuery = q.Encode()
 	}
 	return u.String(), nil
