@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **Go 1.27 is now the minimum** (`go 1.27.0` in `go.mod`, was 1.26.0). Projects still on Go 1.26
+  upgrade Go to take this version; with `GOTOOLCHAIN=auto` the go command fetches 1.27 itself. CI
+  tests on 1.27.x and the current stable release.
+- Every dependency is on its latest version, among them `zitadel/oidc` v3.52.0,
+  `golang.org/x/oauth2` v0.38.0, `go-webauthn`'s `fxamacker/cbor` v2.10.0, OpenTelemetry v1.47.0 and
+  `modernc.org/sqlite` v1.62.0.
+- The code uses Go 1.27's idioms (`go fix`): range-over-int and `strings.SplitSeq` loops,
+  `slices.Contains` / `slices.Backward`, `sync.WaitGroup.Go`, and composite literals that set
+  promoted fields. No behavior changes; the JSON of `AuthUser` and `Group` is unchanged (`omitempty`
+  was dropped from `UpdatedAt`, on which it never had an effect).
+
+### Fixed
+
+- CI: the release workflow runs govulncheck on the current Go, not the `go.mod` minimum, which
+  carries every standard-library advisory fixed in a later patch release (it refused the `v0.14.0`
+  tag, whose GitHub Release was then published by hand).
+
 ## [0.14.0] — 2026-11-10
 
 A security release. A second review, of v0.13.0, found ways to get another user's OAuth tokens, to
