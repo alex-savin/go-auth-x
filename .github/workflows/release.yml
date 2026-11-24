@@ -25,7 +25,7 @@ jobs:
         with:
           fetch-depth: 0 # the annotated tag object, for the release title
 
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
         with:
           go-version-file: go.mod
 
@@ -38,7 +38,7 @@ jobs:
 
       # govulncheck reports the standard library of the Go it runs on, and the go.mod minimum (an exact
       # x.y.0) carries every advisory fixed in a later patch release — it would refuse every tag.
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
+      - uses: actions/setup-go@d8cbb8045d7f43706b9177cceb36c1f91a6644d5 # v7
         with:
           go-version: stable
 
